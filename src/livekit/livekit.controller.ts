@@ -7,6 +7,15 @@ import { JoinRoomDto } from './dto/join-room.dto';
 export class LivekitController {
   constructor(private readonly livekitService: LivekitService) {}
 
+  @Get('health')
+  health() {
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      service: 'livekit-backend',
+    };
+  }
+
   @Post('create')
   async createRoom(@Body() createRoomDto: CreateRoomDto) {
     return this.livekitService.createRoom(createRoomDto);

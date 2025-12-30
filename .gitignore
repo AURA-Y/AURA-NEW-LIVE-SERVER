@@ -38,3 +38,8 @@ coverage/
 # Misc
 *.tsbuildinfo
 .cache/
+
+# AWS
+aws/config.sh
+aws/images.env
+aws/iam-roles.env
