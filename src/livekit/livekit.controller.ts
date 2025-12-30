@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param } from '@nestjs/common';
 import { LivekitService } from './livekit.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
@@ -23,11 +23,16 @@ export class LivekitController {
 
   @Post('join')
   async joinRoom(@Body() joinRoomDto: JoinRoomDto) {
-    return this.livekitService.generateToken(joinRoomDto);
+    return this.livekitService.joinRoom(joinRoomDto);
   }
 
   @Get('list')
   async listRooms() {
     return this.livekitService.listRooms();
+  }
+
+  @Get(':roomId')
+  async getRoom(@Param('roomId') roomId: string) {
+    return this.livekitService.getRoom(roomId);
   }
 }

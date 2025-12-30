@@ -24,40 +24,115 @@ export class LivekitService {
   }
 
   async createRoom(createRoomDto: CreateRoomDto) {
-    const { roomName } = createRoomDto;
+    const {
+      userName,
+      roomTitle = `Room-${Date.now()}`,
+      description = '',
+      maxParticipants = 20
+    } = createRoomDto;
 
     try {
+      // LiveKit에 방 생성
       const room = await this.roomService.createRoom({
-        name: roomName,
-        emptyTimeout: 300, // 5분 동안 비어있으면 자동 삭제
-        maxParticipants: 20,
+        name: roomTitle,
+        emptyTimeout: 300,
+        maxParticipants: maxParticipants,
       });
 
+      // 생성자를 위한 토큰 자동 발급
+      const token = await this.generateTokenForUser(room.name, userName);
+      const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+
       return {
-        success: true,
-        room: {
-          name: room.name,
-          sid: room.sid,
-        },
+        roomId: room.sid,
+        roomUrl: `${wsUrl}/${room.name}`,
+        roomTitle: room.name,
+        description: description,
+        maxParticipants: room.maxParticipants,
+        userName: userName,
+        token: token,
+        livekitUrl: wsUrl,
       };
     } catch (error) {
-      return {
-        success: false,
-        error: error.message,
-      };
+      throw new Error(`Failed to create room: ${error.message}`);
     }
   }
 
-  async generateToken(joinRoomDto: JoinRoomDto) {
-    const { roomName, participantName } = joinRoomDto;
+  async joinRoom(joinRoomDto: JoinRoomDto) {
+    const { roomId, userName } = joinRoomDto;
 
-    // JWT 토큰 생성 (유효기간 24시간)
+    try {
+      // roomId(sid)로 방 정보 조회
+      const rooms = await this.roomService.listRooms([roomId]);
+
+      if (!rooms || rooms.length === 0) {
+        throw new Error('Room not found');
+      }
+
+      const room = rooms[0];
+      const token = await this.generateTokenForUser(room.name, userName);
+      const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+
+      return {
+        token: token,
+        url: wsUrl,
+      };
+    } catch (error) {
+      throw new Error(`Failed to join room: ${error.message}`);
+    }
+  }
+
+  async listRooms() {
+    try {
+      const rooms = await this.roomService.listRooms();
+
+      const formattedRooms = rooms.map(room => ({
+        roomId: room.sid,
+        roomTitle: room.name,
+        description: '',
+        maxParticipants: room.maxParticipants,
+        createdBy: '',
+        createdAt: new Date(Number(room.creationTime) * 1000).toISOString(),
+      }));
+
+      return {
+        rooms: formattedRooms,
+        total: formattedRooms.length,
+      };
+    } catch (error) {
+      throw new Error(`Failed to list rooms: ${error.message}`);
+    }
+  }
+
+  async getRoom(roomId: string) {
+    try {
+      const rooms = await this.roomService.listRooms([roomId]);
+
+      if (!rooms || rooms.length === 0) {
+        throw new Error('Room not found');
+      }
+
+      const room = rooms[0];
+
+      return {
+        roomId: room.sid,
+        roomTitle: room.name,
+        description: '',
+        maxParticipants: room.maxParticipants,
+        createdBy: '',
+        createdAt: new Date(Number(room.creationTime) * 1000).toISOString(),
+      };
+    } catch (error) {
+      throw new Error(`Failed to get room: ${error.message}`);
+    }
+  }
+
+  private async generateTokenForUser(roomName: string, userName: string): Promise<string> {
     const at = new AccessToken(this.apiKey, this.apiSecret, {
-      identity: participantName,
-      ttl: '24h', // 토큰 유효기간
+      identity: userName,
+      ttl: '24h',
     });
 
-    // Room 권한 설정
     at.addGrant({
       room: roomName,
       roomJoin: true,
@@ -66,33 +141,6 @@ export class LivekitService {
       canPublishData: true,
     });
 
-    // JWT 토큰 생성
-    const token = await at.toJwt();
-
-    console.log(`Generated JWT token for ${participantName} in room ${roomName}`);
-    console.log(`Using API Key: ${this.apiKey}`);
-
-    // HTTP URL을 WebSocket URL로 변환 (클라이언트용)
-    const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
-
-    return {
-      token,
-      url: wsUrl,
-    };
-  }
-
-  async listRooms() {
-    try {
-      const rooms = await this.roomService.listRooms();
-      return {
-        success: true,
-        rooms,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error.message,
-      };
-    }
+    return await at.toJwt();
   }
 }

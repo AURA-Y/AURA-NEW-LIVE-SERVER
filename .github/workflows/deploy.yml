@@ -9,7 +9,7 @@ on:
 
 env:
   AWS_REGION: ap-northeast-2
-  ECR_REPOSITORY: AURA_LIVEKIT/backend
+  ECR_REPOSITORY: aura-livekit/backend
   ECS_CLUSTER: AURA_LIVEKIT-cluster
   ECS_SERVICE: AURA_LIVEKIT-backend
   ECS_TASK_DEFINITION: aura-livekit-backend

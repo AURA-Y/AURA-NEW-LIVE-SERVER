@@ -1,3 +1,6 @@
 export class CreateRoomDto {
-  roomName: string;
+  userName: string;
+  roomTitle?: string;
+  description?: string;
+  maxParticipants?: number;
 }
