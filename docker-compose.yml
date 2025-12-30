@@ -1,0 +1,33 @@
+services:
+  # LiveKit Server
+  livekit:
+    image: livekit/livekit-server:latest
+    platform: linux/arm64
+    command: --dev --bind 0.0.0.0
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    environment:
+      - LIVEKIT_KEYS=devkey:secret
+    networks:
+      - livekit-network
+
+  # LiveKit Backend API
+  livekit-backend:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret
+      - PORT=3001
+    depends_on:
+      - livekit
+    networks:
+      - livekit-network
+
+networks:
+  livekit-network:
+    driver: bridge
