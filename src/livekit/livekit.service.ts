@@ -72,9 +72,12 @@ export class LivekitService {
     console.log(`Generated JWT token for ${participantName} in room ${roomName}`);
     console.log(`Using API Key: ${this.apiKey}`);
 
+    // HTTP URL을 WebSocket URL로 변환 (클라이언트용)
+    const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+
     return {
       token,
-      url: this.livekitUrl, // ws://localhost:7880
+      url: wsUrl,
     };
   }
 
