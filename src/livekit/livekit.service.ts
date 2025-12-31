@@ -62,14 +62,13 @@ export class LivekitService {
     const { roomId, userName } = joinRoomDto;
 
     try {
-      // roomId(sid)로 방 정보 조회
-      const rooms = await this.roomService.listRooms([roomId]);
+      // 모든 방을 조회한 후 sid로 필터링
+      const allRooms = await this.roomService.listRooms();
+      const room = allRooms.find(r => r.sid === roomId);
 
-      if (!rooms || rooms.length === 0) {
+      if (!room) {
         throw new Error('Room not found');
       }
-
-      const room = rooms[0];
       const token = await this.generateTokenForUser(room.name, userName);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
 
@@ -106,13 +105,13 @@ export class LivekitService {
 
   async getRoom(roomId: string) {
     try {
-      const rooms = await this.roomService.listRooms([roomId]);
+      // 모든 방을 조회한 후 sid로 필터링
+      const allRooms = await this.roomService.listRooms();
+      const room = allRooms.find(r => r.sid === roomId);
 
-      if (!rooms || rooms.length === 0) {
+      if (!room) {
         throw new Error('Room not found');
       }
-
-      const room = rooms[0];
 
       return {
         roomId: room.sid,
