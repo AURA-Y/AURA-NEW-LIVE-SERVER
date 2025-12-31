@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk';
+import {
+  AccessToken,
+  AgentDispatchClient,
+  RoomServiceClient,
+  RoomAgentDispatch,
+} from 'livekit-server-sdk';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 
@@ -47,6 +52,15 @@ export class LivekitService {
     }
   }
 
+  private buildRoomAgentDispatch() {
+    if (!this.agentName) return [];
+    return [
+      new RoomAgentDispatch({
+        agentName: this.agentName,
+      }),
+    ];
+  }
+
   async createRoom(createRoomDto: CreateRoomDto) {
     const {
       userName,
@@ -61,6 +75,7 @@ export class LivekitService {
         name: roomTitle,
         emptyTimeout: 300,
         maxParticipants: maxParticipants,
+        agents: this.buildRoomAgentDispatch(),
       });
 
       await this.ensureAgentDispatch(room.name);
