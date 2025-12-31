@@ -1,26 +1,50 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 
 @Injectable()
 export class LivekitService {
+  private readonly logger = new Logger(LivekitService.name);
   private roomService: RoomServiceClient;
+  private agentDispatch: AgentDispatchClient;
   private livekitUrl: string;
   private apiKey: string;
   private apiSecret: string;
+  private agentName: string;
 
   constructor(private configService: ConfigService) {
     this.livekitUrl = this.configService.get<string>('LIVEKIT_URL');
     this.apiKey = this.configService.get<string>('LIVEKIT_API_KEY');
     this.apiSecret = this.configService.get<string>('LIVEKIT_API_SECRET');
+    this.agentName = this.configService.get<string>('LIVEKIT_AGENT_NAME') || 'aura-bot';
 
     this.roomService = new RoomServiceClient(
       this.livekitUrl,
       this.apiKey,
       this.apiSecret,
     );
+    this.agentDispatch = new AgentDispatchClient(
+      this.livekitUrl,
+      this.apiKey,
+      this.apiSecret,
+    );
+  }
+
+  private async ensureAgentDispatch(roomName: string) {
+    if (!this.agentName) return;
+    try {
+      const dispatches = await this.agentDispatch.listDispatch(roomName);
+      const exists = dispatches.some(
+        (dispatch) => dispatch.agentName === this.agentName,
+      );
+      if (exists) return;
+      await this.agentDispatch.createDispatch(roomName, this.agentName);
+      this.logger.log(`Agent dispatch created: ${roomName} (${this.agentName})`);
+    } catch (error) {
+      this.logger.warn(`Failed to ensure agent dispatch: ${error.message}`);
+    }
   }
 
   async createRoom(createRoomDto: CreateRoomDto) {
@@ -38,6 +62,8 @@ export class LivekitService {
         emptyTimeout: 300,
         maxParticipants: maxParticipants,
       });
+
+      await this.ensureAgentDispatch(room.name);
 
       // 생성자를 위한 토큰 자동 발급
       const token = await this.generateTokenForUser(room.name, userName);
@@ -64,11 +90,12 @@ export class LivekitService {
     try {
       // 모든 방을 조회한 후 sid로 필터링
       const allRooms = await this.roomService.listRooms();
-      const room = allRooms.find(r => r.sid === roomId);
+      const room = allRooms.find((r) => r.sid === roomId || r.name === roomId);
 
       if (!room) {
         throw new Error('Room not found');
       }
+      await this.ensureAgentDispatch(room.name);
       const token = await this.generateTokenForUser(room.name, userName);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
 
