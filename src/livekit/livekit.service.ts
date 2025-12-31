@@ -158,14 +158,14 @@ export class LivekitService {
     });
 
     if (isBot) {
-      // 봇: 구독만 가능, 숨김 처리
+      // 봇: 발행 가능, 참여자로 표시
       at.addGrant({
         room: roomName,
         roomJoin: true,
-        canPublish: false,
+        canPublish: true,
         canSubscribe: true,
-        canPublishData: false,
-        hidden: true,
+        canPublishData: true,
+        hidden: false,
       });
     } else {
       at.addGrant({

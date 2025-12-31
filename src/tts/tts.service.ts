@@ -24,13 +24,43 @@ export class TtsService {
         });
     }
 
+    // LiveKit용 PCM 출력 (16kHz, 16-bit signed)
+    async synthesizePcm(text: string): Promise<Buffer> {
+        this.logger.log(`[TTS PCM 시작] 텍스트 길이: ${text.length}자`);
+
+        const command = new SynthesizeSpeechCommand({
+            Text: text,
+            OutputFormat: OutputFormat.PCM,
+            VoiceId: VoiceId.Seoyeon,
+            Engine: Engine.NEURAL,
+            SampleRate: "16000",
+        });
+
+        try {
+            const response = await this.pollyClient.send(command);
+
+            if (!response.AudioStream) {
+                throw new Error('AudioStream not returned');
+            }
+
+            const audioBuffer = await this.streamToBuffer(response.AudioStream as Readable);
+            this.logger.log(`[TTS PCM 완료] 오디오 크기: ${audioBuffer.length} bytes`);
+
+            return audioBuffer;
+        } catch (error) {
+            this.logger.error(`[TTS PCM 에러] ${error.message}`);
+            throw error;
+        }
+    }
+
+    // 기존 MP3 출력 (HTTP 응답용)
     async synthesize(text: string): Promise<Buffer> {
         this.logger.log(`[TTS 시작] 텍스트 길이: ${text.length}자`);
 
         const command = new SynthesizeSpeechCommand({
             Text: text,
             OutputFormat: OutputFormat.MP3,
-            VoiceId: VoiceId.Seoyeon, // 한국어 여성 음성
+            VoiceId: VoiceId.Seoyeon,
             Engine: Engine.NEURAL,
         });
 
