@@ -8,11 +8,14 @@ import { JoinRoomDto } from './dto/join-room.dto';
 export class LivekitService {
   private roomService: RoomServiceClient;
   private livekitUrl: string;
+  private livekitPublicUrl: string;
   private apiKey: string;
   private apiSecret: string;
 
   constructor(private configService: ConfigService) {
     this.livekitUrl = this.configService.get<string>('LIVEKIT_URL');
+    this.livekitPublicUrl =
+      this.configService.get<string>('LIVEKIT_PUBLIC_URL') || this.livekitUrl;
     this.apiKey = this.configService.get<string>('LIVEKIT_API_KEY');
     this.apiSecret = this.configService.get<string>('LIVEKIT_API_SECRET');
 
@@ -21,6 +24,12 @@ export class LivekitService {
       this.apiKey,
       this.apiSecret,
     );
+  }
+
+  // LiveKit identity 충돌 방지를 위해 랜덤 suffix를 붙여 고유 identity 생성
+  private makeUniqueIdentity(userName: string): string {
+    const suffix = Math.random().toString(36).substring(2, 7);
+    return `${userName}-${suffix}`;
   }
 
   async createRoom(createRoomDto: CreateRoomDto) {
@@ -40,8 +49,9 @@ export class LivekitService {
       });
 
       // 생성자를 위한 토큰 자동 발급
-      const token = await this.generateTokenForUser(room.name, userName);
-      const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+      const identity = this.makeUniqueIdentity(userName);
+      const token = await this.generateTokenForUser(room.name, identity);
+      const wsUrl = this.toWsUrl(this.livekitPublicUrl);
 
       return {
         roomId: room.sid,
@@ -49,7 +59,7 @@ export class LivekitService {
         roomTitle: room.name,
         description: description,
         maxParticipants: room.maxParticipants,
-        userName: userName,
+        userName: identity,
         token: token,
         livekitUrl: wsUrl,
       };
@@ -69,8 +79,9 @@ export class LivekitService {
       if (!room) {
         throw new Error('Room not found');
       }
-      const token = await this.generateTokenForUser(room.name, userName);
-      const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+      const identity = this.makeUniqueIdentity(userName);
+      const token = await this.generateTokenForUser(room.name, identity);
+      const wsUrl = this.toWsUrl(this.livekitPublicUrl);
 
       return {
         token: token,
@@ -124,6 +135,13 @@ export class LivekitService {
     } catch (error) {
       throw new Error(`Failed to get room: ${error.message}`);
     }
+  }
+
+  private toWsUrl(url: string) {
+    if (url.startsWith('ws://') || url.startsWith('wss://')) return url;
+    if (url.startsWith('https://')) return url.replace('https://', 'wss://');
+    if (url.startsWith('http://')) return url.replace('http://', 'ws://');
+    return url;
   }
 
   private async generateTokenForUser(roomName: string, userName: string): Promise<string> {

@@ -9,7 +9,8 @@ services:
       - "7881:7881"
       - "7882:7882/udp"
     environment:
-      - LIVEKIT_KEYS=devkey:secret
+      # NOTE: must include a space after the colon
+      - "LIVEKIT_KEYS=jungle_livekit: R1AFmqiledAt0KbEpnK6OkZyEfgJ26FCPKrCNdg2"
     networks:
       - livekit-network
 
@@ -19,9 +20,10 @@ services:
     ports:
       - "3001:3001"
     environment:
-      - LIVEKIT_URL=ws://livekit:7880
-      - LIVEKIT_API_KEY=devkey
-      - LIVEKIT_API_SECRET=secret
+      - LIVEKIT_URL=http://livekit:7880
+      - LIVEKIT_PUBLIC_URL=http://localhost:7880
+      - LIVEKIT_API_KEY=jungle_livekit
+      - LIVEKIT_API_SECRET=R1AFmqiledAt0KbEpnK6OkZyEfgJ26FCPKrCNdg2
       - PORT=3001
     depends_on:
       - livekit
