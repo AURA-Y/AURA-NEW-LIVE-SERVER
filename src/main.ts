@@ -9,7 +9,7 @@ async function bootstrap() {
 
   // CORS 설정
   app.enableCors({
-    origin: ['http://localhost:3000', 'https://d1vcpqpqiyist8.cloudfront.net', 'http://aura-fe-alb-367344373.ap-northeast-2.elb.amazonaws.com'],
+    origin: ['http://localhost:3000', 'https://aura.ai.kr'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
