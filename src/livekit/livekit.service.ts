@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import {
+  AccessToken,
+  AgentDispatchClient,
+  RoomServiceClient,
+  RoomAgentDispatch,
+} from 'livekit-server-sdk';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 
@@ -8,20 +13,52 @@ import { JoinRoomDto } from './dto/join-room.dto';
 export class LivekitService {
   private readonly logger = new Logger(LivekitService.name);
   private roomService: RoomServiceClient;
+  private agentDispatch: AgentDispatchClient;
   private livekitUrl: string;
   private apiKey: string;
   private apiSecret: string;
+  private agentName: string;
 
   constructor(private configService: ConfigService) {
     this.livekitUrl = this.configService.get<string>('LIVEKIT_URL');
     this.apiKey = this.configService.get<string>('LIVEKIT_API_KEY');
     this.apiSecret = this.configService.get<string>('LIVEKIT_API_SECRET');
+    this.agentName = this.configService.get<string>('LIVEKIT_AGENT_NAME') || 'aura-bot';
 
     this.roomService = new RoomServiceClient(
       this.livekitUrl,
       this.apiKey,
       this.apiSecret,
     );
+    this.agentDispatch = new AgentDispatchClient(
+      this.livekitUrl,
+      this.apiKey,
+      this.apiSecret,
+    );
+  }
+
+  private async ensureAgentDispatch(roomName: string) {
+    if (!this.agentName) return;
+    try {
+      const dispatches = await this.agentDispatch.listDispatch(roomName);
+      const exists = dispatches.some(
+        (dispatch) => dispatch.agentName === this.agentName,
+      );
+      if (exists) return;
+      await this.agentDispatch.createDispatch(roomName, this.agentName);
+      this.logger.log(`Agent dispatch created: ${roomName} (${this.agentName})`);
+    } catch (error) {
+      this.logger.warn(`Failed to ensure agent dispatch: ${error.message}`);
+    }
+  }
+
+  private buildRoomAgentDispatch() {
+    if (!this.agentName) return [];
+    return [
+      new RoomAgentDispatch({
+        agentName: this.agentName,
+      }),
+    ];
   }
 
   async createRoom(createRoomDto: CreateRoomDto) {
@@ -38,7 +75,10 @@ export class LivekitService {
         name: roomTitle,
         emptyTimeout: 300,
         maxParticipants: maxParticipants,
+        agents: this.buildRoomAgentDispatch(),
       });
+
+      await this.ensureAgentDispatch(room.name);
 
       // 생성자를 위한 토큰 자동 발급
       const token = await this.generateTokenForUser(room.name, userName);
@@ -88,10 +128,13 @@ export class LivekitService {
         }
       }
 
+
       if (!finalRoomName) {
         throw new Error('Either roomId or roomName must be provided');
       }
-
+      
+    
+      await this.ensureAgentDispatch(finalRoomName);
       this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${finalRoomName}`);
       const token = await this.generateTokenForUser(finalRoomName, userName, isBot);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
