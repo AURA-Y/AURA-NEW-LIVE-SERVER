@@ -20,6 +20,11 @@ FROM oven/bun:1
 
 WORKDIR /app
 
+# Install wget for ECS health checks
+RUN apt-get update \
+  && apt-get install -y wget \
+  && rm -rf /var/lib/apt/lists/*
+
 # Copy package files
 COPY package.json bun.lockb* ./
 
