@@ -1,5 +1,5 @@
 # Build stage
-FROM oven/bun:1-alpine AS builder
+FROM oven/bun:1 AS builder
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ COPY . .
 RUN bun run build
 
 # Production stage
-FROM oven/bun:1-alpine
+FROM oven/bun:1
 
 WORKDIR /app
 
