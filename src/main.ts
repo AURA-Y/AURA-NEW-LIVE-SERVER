@@ -9,7 +9,7 @@ async function bootstrap() {
 
   // CORS 설정
   app.enableCors({
-    origin: ['http://localhost:3000'],
+    origin: ['http://localhost:3000', 'http://aura-fe-alb-367344373.ap-northeast-2.elb.amazonaws.com'],
     credentials: true,
   });
 
