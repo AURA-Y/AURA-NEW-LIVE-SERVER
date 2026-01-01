@@ -99,19 +99,44 @@ export class LivekitService {
     }
   }
 
-  async joinRoom(joinRoomDto: JoinRoomDto) {
-    const { roomId, userName } = joinRoomDto;
+  async joinRoom(joinRoomDto: JoinRoomDto, isBot: boolean = false) {
+    const { roomId, roomName, userName } = joinRoomDto;
+    this.logger.log(`Join request: roomId=${roomId}, roomName=${roomName}, user=${userName}`);
 
     try {
-      // 모든 방을 조회한 후 sid로 필터링
-      const allRooms = await this.roomService.listRooms();
-      const room = allRooms.find((r) => r.sid === roomId || r.name === roomId);
+      let finalRoomName = roomName;
 
-      if (!room) {
-        throw new Error('Room not found');
+      // roomId(SID)가 제공된 경우
+      if (roomId) {
+        const allRooms = await this.roomService.listRooms();
+        // 1. SID로 먼저 찾아봄
+        let room = allRooms.find(r => r.sid === roomId);
+
+        // 2. 못 찾았다면 이름으로도 찾아봄 (프론트에서 이름을 ID로 보낼 수 있음)
+        if (!room) {
+          room = allRooms.find(r => r.name === roomId);
+        }
+
+        if (!room) {
+          // 그래도 없는데 roomName도 없다면 에러
+          if (!finalRoomName) {
+            this.logger.error(`Room not found for ID: ${roomId}`);
+            throw new Error('Room not found');
+          }
+        } else {
+          finalRoomName = room.name;
+        }
       }
-      await this.ensureAgentDispatch(room.name);
-      const token = await this.generateTokenForUser(room.name, userName);
+
+
+      if (!finalRoomName) {
+        throw new Error('Either roomId or roomName must be provided');
+      }
+      
+    
+      await this.ensureAgentDispatch(finalRoomName);
+      this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${finalRoomName}`);
+      const token = await this.generateTokenForUser(finalRoomName, userName, isBot);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
 
       return {
@@ -119,6 +144,7 @@ export class LivekitService {
         url: wsUrl,
       };
     } catch (error) {
+      this.logger.error(`Join failed: ${error.message}`);
       throw new Error(`Failed to join room: ${error.message}`);
     }
   }
@@ -168,19 +194,31 @@ export class LivekitService {
     }
   }
 
-  private async generateTokenForUser(roomName: string, userName: string): Promise<string> {
+  private async generateTokenForUser(roomName: string, userName: string, isBot: boolean = false): Promise<string> {
     const at = new AccessToken(this.apiKey, this.apiSecret, {
       identity: userName,
       ttl: '24h',
     });
 
-    at.addGrant({
-      room: roomName,
-      roomJoin: true,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishData: true,
-    });
+    if (isBot) {
+      // 봇: 발행 가능, 참여자로 표시
+      at.addGrant({
+        room: roomName,
+        roomJoin: true,
+        canPublish: true,
+        canSubscribe: true,
+        canPublishData: true,
+        hidden: false,
+      });
+    } else {
+      at.addGrant({
+        room: roomName,
+        roomJoin: true,
+        canPublish: true,
+        canSubscribe: true,
+        canPublishData: true,
+      });
+    }
 
     return await at.toJwt();
   }
