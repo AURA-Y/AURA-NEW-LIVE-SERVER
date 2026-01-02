@@ -43,3 +43,9 @@ coverage/
 aws/config.sh
 aws/images.env
 aws/iam-roles.env
+
+# docs
+*.md
+.md/
+*.docs/
+
