@@ -41,3 +41,8 @@ coverage/
 
 # AWS
 aws/
+
+# docs
+*.md
+.md/
+*.docs/
