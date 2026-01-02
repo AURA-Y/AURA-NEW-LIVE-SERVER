@@ -15,8 +15,9 @@ import {
     TrackSource,
 } from '@livekit/rtc-node';
 import { SttService } from '../stt/stt.service';
-import { LlmService } from '../llm/llm.service';
+// import { LlmService } from '../llm/llm.service'; // RAG로 대체
 import { TtsService } from '../tts/tts.service';
+import { RagClientService } from '../rag/rag-client.service';
 
 interface RoomContext {
     room: Room;
@@ -35,8 +36,9 @@ export class VoiceBotService {
     constructor(
         private configService: ConfigService,
         private sttService: SttService,
-        private llmService: LlmService,
+        // private llmService: LlmService, // RAG로 대체
         private ttsService: TtsService,
+        private ragClientService: RagClientService,
     ) { }
 
     async startBot(roomName: string, botToken: string): Promise<void> {
@@ -75,6 +77,15 @@ export class VoiceBotService {
 
         try {
             await room.connect(livekitUrl, botToken);
+
+            // RAG WebSocket 연결
+            try {
+                await this.ragClientService.connect(roomName);
+                this.logger.log(`[RAG 연결 완료] Room: ${roomName}`);
+            } catch (error) {
+                this.logger.error(`[RAG 연결 실패] ${error.message} - AI 봇은 응답하지 않습니다`);
+                // RAG 없이도 봇은 입장하지만 응답하지 않음
+            }
 
             // 오디오 소스 생성 (16kHz, 모노)
             const audioSource = new AudioSource(16000, 1);
@@ -197,17 +208,17 @@ export class VoiceBotService {
         context.currentRequestId = requestId;
 
         const startTime = Date.now();
-        this.logger.log(`\n========== [음성 처리] ${userId} ==========`);
+        this.logger.log(`\n========== [음성 처리 시작] ${userId} ==========`);
         this.logger.log(`오디오 크기: ${audioBuffer.length} bytes`);
 
         try {
             context.isPublishing = true;
 
-            // 1. STT
+            // 1. STT (음성 → 텍스트)
             const sttStart = Date.now();
             const transcript = await this.sttService.transcribeFromBuffer(audioBuffer, 'live-audio.pcm');
             const sttLatency = Date.now() - sttStart;
-            this.logger.log(`[STT] ${sttLatency}ms - "${transcript}"`);
+            this.logger.log(`[1. STT 완료] ${sttLatency}ms - \"${transcript}\"`);
 
             // 최신 요청 체크
             if (context.currentRequestId !== requestId) {
@@ -222,27 +233,39 @@ export class VoiceBotService {
 
             // 너무 짧은 텍스트(추임새)는 무시
             if (transcript.trim().length < 5) {
-                this.logger.log(`[스킵] 짧은 추임새: "${transcript}"`);
+                this.logger.log(`[스킵] 짧은 추임새: \"${transcript}\"`);
                 return;
             }
 
-            // 2. LLM
-            const llmStart = Date.now();
-            const llmResponse = await this.llmService.sendMessage(transcript);
-            const llmLatency = Date.now() - llmStart;
-            this.logger.log(`[LLM] ${llmLatency}ms - "${llmResponse.substring(0, 50)}..."`);
+            // 2. RAG (질문 → 답변)
+            const ragStart = Date.now();
+            this.logger.log(`[2. RAG 질문 전송] \"${transcript}\"`);
+
+            let ragResponse: string;
+            let ragLatency: number;
+            try {
+                ragResponse = await this.ragClientService.sendQuestion(transcript);
+                ragLatency = Date.now() - ragStart;
+                this.logger.log(`[2. RAG 답변 수신] ${ragLatency}ms - \"${ragResponse.substring(0, 50)}...\"`);
+            } catch (error) {
+                this.logger.error(`[RAG 에러] ${error.message}`);
+                // RAG 실패 시 기본 응답
+                ragResponse = '죄송합니다. 현재 응답을 생성할 수 없습니다.';
+                ragLatency = Date.now() - ragStart; // Still measure latency even on error
+            }
 
             // 최신 요청 체크
             if (context.currentRequestId !== requestId) {
-                this.logger.log(`[취소됨] 더 최신 요청이 있음 (LLM 후)`);
+                this.logger.log(`[취소됨] 더 최신 요청이 있음 (RAG 후)`);
                 return;
             }
 
-            // 3. TTS (PCM 출력)
+            // 3. TTS (텍스트 → 음성)
             const ttsStart = Date.now();
-            const pcmAudio = await this.ttsService.synthesizePcm(llmResponse);
+            this.logger.log(`[3. TTS 시작] 텍스트 길이: ${ragResponse.length}자`);
+            const pcmAudio = await this.ttsService.synthesizePcm(ragResponse);
             const ttsLatency = Date.now() - ttsStart;
-            this.logger.log(`[TTS] ${ttsLatency}ms - ${pcmAudio.length} bytes`);
+            this.logger.log(`[3. TTS 완료] ${ttsLatency}ms - ${pcmAudio.length} bytes`);
 
             // 최신 요청 체크
             if (context.currentRequestId !== requestId) {
@@ -251,10 +274,20 @@ export class VoiceBotService {
             }
 
             // 4. LiveKit으로 오디오 발행
+            const publishStart = Date.now();
+            // Barge-in 플래그 리셋 (이전 발화의 잔여 플래그 제거)
+            context.shouldInterrupt = false;
             await this.publishAudio(roomName, context.audioSource, pcmAudio);
+            const publishLatency = Date.now() - publishStart;
+            this.logger.log(`[4. 오디오 발행 완료] ${publishLatency}ms`);
 
             const totalLatency = Date.now() - startTime;
-            this.logger.log(`========== [완료] 총 ${totalLatency}ms ==========\n`);
+            this.logger.log(`========== [전체 완료] 총 ${totalLatency}ms ==========`);
+            this.logger.log(`  - STT: ${sttLatency}ms`);
+            this.logger.log(`  - RAG: ${Date.now() - ragStart}ms`);
+            this.logger.log(`  - TTS: ${ttsLatency}ms`);
+            this.logger.log(`  - Publish: ${publishLatency}ms`);
+            this.logger.log(`==========================================\n`);
 
         } catch (error) {
             this.logger.error(`[처리 실패] ${error.message}`);
@@ -313,6 +346,14 @@ export class VoiceBotService {
     async stopBot(roomName: string): Promise<void> {
         const context = this.activeRooms.get(roomName);
         if (context) {
+            // RAG WebSocket 연결 해제
+            try {
+                await this.ragClientService.disconnect();
+                this.logger.log(`[RAG 연결 해제 완료]`);
+            } catch (error) {
+                this.logger.error(`[RAG 연결 해제 실패] ${error.message}`);
+            }
+
             await context.room.disconnect();
             this.activeRooms.delete(roomName);
             this.logger.log(`[봇 종료] ${roomName}`);
