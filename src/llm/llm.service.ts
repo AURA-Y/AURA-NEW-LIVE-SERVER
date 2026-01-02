@@ -1,3 +1,13 @@
+/**
+ * ========================================
+ * LLM Service (주석처리 - RAG로 대체)
+ * ========================================
+ * 이 코드는 RAG 서버 통합 이전의 기존 LLM 서비스입니다.
+ * RAG 서버 장애 시 fallback으로 사용할 수 있도록 보존합니다.
+ * ========================================
+ */
+
+/*
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -101,3 +111,4 @@ export class LlmService {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 }
+*/

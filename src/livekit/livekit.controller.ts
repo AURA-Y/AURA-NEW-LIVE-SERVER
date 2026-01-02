@@ -4,7 +4,7 @@ import { Response } from 'express';
 import { LivekitService } from './livekit.service';
 import { VoiceBotService } from './voice-bot.service';
 import { SttService } from '../stt/stt.service';
-import { LlmService } from '../llm/llm.service';
+// import { LlmService } from '../llm/llm.service'; // RAG로 대체
 import { TtsService } from '../tts/tts.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
@@ -15,7 +15,7 @@ export class LivekitController {
     private readonly livekitService: LivekitService,
     private readonly voiceBotService: VoiceBotService,
     private readonly sttService: SttService,
-    private readonly llmService: LlmService,
+    // private readonly llmService: LlmService, // RAG로 대체
     private readonly ttsService: TtsService,
   ) { }
 
@@ -97,7 +97,8 @@ export class LivekitController {
     }
   }
 
-  // 오디오 파일로 STT + LLM 테스트
+  /*
+  // STT→LLM 테스트 엔드포인트 (주석처리 - RAG로 대체)
   @Post('stt-llm-test')
   @UseInterceptors(FileInterceptor('audio'))
   async testSttToLlm(@UploadedFile() file: Express.Multer.File) {
@@ -127,8 +128,10 @@ export class LivekitController {
       throw new HttpException(`STT→LLM 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
+  */
 
-  // 전체 파이프라인: STT + LLM + TTS → 오디오 응답 (레이턴시 측정 포함)
+  /*
+  // 전체 파이프라인: STT + LLM + TTS → 오디오 응답 (주석처리 - RAG로 대체)
   @Post('voice-chat')
   @UseInterceptors(FileInterceptor('audio'))
   async voiceChat(
@@ -182,6 +185,7 @@ export class LivekitController {
       throw new HttpException(`음성 채팅 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
+  */
 
 
   // TTS만 테스트 (Polly 권한 확인용)
