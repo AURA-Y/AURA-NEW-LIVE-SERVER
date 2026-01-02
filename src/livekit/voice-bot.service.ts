@@ -68,6 +68,18 @@ export class VoiceBotService {
 
         room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
             this.logger.log(`[참여자 퇴장] ${participant.identity}`);
+
+            // 인간 참여자 수 확인 (ai-bot으로 시작하지 않는 참여자)
+            const humanCount = Array.from(room.remoteParticipants.values())
+                .filter(p => !p.identity.startsWith('ai-bot')).length;
+
+            this.logger.log(`[남은 인간 참여자] ${humanCount}명`);
+
+            // 인간 참여자가 없으면 봇 퇴장
+            if (humanCount === 0) {
+                this.logger.log(`[자동 퇴장] 인간 참여자가 없어 봇 퇴장`);
+                this.stopBot(roomName);
+            }
         });
 
         room.on(RoomEvent.Disconnected, (reason?: any) => {
