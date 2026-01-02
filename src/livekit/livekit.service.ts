@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   AccessToken,
@@ -8,6 +8,7 @@ import {
 } from 'livekit-server-sdk';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
+import { VoiceBotService } from './voice-bot.service';
 
 @Injectable()
 export class LivekitService {
@@ -19,7 +20,11 @@ export class LivekitService {
   private apiSecret: string;
   private agentName: string;
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    @Inject(forwardRef(() => VoiceBotService))
+    private voiceBotService: VoiceBotService,
+  ) {
     this.livekitUrl = this.configService.get<string>('LIVEKIT_URL');
     this.apiKey = this.configService.get<string>('LIVEKIT_API_KEY');
     this.apiSecret = this.configService.get<string>('LIVEKIT_API_SECRET');
@@ -84,6 +89,12 @@ export class LivekitService {
       const token = await this.generateTokenForUser(room.name, userName);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
 
+      // 방 생성 시 AI 봇 자동 시작
+      this.logger.log(`[자동 봇 시작] 방 생성으로 AI 봇 자동 시작: ${room.name}`);
+      this.startBotForRoom(room.name).catch(err => {
+        this.logger.error(`[자동 봇 시작 실패] ${err.message}`);
+      });
+
       return {
         roomId: room.sid,
         roomUrl: `${wsUrl}/${room.name}`,
@@ -132,8 +143,8 @@ export class LivekitService {
       if (!finalRoomName) {
         throw new Error('Either roomId or roomName must be provided');
       }
-      
-    
+
+
       await this.ensureAgentDispatch(finalRoomName);
       this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${finalRoomName}`);
       const token = await this.generateTokenForUser(finalRoomName, userName, isBot);
@@ -146,6 +157,24 @@ export class LivekitService {
     } catch (error) {
       this.logger.error(`Join failed: ${error.message}`);
       throw new Error(`Failed to join room: ${error.message}`);
+    }
+  }
+
+  /**
+   * 방에 AI 봇 자동 시작
+   */
+  private async startBotForRoom(roomName: string): Promise<void> {
+    try {
+      // 봇용 토큰 생성
+      const botName = `ai-bot-${Math.floor(Math.random() * 1000)}`;
+      const botToken = await this.generateTokenForUser(roomName, botName, true);
+
+      // 봇 시작
+      await this.voiceBotService.startBot(roomName, botToken);
+      this.logger.log(`[자동 봇 시작 완료] ${roomName}`);
+    } catch (error) {
+      this.logger.error(`[자동 봇 시작 실패] ${error.message}`);
+      throw error;
     }
   }
 
