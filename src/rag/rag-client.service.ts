@@ -19,7 +19,7 @@ interface ConnectionContext {
 export class RagClientService implements OnModuleDestroy {
     private readonly logger = new Logger(RagClientService.name);
 
-    // 다중 연결 지원: clientId별로 WebSocket 관리
+    // 다중 연결 지원: roomId별로 WebSocket 관리
     private connections: Map<string, ConnectionContext> = new Map();
 
     private readonly REQUEST_TIMEOUT = 30000; // 30초
@@ -28,21 +28,21 @@ export class RagClientService implements OnModuleDestroy {
     constructor(private configService: ConfigService) { }
 
     /**
-     * RAG 서버에 연결 (특정 clientId용)
+     * RAG 서버에 연결 (특정 roomId용)
      */
-    async connect(clientId: string): Promise<void> {
+    async connect(roomId: string): Promise<void> {
         // 이미 연결된 경우 스킵
-        const existing = this.connections.get(clientId);
+        const existing = this.connections.get(roomId);
         if (existing && existing.ws.readyState === WebSocket.OPEN) {
-            this.logger.warn(`[RAG 연결 스킵] 이미 연결됨: ${clientId}`);
+            this.logger.warn(`[RAG 연결 스킵] 이미 연결됨: ${roomId}`);
             return;
         }
 
         const baseUrl = this.configService.get<string>('RAG_WEBSOCKET_URL') || 'ws://localhost:8000';
-        const wsUrl = `${baseUrl}/ws/agent/${clientId}`;
+        const wsUrl = `${baseUrl}/ws/agent/${roomId}`;
 
         this.logger.log(`\n========== [RAG 연결 시도] ==========`);
-        this.logger.log(`Client ID: ${clientId}`);
+        this.logger.log(`Room ID: ${roomId}`);
         this.logger.log(`WebSocket URL: ${wsUrl}`);
         this.logger.log(`현재 활성 연결 수: ${this.connections.size}`);
 
@@ -52,7 +52,7 @@ export class RagClientService implements OnModuleDestroy {
 
                 const connectionTimeout = setTimeout(() => {
                     if (ws.readyState !== WebSocket.OPEN) {
-                        this.logger.error(`[RAG 연결 타임아웃] ${clientId} - 10초 내 응답 없음`);
+                        this.logger.error(`[RAG 연결 타임아웃] ${roomId} - 10초 내 응답 없음`);
                         ws.close();
                         reject(new Error('RAG connection timeout'));
                     }
@@ -67,52 +67,52 @@ export class RagClientService implements OnModuleDestroy {
                         pendingRequests: new Map(),
                         reconnectTimer: null,
                     };
-                    this.connections.set(clientId, context);
+                    this.connections.set(roomId, context);
 
-                    this.logger.log(`[RAG 연결 성공] ${clientId}`);
+                    this.logger.log(`[RAG 연결 성공] ${roomId}`);
                     this.logger.log(`현재 활성 연결 수: ${this.connections.size}`);
                     this.logger.log(`========================================\n`);
                     resolve();
                 });
 
                 ws.on('message', (data: WebSocket.Data) => {
-                    this.handleMessage(clientId, data);
+                    this.handleMessage(roomId, data);
                 });
 
                 ws.on('error', (error) => {
-                    this.logger.error(`[RAG WebSocket 에러] ${clientId}: ${error.message}`);
+                    this.logger.error(`[RAG WebSocket 에러] ${roomId}: ${error.message}`);
                 });
 
                 ws.on('close', (code, reason) => {
-                    this.logger.warn(`[RAG 연결 종료] ${clientId} - Code: ${code}, Reason: ${reason || 'UNKNOWN'}`);
+                    this.logger.warn(`[RAG 연결 종료] ${roomId} - Code: ${code}, Reason: ${reason || 'UNKNOWN'}`);
 
                     // 의도적인 종료가 아니면 재연결 시도
                     if (code !== 1000) {
-                        this.scheduleReconnect(clientId);
+                        this.scheduleReconnect(roomId);
                     } else {
                         // 정상 종료 시 연결 정보 삭제
-                        this.connections.delete(clientId);
+                        this.connections.delete(roomId);
                     }
                 });
 
             } catch (error) {
-                this.logger.error(`[RAG 연결 실패] ${clientId}: ${error.message}`);
+                this.logger.error(`[RAG 연결 실패] ${roomId}: ${error.message}`);
                 reject(error);
             }
         });
     }
 
     /**
-     * 메시지 수신 처리 (clientId별)
+     * 메시지 수신 처리 (roomId별)
      */
-    private handleMessage(clientId: string, data: WebSocket.Data) {
+    private handleMessage(roomId: string, data: WebSocket.Data) {
         try {
             const message = JSON.parse(data.toString());
             const messageType = message.type;
 
-            const context = this.connections.get(clientId);
+            const context = this.connections.get(roomId);
             if (!context) {
-                this.logger.warn(`[RAG 메시지] 컨텍스트 없음: ${clientId}`);
+                this.logger.warn(`[RAG 메시지] 컨텍스트 없음: ${roomId}`);
                 return;
             }
 
@@ -121,7 +121,7 @@ export class RagClientService implements OnModuleDestroy {
 
             if (pending) {
                 const latency = Date.now() - pending.startTime;
-                this.logger.log(`[RAG 응답 수신] ${clientId} - 타입: ${messageType}, 레이턴시: ${latency}ms`);
+                this.logger.log(`[RAG 응답 수신] ${roomId} - 타입: ${messageType}, 레이턴시: ${latency}ms`);
             }
 
             if (messageType === 'answer') {
@@ -130,43 +130,43 @@ export class RagClientService implements OnModuleDestroy {
 
                 if (pending) {
                     const latency = Date.now() - pending.startTime;
-                    this.logger.log(`[RAG 답변] ${clientId} - "${questionText}" → "${answer.substring(0, 50)}..." (${latency}ms)`);
+                    this.logger.log(`[RAG 답변] ${roomId} - "${questionText}" → "${answer.substring(0, 50)}..." (${latency}ms)`);
 
                     clearTimeout(pending.timer);
                     context.pendingRequests.delete(questionText);
                     pending.resolve(answer);
                 }
             } else if (messageType === 'stored') {
-                this.logger.log(`[RAG 저장 완료] ${clientId} - 화자: ${message.speaker}, 내용: "${message.text}"`);
+                this.logger.log(`[RAG 저장 완료] ${roomId} - 화자: ${message.speaker}, 내용: "${message.text}"`);
             } else if (messageType === 'document_processed') {
-                this.logger.log(`[RAG 문서 처리 완료] ${clientId} - 파일: ${message.file}, 청크: ${message.chunks}개`);
+                this.logger.log(`[RAG 문서 처리 완료] ${roomId} - 파일: ${message.file}, 청크: ${message.chunks}개`);
             } else {
-                this.logger.log(`[RAG 메시지] ${clientId} - 타입: ${messageType}`);
+                this.logger.log(`[RAG 메시지] ${roomId} - 타입: ${messageType}`);
             }
 
         } catch (error) {
-            this.logger.error(`[RAG 메시지 파싱 에러] ${clientId}: ${error.message}`);
+            this.logger.error(`[RAG 메시지 파싱 에러] ${roomId}: ${error.message}`);
         }
     }
 
     /**
-     * 재연결 스케줄링 (특정 clientId용)
+     * 재연결 스케줄링 (특정 roomId용)
      */
-    private scheduleReconnect(clientId: string) {
-        const context = this.connections.get(clientId);
+    private scheduleReconnect(roomId: string) {
+        const context = this.connections.get(roomId);
         if (context?.reconnectTimer) {
             return; // 이미 재연결 대기 중
         }
 
-        this.logger.log(`[RAG 재연결] ${clientId} - ${this.RECONNECT_DELAY / 1000}초 후 재시도...`);
+        this.logger.log(`[RAG 재연결] ${roomId} - ${this.RECONNECT_DELAY / 1000}초 후 재시도...`);
 
         const timer = setTimeout(() => {
-            const ctx = this.connections.get(clientId);
+            const ctx = this.connections.get(roomId);
             if (ctx) {
                 ctx.reconnectTimer = null;
             }
-            this.connect(clientId).catch(err => {
-                this.logger.error(`[RAG 재연결 실패] ${clientId}: ${err.message}`);
+            this.connect(roomId).catch(err => {
+                this.logger.error(`[RAG 재연결 실패] ${roomId}: ${err.message}`);
             });
         }, this.RECONNECT_DELAY);
 
@@ -178,13 +178,13 @@ export class RagClientService implements OnModuleDestroy {
     /**
      * 일반 발언 전송 (statement)
      */
-    async sendStatement(clientId: string, text: string, speaker: string): Promise<void> {
-        if (!this.isConnected(clientId)) {
-            this.logger.warn(`[RAG 스킵] WebSocket 연결 안 됨: ${clientId} (statement)`);
+    async sendStatement(roomId: string, text: string, speaker: string): Promise<void> {
+        if (!this.isConnected(roomId)) {
+            this.logger.warn(`[RAG 스킵] WebSocket 연결 안 됨: ${roomId} (statement)`);
             return;
         }
 
-        const context = this.connections.get(clientId)!;
+        const context = this.connections.get(roomId)!;
         const message = {
             type: 'statement',
             text,
@@ -192,28 +192,28 @@ export class RagClientService implements OnModuleDestroy {
             confidence: 1.0,
         };
 
-        this.logger.log(`[RAG 발언 전송] ${clientId} - 화자: ${speaker}, "${text.substring(0, 30)}..."`);
+        this.logger.log(`[RAG 발언 전송] ${roomId} - 화자: ${speaker}, "${text.substring(0, 30)}..."`);
         context.ws.send(JSON.stringify(message));
     }
 
     /**
      * 질문 전송 및 응답 대기 (question)
      */
-    async sendQuestion(clientId: string, text: string): Promise<string> {
-        if (!this.isConnected(clientId)) {
-            this.logger.error(`[RAG 에러] WebSocket 연결 안 됨: ${clientId} (question)`);
-            throw new Error(`RAG WebSocket not connected for: ${clientId}`);
+    async sendQuestion(roomId: string, text: string): Promise<string> {
+        if (!this.isConnected(roomId)) {
+            this.logger.error(`[RAG 에러] WebSocket 연결 안 됨: ${roomId} (question)`);
+            throw new Error(`RAG WebSocket not connected for: ${roomId}`);
         }
 
-        const context = this.connections.get(clientId)!;
+        const context = this.connections.get(roomId)!;
         const startTime = Date.now();
-        this.logger.log(`[RAG 질문 전송] ${clientId} - "${text.substring(0, 50)}..."`);
+        this.logger.log(`[RAG 질문 전송] ${roomId} - "${text.substring(0, 50)}..."`);
 
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 context.pendingRequests.delete(text);
                 const latency = Date.now() - startTime;
-                this.logger.error(`[RAG 타임아웃] ${clientId} - ${this.REQUEST_TIMEOUT / 1000}초 초과 (총 ${latency}ms)`);
+                this.logger.error(`[RAG 타임아웃] ${roomId} - ${this.REQUEST_TIMEOUT / 1000}초 초과 (총 ${latency}ms)`);
                 reject(new Error('RAG request timeout'));
             }, this.REQUEST_TIMEOUT);
 
@@ -235,20 +235,20 @@ export class RagClientService implements OnModuleDestroy {
     }
 
     /**
-     * WebSocket 연결 상태 확인 (특정 clientId)
+     * WebSocket 연결 상태 확인 (특정 roomId)
      */
-    isConnected(clientId: string): boolean {
-        const context = this.connections.get(clientId);
+    isConnected(roomId: string): boolean {
+        const context = this.connections.get(roomId);
         return context !== undefined && context.ws.readyState === WebSocket.OPEN;
     }
 
     /**
-     * 연결 해제 (특정 clientId)
+     * 연결 해제 (특정 roomId)
      */
-    async disconnect(clientId: string): Promise<void> {
-        const context = this.connections.get(clientId);
+    async disconnect(roomId: string): Promise<void> {
+        const context = this.connections.get(roomId);
         if (!context) {
-            this.logger.warn(`[RAG 연결 해제 스킵] 연결 없음: ${clientId}`);
+            this.logger.warn(`[RAG 연결 해제 스킵] 연결 없음: ${roomId}`);
             return;
         }
 
@@ -265,9 +265,9 @@ export class RagClientService implements OnModuleDestroy {
         context.pendingRequests.clear();
 
         // WebSocket 종료
-        this.logger.log(`[RAG 연결 해제] ${clientId}`);
+        this.logger.log(`[RAG 연결 해제] ${roomId}`);
         context.ws.close(1000, 'Client disconnect');
-        this.connections.delete(clientId);
+        this.connections.delete(roomId);
 
         this.logger.log(`현재 활성 연결 수: ${this.connections.size}`);
     }
@@ -278,8 +278,8 @@ export class RagClientService implements OnModuleDestroy {
     async onModuleDestroy() {
         this.logger.log(`[RAG 모듈 종료] 모든 연결 해제 중... (${this.connections.size}개)`);
 
-        const disconnectPromises = Array.from(this.connections.keys()).map(clientId =>
-            this.disconnect(clientId)
+        const disconnectPromises = Array.from(this.connections.keys()).map(roomId =>
+            this.disconnect(roomId)
         );
 
         await Promise.all(disconnectPromises);
@@ -287,12 +287,12 @@ export class RagClientService implements OnModuleDestroy {
     }
 
     /**
-     * 연결 상태 반환 (특정 clientId)
+     * 연결 상태 반환 (특정 roomId)
      */
-    getConnectionStatus(clientId: string): { connected: boolean; clientId: string } {
+    getConnectionStatus(roomId: string): { connected: boolean; roomId: string } {
         return {
-            connected: this.isConnected(clientId),
-            clientId,
+            connected: this.isConnected(roomId),
+            roomId,
         };
     }
 
