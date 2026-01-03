@@ -17,6 +17,7 @@ type SearchResult = {
     mapUrl?: string;
     directionUrl?: string;
 };
+type SearchType = 'local' | 'news' | 'web' | 'encyc' | 'it' | 'law' | 'finance' | 'education';
 
 @Injectable()
 export class LlmService {
@@ -25,14 +26,15 @@ export class LlmService {
     private readonly modelId = 'anthropic.claude-3-haiku-20240307-v1:0';
 
     // Rate limiting
-    private lastRequestTime = 0;
-    private isProcessing = false; // 동시 요청 방지
+    private lastRequestTimeByKey = new Map<string, number>();
+    private isProcessingByKey = new Map<string, boolean>(); // 방별 동시 요청 방지
     private readonly MIN_REQUEST_INTERVAL = 1500; // 최소 1.5초 간격 (응답 속도 개선)
     private readonly MAX_RETRIES = 3; // 재시도 횟수 증가
     private readonly SEARCH_TIMEOUT_MS = 4000; // 검색 타임아웃 (ms)
     private readonly SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5분 캐시
     private searchCache = new Map<string, { expiresAt: number; results: SearchResult[] }>();
     private lastSearchCategory: string | null = null;
+    private lastSearchType: SearchType | null = null;
     private readonly naverMapKeyId: string;
     private readonly naverMapKey: string;
 
@@ -54,7 +56,11 @@ export class LlmService {
         }
     }
 
-    async sendMessage(userMessage: string, searchDomain?: 'weather' | 'naver' | null): Promise<{
+    async sendMessage(
+        userMessage: string,
+        searchDomain?: 'weather' | 'naver' | null,
+        queueKey?: string
+    ): Promise<{
         text: string;
         searchResults?: SearchResult[];
     }> {
@@ -64,29 +70,37 @@ export class LlmService {
             };
         }
 
+        const key = this.normalizeQueueKey(queueKey);
+
         // 동시 요청 방지: 이미 처리 중이면 대기
-        while (this.isProcessing) {
-            this.logger.log(`[LLM 대기] 다른 요청 처리 중...`);
+        while (this.isProcessingByKey.get(key)) {
+            this.logger.log(`[LLM 대기] 다른 요청 처리 중... (key=${key})`);
             await this.sleep(100);
         }
 
         // 쿨다운 체크 (rate limiting)
         const now = Date.now();
-        const timeSinceLastRequest = now - this.lastRequestTime;
+        const lastRequestTime = this.lastRequestTimeByKey.get(key) || 0;
+        const timeSinceLastRequest = now - lastRequestTime;
         if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
             const waitTime = this.MIN_REQUEST_INTERVAL - timeSinceLastRequest;
-            this.logger.log(`[LLM 대기] ${waitTime}ms 쿨다운`);
+            this.logger.log(`[LLM 대기] ${waitTime}ms 쿨다운 (key=${key})`);
             await this.sleep(waitTime);
         }
 
-        this.isProcessing = true;
-        this.lastRequestTime = Date.now();
+        this.isProcessingByKey.set(key, true);
+        this.lastRequestTimeByKey.set(key, Date.now());
 
         try {
             return await this.sendWithRetry(userMessage, 0, searchDomain ?? 'naver');
         } finally {
-            this.isProcessing = false;
+            this.isProcessingByKey.set(key, false);
         }
+    }
+
+    private normalizeQueueKey(queueKey?: string): string {
+        const trimmed = queueKey?.trim();
+        return trimmed && trimmed.length > 0 ? trimmed : 'default';
     }
 
     private async sendWithRetry(userMessage: string, retryCount = 0, searchDomain?: 'weather' | 'naver' | null): Promise<{
@@ -134,7 +148,11 @@ export class LlmService {
                 } else {
                     const searchOptions = {
                         display: 2,
-                        sort: searchType === 'local' ? 'comment' as const : 'date' as const,
+                        sort: searchType === 'local'
+                            ? 'comment' as const
+                            : searchType === 'news'
+                                ? 'date' as const
+                                : 'sim' as const,
                     };
                     const timeoutMs = this.SEARCH_TIMEOUT_MS;
                     const startTime = Date.now();
@@ -288,7 +306,11 @@ SEARCH RULES:
                     // 검색 도메인 설정
                     const searchOptions = {
                         display: 2,
-                        sort: searchType === 'local' ? 'comment' as const : 'date' as const,
+                        sort: searchType === 'local'
+                            ? 'comment' as const
+                            : searchType === 'news'
+                                ? 'date' as const
+                                : 'sim' as const,
                     };
 
                     // Tavily 검색 실행
@@ -389,7 +411,11 @@ SEARCH RULES:
                 ? this.buildTitleOnlyRecommendation(searchResults, this.getCategoryHint(messages, searchResults))
                 : validatedMessage;
             if (searchResults && searchResults.length > 0 && searchDomain === 'naver') {
-                finalMessage = this.buildSingleRecommendation(searchResults[0]);
+                if (this.lastSearchType === 'local') {
+                    finalMessage = this.buildSingleRecommendation(searchResults[0]);
+                } else if (this.lastSearchType === 'encyc') {
+                    finalMessage = this.buildEncycSummary(finalMessage, searchResults);
+                }
             }
 
             this.logger.log(`[LLM 응답] ${finalMessage.substring(0, 100)}...`);
@@ -420,7 +446,7 @@ SEARCH RULES:
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    private async searchWithNaver(query: string, type: 'local' | 'news', display: number, sort: 'sim' | 'date' | 'comment' | 'random'): Promise<SearchResult[]> {
+    private async searchWithNaver(query: string, type: SearchType, display: number, sort: 'sim' | 'date' | 'comment' | 'random'): Promise<SearchResult[]> {
         const clientId = this.configService.get<string>('NAVER_CLIENT_ID');
         const clientSecret = this.configService.get<string>('NAVER_CLIENT_SECRET');
         if (!clientId || !clientSecret) {
@@ -430,7 +456,11 @@ SEARCH RULES:
 
         const endpoint = type === 'local'
             ? 'https://openapi.naver.com/v1/search/local.json'
-            : 'https://openapi.naver.com/v1/search/news.json';
+            : type === 'encyc'
+                ? 'https://openapi.naver.com/v1/search/encyc.json'
+                : type === 'web' || type === 'it' || type === 'law' || type === 'finance' || type === 'education'
+                    ? 'https://openapi.naver.com/v1/search/webkr.json'
+                    : 'https://openapi.naver.com/v1/search/news.json';
         const url = new URL(endpoint);
         url.searchParams.set('query', query);
         url.searchParams.set('display', String(display));
@@ -484,13 +514,70 @@ SEARCH RULES:
         return mapped;
     }
 
-    private pickSearchType(query: string): 'local' | 'news' {
-        const keywords = ['카페', '맛집', '식당', '레스토랑', '커피', '술집', '바', '빵집', '디저트', '분식', '치킨', '피자', '백화점', '가게', '매장'];
+    private pickSearchType(query: string): SearchType {
         const normalized = query.toLowerCase();
-        if (keywords.some((word) => normalized.includes(word))) {
+        const localKeywords = [
+            '카페', '커피', '브런치', '베이커리', '빵집', '디저트', '빙수', '로스터리',
+            '맛집', '식당', '레스토랑', '분식', '치킨', '피자', '국밥', '갈비', '횟집', '초밥', '샤브', '밀면', '냉면',
+            '술집', '바', '포차', '와인바', '펍',
+            '쇼핑', '백화점', '아울렛', '마트', '매장', '가게', '편집샵', '쇼룸', '플래그십', '편의점',
+            '전시', '전시회', '갤러리', '미술관', '박물관', '팝업', '팝업스토어', '플리마켓', '공연', '연극', '뮤지컬', '콘서트', '영화관', '극장',
+            '호텔', '숙소', '펜션', '리조트', '게스트하우스', '캠핑', '여행', '관광', '코스',
+            '근처', '주변', '역', '맛있는', '가까운',
+        ];
+        const newsKeywords = [
+            '뉴스', '속보', '이슈', '사건', '사고', '재난', '정치', '대통령', '국회', '정부', '법안', '선거',
+            '경제', '환율', '물가', '금리', '주가', '증시', '코스피', '코스닥', '비트코인', '가상화폐', '코인',
+            '기업', '실적', '투자', '상장', '인수', '합병', '파산', '재무',
+        ];
+        const medicalKeywords = [
+            '약', '약물', '약품', '성분', '효능', '효과', '부작용', '복용', '용량', '금기', '질병', '증상', '진단', '치료',
+            '감기', '독감', '두통', '통증', '해열', '진통', '진통제', '항생제', '소염', '알레르기', '처방', '의학', '병원', '약국',
+            '타이라놀', '아세트아미노펜',
+        ];
+        const definitionKeywords = [
+            '뜻', '의미', '정의', '설명', '개요', '원리', '역사', '유래', '특징', '비교',
+        ];
+        const itKeywords = [
+            '개발', '프로그래밍', '코드', '버그', '에러', '서버', 'api', 'db', '데이터베이스', '네트워크',
+            '프론트엔드', '백엔드', '리액트', '노드', '자바스크립트', '타입스크립트', '도커', '쿠버네티스',
+            '인공지능', 'ai', 'ml', '모델', '클라우드', '배포', '깃', '깃허브',
+        ];
+        const lawKeywords = [
+            '법', '법률', '판결', '규정', '계약', '소송', '위반', '처벌', '벌금', '민사', '형사', '이혼',
+            '상속', '임대차', '노동법', '특허', '저작권',
+        ];
+        const financeKeywords = [
+            '금융', '대출', '이자', '보험', '연금', '주식', '채권', '적금', '예금', '부동산', '세금', '세무',
+            '펀드', '자산', '투자', '환율', '코인', '가상화폐',
+        ];
+        const educationKeywords = [
+            '교육', '공부', '학습', '강의', '자격증', '시험', '전형', '입시', '대학교', '커리큘럼',
+            '수능', '내신', '토익', '학원',
+        ];
+
+        if (localKeywords.some((word) => normalized.includes(word))) {
             return 'local';
         }
-        return 'news';
+        if (newsKeywords.some((word) => normalized.includes(word))) {
+            return 'news';
+        }
+        if (medicalKeywords.some((word) => normalized.includes(word)) || definitionKeywords.some((word) => normalized.includes(word))) {
+            return 'encyc';
+        }
+        if (itKeywords.some((word) => normalized.includes(word))) {
+            return 'it';
+        }
+        if (lawKeywords.some((word) => normalized.includes(word))) {
+            return 'law';
+        }
+        if (financeKeywords.some((word) => normalized.includes(word))) {
+            return 'finance';
+        }
+        if (educationKeywords.some((word) => normalized.includes(word))) {
+            return 'education';
+        }
+        return 'web';
     }
 
     private stripHtml(text: string): string {
@@ -560,15 +647,17 @@ SEARCH RULES:
         return matches ? matches : [];
     }
 
-    private async buildSearchPlan(rawQuery: string): Promise<{ query: string; cacheKey: string; searchType: 'local' | 'news'; category: string | null }> {
+    private async buildSearchPlan(rawQuery: string): Promise<{ query: string; cacheKey: string; searchType: SearchType; category: string | null }> {
         const base = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
         const fallback = this.buildSearchQuery(rawQuery);
         const fallbackCategory = this.pickCategoryLabel(rawQuery, []);
         const system = [
             'You are a search query planner for Korean user requests.',
             'Return only a JSON object with keys: searchType, category, and query.',
-            'searchType must be "local" for places/food/shops, otherwise "news".',
-            'category must be one of: 카페, 맛집, 팝업, 전시, 쇼핑, 기타.',
+            'searchType must be one of: local, news, web, encyc, it, law, finance, education.',
+            'Use local for places/food/shops, news for current events, encyc for definitions/medical terms.',
+            'Use it/law/finance/education when the topic matches those domains; otherwise use web.',
+            'category must be one of: 카페, 맛집, 술집, 쇼핑, 전시, 팝업, 공연, 여행, 숙소, 의학, 법률, IT, 금융, 교육, 기타.',
             'query must be short Korean nouns (e.g., "성수동 카페").',
             'Remove verbs, particles, and filler words.',
             'No extra text, no markdown.',
@@ -601,7 +690,9 @@ SEARCH RULES:
                 throw new Error('Search plan JSON not found');
             }
             const parsed = JSON.parse(jsonText);
-            const searchType = parsed.searchType === 'local' ? 'local' : 'news';
+            let searchType: SearchType = ['local', 'news', 'web', 'encyc', 'it', 'law', 'finance', 'education'].includes(parsed.searchType)
+                ? parsed.searchType
+                : this.pickSearchType(base);
             let query = typeof parsed.query === 'string' ? parsed.query.trim() : '';
             if (!query) {
                 throw new Error('Empty plan query');
@@ -609,15 +700,20 @@ SEARCH RULES:
             const category = typeof parsed.category === 'string' ? parsed.category.trim() : fallbackCategory;
             if (searchType === 'local') {
                 query = this.normalizeLocalQuery(query);
-            } else {
+                query = this.ensureCategoryInQuery(query, category);
+            } else if (searchType === 'news') {
                 query = this.formatNewsQuery(query);
+            } else {
+                query = this.formatGeneralQuery(query);
             }
             const cacheKey = `${base}|${searchType}|${query}`;
             this.lastSearchCategory = category || fallbackCategory;
+            this.lastSearchType = searchType;
             return { query, cacheKey, searchType, category };
         } catch (error) {
             this.logger.warn(`[검색 계획 실패] ${error.message}`);
             this.lastSearchCategory = fallbackCategory;
+            this.lastSearchType = fallback.searchType;
             return { ...fallback, category: fallbackCategory };
         }
     }
@@ -626,6 +722,10 @@ SEARCH RULES:
         const kstDate = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
         const normalized = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
         return `${normalized} ${kstDate} 최신 site:naver.com OR site:blog.naver.com OR site:kin.naver.com`;
+    }
+
+    private formatGeneralQuery(rawQuery: string): string {
+        return this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
     }
 
     private buildNaverDirectionUrl(mapx: string, mapy: string, title: string, placeId?: string): string | null {
@@ -918,27 +1018,85 @@ SEARCH RULES:
         return `${title}을 추천해요. ${addressText}해당 지점까지 경로를 채팅창으로 공유드릴게요.`.replace(/\s+/g, ' ').trim();
     }
 
-    private buildSearchQuery(rawQuery: string): { query: string; cacheKey: string; searchType: 'local' | 'news' } {
+    private buildEncycSummary(message: string, results: SearchResult[]): string {
+        const trimmed = message?.trim();
+        let summary = trimmed && trimmed !== '검색 결과를 요약할 수 없습니다.'
+            ? trimmed
+            : results
+                .map((r) => `${r.title}: ${r.content}`)
+                .join(' ');
+        summary = summary.replace(/\s+/g, ' ').trim();
+        const parts = summary.match(/[^.!?]+[.!?]+/g) || [summary];
+        if (parts.length > 2) {
+            summary = parts.slice(0, 2).join(' ');
+        }
+        if (summary.length > 180) {
+            summary = summary.slice(0, 180).trim();
+        }
+        const cleanSummary = summary.replace(/\s+/g, ' ').trim();
+        return `${cleanSummary}\n해당 정보를 채팅창으로 공유드릴게요.`.trim();
+    }
+
+    private buildSearchQuery(rawQuery: string): { query: string; cacheKey: string; searchType: SearchType } {
         const trimmed = this.normalizeSearchQuery(rawQuery);
         const searchType = this.pickSearchType(trimmed);
         if (searchType === 'local') {
-            const query = this.normalizeLocalQuery(rawQuery);
+            const category = this.pickCategoryLabel(rawQuery, []);
+            const query = this.ensureCategoryInQuery(this.normalizeLocalQuery(rawQuery), category);
             const cacheKey = `${trimmed}|${searchType}|${query}`;
+            this.lastSearchType = searchType;
             return { query, cacheKey, searchType };
         }
-        const query = this.formatNewsQuery(trimmed);
+        const query = searchType === 'news'
+            ? this.formatNewsQuery(trimmed)
+            : this.formatGeneralQuery(trimmed);
         const cacheKey = `${trimmed}|${searchType}|${query}`;
+        this.lastSearchType = searchType;
         return { query, cacheKey, searchType };
     }
 
     private pickCategoryLabel(query: string, results: SearchResult[]): string | null {
         const text = `${query} ${results.map((r) => r.title).join(' ')}`.toLowerCase();
-        if (text.includes('카페') || text.includes('커피')) return '카페';
-        if (text.includes('맛집') || text.includes('식당') || text.includes('레스토랑') || text.includes('술집') || text.includes('바') || text.includes('분식') || text.includes('치킨') || text.includes('피자')) return '맛집';
-        if (text.includes('팝업')) return '팝업';
-        if (text.includes('전시') || text.includes('갤러리') || text.includes('미술관')) return '전시';
-        if (text.includes('쇼핑') || text.includes('백화점') || text.includes('매장') || text.includes('가게')) return '쇼핑';
+        if (text.includes('카페') || text.includes('커피') || text.includes('브런치') || text.includes('베이커리')) return '카페';
+        if (text.includes('맛집') || text.includes('식당') || text.includes('레스토랑') || text.includes('분식')) return '맛집';
+        if (text.includes('술집') || text.includes('바') || text.includes('포차') || text.includes('와인바')) return '술집';
+        if (text.includes('팝업') || text.includes('팝업스토어')) return '팝업';
+        if (text.includes('전시') || text.includes('갤러리') || text.includes('미술관') || text.includes('박물관')) return '전시';
+        if (text.includes('공연') || text.includes('연극') || text.includes('뮤지컬') || text.includes('콘서트') || text.includes('영화관') || text.includes('극장')) return '공연';
+        if (text.includes('쇼핑') || text.includes('백화점') || text.includes('아울렛') || text.includes('매장') || text.includes('가게') || text.includes('편집샵')) return '쇼핑';
+        if (text.includes('여행') || text.includes('관광') || text.includes('코스')) return '여행';
+        if (text.includes('숙소') || text.includes('호텔') || text.includes('펜션') || text.includes('리조트') || text.includes('게스트하우스')) return '숙소';
+        if (text.includes('약') || text.includes('의학') || text.includes('질병') || text.includes('부작용') || text.includes('효능') || text.includes('진통')) return '의학';
+        if (text.includes('법') || text.includes('판결') || text.includes('규정') || text.includes('계약') || text.includes('소송')) return '법률';
+        if (text.includes('개발') || text.includes('프로그래밍') || text.includes('코드') || text.includes('it') || text.includes('ai') || text.includes('서버')) return 'IT';
+        if (text.includes('금리') || text.includes('주가') || text.includes('환율') || text.includes('투자') || text.includes('대출')) return '금융';
+        if (text.includes('교육') || text.includes('공부') || text.includes('학습') || text.includes('자격증') || text.includes('시험')) return '교육';
         return null;
+    }
+
+    private ensureCategoryInQuery(query: string, category: string | null): string {
+        if (!category) {
+            return query;
+        }
+        const categoryKeywords: Record<string, string[]> = {
+            카페: ['카페', '커피', '브런치', '베이커리', '디저트'],
+            맛집: ['맛집', '식당', '레스토랑', '분식'],
+            술집: ['술집', '바', '포차', '와인바', '펍'],
+            쇼핑: ['쇼핑', '백화점', '아울렛', '편집샵', '매장'],
+            전시: ['전시', '갤러리', '미술관', '박물관'],
+            팝업: ['팝업', '팝업스토어'],
+            공연: ['공연', '뮤지컬', '콘서트', '연극'],
+            여행: ['여행', '관광', '여행지'],
+            숙소: ['숙소', '호텔', '펜션', '리조트'],
+        };
+        const keywords = categoryKeywords[category];
+        if (!keywords) {
+            return query;
+        }
+        if (keywords.some((word) => query.includes(word))) {
+            return query;
+        }
+        return `${query} ${keywords[0]}`.trim();
     }
 
     private normalizeSearchQuery(rawQuery: string): string {
