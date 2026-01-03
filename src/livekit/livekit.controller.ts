@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { LivekitService } from './livekit.service';
@@ -22,22 +22,28 @@ export class LivekitController {
   // AI 음성 봇 시작
   @Post('voice-bot/:roomName')
   async startVoiceBot(@Param('roomName') roomName: string) {
-    console.log(`[AI 봇 요청] 방: ${roomName}`);
+    const normalizedRoomName = roomName.trim();
+    console.log(`[AI 봇 요청] 방: ${normalizedRoomName}`);
 
     try {
+      if (this.voiceBotService.isActive(normalizedRoomName)) {
+        await this.voiceBotService.stopBot(normalizedRoomName);
+      }
+      await this.livekitService.removeBots(normalizedRoomName);
+
       // 봇 전용 토큰 생성
       const { token } = await this.livekitService.joinRoom({
         userName: `ai-bot-${Math.floor(Math.random() * 1000)}`,
-        roomName: roomName,
+        roomName: normalizedRoomName,
       }, true);
 
       // 봇 시작
-      await this.voiceBotService.startBot(roomName, token);
+      await this.voiceBotService.startBot(normalizedRoomName, token);
 
       return {
         success: true,
-        message: `AI 봇이 방 '${roomName}'에 입장했습니다.`,
-        roomName: roomName,
+        message: `AI 봇이 방 '${normalizedRoomName}'에 입장했습니다.`,
+        roomName: normalizedRoomName,
       };
     } catch (error) {
       throw new HttpException(`AI 봇 시작 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
@@ -47,21 +53,44 @@ export class LivekitController {
   // AI 음성 봇 종료
   @Delete('voice-bot/:roomName')
   async stopVoiceBot(@Param('roomName') roomName: string) {
-    await this.voiceBotService.stopBot(roomName);
-    return { success: true, message: `AI 봇이 방 '${roomName}'에서 퇴장했습니다.` };
+    const normalizedRoomName = roomName.trim();
+    await this.voiceBotService.stopBot(normalizedRoomName);
+    return { success: true, message: `AI 봇이 방 '${normalizedRoomName}'에서 퇴장했습니다.` };
   }
 
   // AI 봇 상태 확인
   @Get('voice-bot/:roomName/status')
   async getVoiceBotStatus(@Param('roomName') roomName: string) {
-    const isActive = this.voiceBotService.isActive(roomName);
-    return { roomName, active: isActive };
+    const normalizedRoomName = roomName.trim();
+    const isActive = this.voiceBotService.isActive(normalizedRoomName);
+    return { roomName: normalizedRoomName, active: isActive };
   }
 
 
   @Post('create')
   async createRoom(@Body() createRoomDto: CreateRoomDto) {
-    return this.livekitService.createRoom(createRoomDto);
+    const result = await this.livekitService.createRoom(createRoomDto);
+    const normalizedRoomTitle = result.roomTitle.trim();
+
+    // 방 생성 시 자동으로 Voice Bot 시작
+    try {
+      if (this.voiceBotService.isActive(normalizedRoomTitle)) {
+        await this.voiceBotService.stopBot(normalizedRoomTitle);
+      }
+      await this.livekitService.removeBots(normalizedRoomTitle);
+      const { token } = await this.livekitService.joinRoom({
+        userName: `ai-bot-${Math.floor(Math.random() * 1000)}`,
+        roomName: normalizedRoomTitle,
+      }, true);
+
+      await this.voiceBotService.startBot(normalizedRoomTitle, token);
+      console.log(`[자동 봇 시작] 방 '${normalizedRoomTitle}'에 봇이 자동으로 입장했습니다.`);
+    } catch (error) {
+      console.error(`[자동 봇 시작 실패] ${error.message}`);
+      // 봇 시작 실패해도 방 생성은 성공으로 처리
+    }
+
+    return result;
   }
 
   @Post('join')
@@ -114,14 +143,15 @@ export class LivekitController {
 
       // 2. LLM: 텍스트 → AI 응답
       const llmResponse = await this.llmService.sendMessage(transcript);
-      console.log(`[LLM 완료] ${llmResponse.substring(0, 100)}...`);
+      console.log(`[LLM 완료] ${llmResponse.text.substring(0, 100)}...`);
 
       return {
         success: true,
         fileName: file.originalname,
         fileSize: file.size,
         transcript: transcript,
-        llmResponse: llmResponse,
+        llmResponse: llmResponse.text,
+        searchResults: llmResponse.searchResults,
       };
     } catch (error) {
       throw new HttpException(`STT→LLM 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
@@ -154,11 +184,11 @@ export class LivekitController {
       const llmStart = Date.now();
       const llmResponse = await this.llmService.sendMessage(transcript);
       const llmLatency = Date.now() - llmStart;
-      console.log(`[LLM] ${llmLatency}ms - "${llmResponse.substring(0, 50)}..."`);
+      console.log(`[LLM] ${llmLatency}ms - "${llmResponse.text.substring(0, 50)}..."`);
 
       // 3. TTS: AI 응답 → 음성
       const ttsStart = Date.now();
-      const audioBuffer = await this.ttsService.synthesize(llmResponse);
+      const audioBuffer = await this.ttsService.synthesize(llmResponse.text);
       const ttsLatency = Date.now() - ttsStart;
       console.log(`[TTS] ${ttsLatency}ms - ${audioBuffer.length} bytes`);
 
@@ -215,7 +245,10 @@ export class LivekitController {
 
 @Controller()
 export class ApiController {
-  constructor(private readonly livekitService: LivekitService) { }
+  constructor(
+    private readonly livekitService: LivekitService,
+    private readonly llmService: LlmService,
+  ) { }
 
   @Get('health')
   health() {
@@ -233,5 +266,39 @@ export class ApiController {
   @Post('token')
   async generateToken(@Body() joinRoomDto: JoinRoomDto) {
     return this.livekitService.joinRoom(joinRoomDto);
+  }
+
+  @Get('map/static')
+  async getStaticMap(
+    @Query('originLng') originLng: string,
+    @Query('originLat') originLat: string,
+    @Query('destLng') destLng: string,
+    @Query('destLat') destLat: string,
+    @Query('width') width: string,
+    @Query('height') height: string,
+    @Res() res: Response,
+  ) {
+    if (!originLng || !originLat || !destLng || !destLat) {
+      throw new HttpException('origin/destination 좌표가 필요합니다.', HttpStatus.BAD_REQUEST);
+    }
+
+    const image = await this.llmService.getStaticMapImage({
+      origin: { lng: originLng, lat: originLat },
+      destination: { lng: destLng, lat: destLat },
+      width: Number(width) || 1120,
+      height: Number(height) || 196,
+    });
+
+    if (!image) {
+      throw new HttpException('Static Map 생성 실패', HttpStatus.BAD_GATEWAY);
+    }
+
+    res.set({
+      'Content-Type': image.contentType,
+      'Cache-Control': 'no-store',
+      'Access-Control-Allow-Origin': '*',
+    });
+
+    res.send(image.buffer);
   }
 }

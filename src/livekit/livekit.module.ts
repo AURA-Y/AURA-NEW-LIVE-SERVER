@@ -5,9 +5,10 @@ import { VoiceBotService } from './voice-bot.service';
 import { SttModule } from '../stt/stt.module';
 import { LlmModule } from '../llm/llm.module';
 import { TtsModule } from '../tts/tts.module';
+import { IntentModule } from '../intent/intent.module';
 
 @Module({
-  imports: [SttModule, LlmModule, TtsModule],
+  imports: [SttModule, LlmModule, TtsModule,  IntentModule],
   controllers: [LivekitController, ApiController],
   providers: [LivekitService, VoiceBotService],
   exports: [LivekitService],
