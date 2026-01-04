@@ -18,7 +18,7 @@ import { SttService } from '../stt/stt.service';
 import { LlmService } from '../llm/llm.service';
 import { TtsService } from '../tts/tts.service';
 import { RagClientService } from '../rag/rag-client.service';
-import { IntentClassifierService, IntentAnalysis } from '../intent/intent-classifier.service';
+import { IntentClassifierService } from '../intent/intent-classifier.service';
 
 enum BotState {
     SLEEP = 'SLEEP',
@@ -88,10 +88,8 @@ export class VoiceBotService {
             const humanCount = Array.from(room.remoteParticipants.values())
                 .filter(p => !p.identity.startsWith('ai-bot')).length;
 
-            this.logger.log(`[남은 인간 참여자] ${humanCount}명`);
-
             if (humanCount === 0) {
-                this.logger.log(`[자동 퇴장] 인간 참여자가 없어 봇 퇴장`);
+                this.logger.log(`[자동 퇴장] 인간 참여자 없음`);
                 this.stopBot(roomName);
             }
         });
@@ -106,7 +104,7 @@ export class VoiceBotService {
 
             try {
                 await this.ragClientService.connect(roomName);
-                this.logger.log(`[RAG 연결 완료] Room: ${roomName}`);
+                this.logger.log(`[RAG 연결 완료]`);
             } catch (error) {
                 this.logger.error(`[RAG 연결 실패] ${error.message}`);
             }
@@ -137,13 +135,13 @@ export class VoiceBotService {
 
             this.startArmedTimeoutChecker(roomName);
 
-            this.logger.log(`[봇 입장 성공] 현재 참여자: ${room.remoteParticipants.size}명`);
+            this.logger.log(`[봇 입장 성공] 참여자: ${room.remoteParticipants.size}명`);
 
+            // 기존 참여자의 오디오 트랙 처리
             for (const participant of room.remoteParticipants.values()) {
                 if (!participant.identity.startsWith('ai-bot')) {
                     for (const publication of participant.trackPublications.values()) {
                         if (publication.track && publication.kind === TrackKind.KIND_AUDIO) {
-                            this.logger.log(`[기존 오디오] ${participant.identity}`);
                             await this.handleAudioTrack(roomName, publication.track as RemoteTrack, participant.identity);
                         }
                     }
@@ -160,11 +158,13 @@ export class VoiceBotService {
 
         const audioStream = new AudioStream(track, 16000, 1);
 
+        // 캘리브레이션 변수
         let isCalibrating = true;
         let calibrationSamples: number[] = [];
         const calibrationStartTime = Date.now();
         const CALIBRATION_DURATION = 3000;
 
+        // VAD 변수
         let audioBuffer: Buffer[] = [];
         let silenceCount = 0;
         let voiceCount = 0;
@@ -192,17 +192,15 @@ export class VoiceBotService {
 
         for await (const frame of audioStream) {
             const frameBuffer = Buffer.from(frame.data.buffer);
-
             const samples = new Int16Array(frame.data.buffer);
 
             const rms = Math.sqrt(
                 samples.reduce((sum, s) => sum + s * s, 0) / samples.length
             );
-
             const decibel = 20 * Math.log10(rms / 32768);
-
             const avgAmplitude = samples.reduce((sum, s) => sum + Math.abs(s), 0) / samples.length;
 
+            // 캘리브레이션
             if (isCalibrating) {
                 const elapsed = Date.now() - calibrationStartTime;
                 if (elapsed < CALIBRATION_DURATION) {
@@ -216,42 +214,40 @@ export class VoiceBotService {
                         MIN_DECIBEL_THRESHOLD = backgroundNoiseDB + VOICE_MARGIN_DB;
                         const noiseRMS = 32768 * Math.pow(10, backgroundNoiseDB / 20);
                         VOICE_AMPLITUDE_THRESHOLD = Math.max(300, Math.min(800, noiseRMS * 3));
-
-                        this.logger.log(`[캘리브레이션 완료] 배경 소음: ${backgroundNoiseDB.toFixed(1)}dB, 발화 임계값: ${MIN_DECIBEL_THRESHOLD.toFixed(1)}dB`);
-                    } else {
-                        this.logger.warn(`[캘리브레이션 실패] 샘플 부족, 기본값 사용`);
+                        this.logger.log(`[캘리브레이션] 배경 소음: ${backgroundNoiseDB.toFixed(1)}dB`);
                     }
                     isCalibrating = false;
                 }
             }
 
+            // 배경 소음 동적 업데이트
             if (!isCalibrating && decibel < MIN_DECIBEL_THRESHOLD - 5) {
                 backgroundNoiseDB = backgroundNoiseDB * (1 - NOISE_UPDATE_ALPHA) + decibel * NOISE_UPDATE_ALPHA;
             }
 
             const isVoice = avgAmplitude > VOICE_AMPLITUDE_THRESHOLD && decibel > MIN_DECIBEL_THRESHOLD;
 
+            // 화자 음성 레벨 학습
             if (!isCalibrating && isVoice) {
                 speakerVoiceDB = speakerVoiceDB * (1 - SPEAKER_UPDATE_ALPHA) + decibel * SPEAKER_UPDATE_ALPHA;
                 speakerSampleCount++;
 
                 if (speakerSampleCount >= MIN_SPEAKER_SAMPLES) {
                     const optimalThreshold = backgroundNoiseDB + (speakerVoiceDB - backgroundNoiseDB) * 0.3;
-
                     if (Math.abs(optimalThreshold - MIN_DECIBEL_THRESHOLD) > 2) {
                         MIN_DECIBEL_THRESHOLD = optimalThreshold;
                         const thresholdRMS = 32768 * Math.pow(10, MIN_DECIBEL_THRESHOLD / 20);
                         VOICE_AMPLITUDE_THRESHOLD = Math.max(300, Math.min(800, thresholdRMS * 1.5));
-
-                        this.logger.log(`[임계값 자동 조정] ${MIN_DECIBEL_THRESHOLD.toFixed(1)}dB`);
                     }
                 }
             }
 
+            // 봇 발화 중 처리
             if (context?.isPublishing && context.botState !== BotState.SPEAKING) {
                 continue;
             }
 
+            // Barge-in 감지
             if (context?.isPublishing && context.botState === BotState.SPEAKING) {
                 const BARGE_IN_GRACE_PERIOD_MS = 500;
                 const timeSinceSpeakingStart = Date.now() - context.speakingStartTime;
@@ -263,12 +259,13 @@ export class VoiceBotService {
                 if (isVoice && voiceCount >= MIN_VOICE_FRAMES && !context.shouldInterrupt &&
                     decibel > BARGE_IN_DECIBEL_THRESHOLD &&
                     (context.activeUserId === null || context.activeUserId === userId)) {
-                    this.logger.log(`[Barge-in] ${userId} 끼어들기 감지! AI 발화 중단`);
+                    this.logger.log(`[Barge-in] ${userId} 끼어들기 감지`);
                     context.shouldInterrupt = true;
                 }
                 continue;
             }
 
+            // VAD 처리
             if (isVoice) {
                 voiceCount++;
                 if (context && voiceCount >= MIN_VOICE_FRAMES) {
@@ -278,22 +275,6 @@ export class VoiceBotService {
                     silenceCount = 0;
                 }
                 audioBuffer.push(frameBuffer);
-
-                if (voiceCount === 1) {
-                    this.logger.debug(`[VAD] 발화 감지 - dB: ${decibel.toFixed(1)}, 진폭: ${avgAmplitude.toFixed(0)}`);
-                }
-
-                const BARGE_IN_GRACE_MS = 500;
-                const speakingElapsed = context ? Date.now() - context.speakingStartTime : Infinity;
-                if (context && context.isPublishing && voiceCount >= MIN_VOICE_FRAMES &&
-                    !context.shouldInterrupt && decibel > BARGE_IN_DECIBEL_THRESHOLD &&
-                    speakingElapsed >= BARGE_IN_GRACE_MS) {
-                    if (context.botState === BotState.SPEAKING &&
-                        (context.activeUserId === null || context.activeUserId === userId)) {
-                        this.logger.log(`[Barge-in] ${userId} 끼어들기 감지! AI 발화 중단`);
-                        context.shouldInterrupt = true;
-                    }
-                }
             } else if (avgAmplitude > 150 && decibel > -55) {
                 audioBuffer.push(frameBuffer);
                 silenceCount++;
@@ -302,6 +283,7 @@ export class VoiceBotService {
                 voiceCount = 0;
             }
 
+            // 발화 종료 감지 → STT 요청
             const totalLength = audioBuffer.reduce((sum, b) => sum + b.length, 0);
             if (silenceCount > SILENCE_THRESHOLD && totalLength > MIN_AUDIO_LENGTH) {
                 const fullAudio = Buffer.concat(audioBuffer);
@@ -321,102 +303,79 @@ export class VoiceBotService {
 
                 if (fullDecibel > MIN_DECIBEL_THRESHOLD - 5) {
                     if (context && Date.now() - context.lastSttTime < STT_COOLDOWN_MS) {
-                        this.logger.debug('[쿨다운] STT 대기 중 - 스킵');
                         continue;
                     }
                     if (context) {
                         context.lastSttTime = Date.now();
                     }
-                    this.logger.debug(`[오디오 품질] dB: ${fullDecibel.toFixed(1)} - 처리 진행`);
 
                     this.processAndRespond(roomName, fullAudio, userId).catch(err => {
                         this.logger.error(`[처리 에러] ${err.message}`);
                     });
-                } else {
-                    this.logger.debug(`[오디오 품질] dB: ${fullDecibel.toFixed(1)} - 배경 소음, 무시`);
                 }
             }
         }
     }
 
     /**
-     * 음성 처리 메인 로직 (STT → Intent → LLM 교정 → 검색 → 응답)
+     * 음성 처리 메인 로직
+     * STT → Intent 분석 → (LLM 교정) → 검색/응답 → TTS
      */
     private async processAndRespond(roomName: string, audioBuffer: Buffer, userId: string) {
         const context = this.activeRooms.get(roomName);
-        if (!context) {
-            this.logger.warn(`[스킵] 방 컨텍스트 없음: ${roomName}`);
-            return;
-        }
+        if (!context) return;
 
         if (context.isPublishing) {
-            this.logger.warn(`[스킵] 처리 중 (${context.botState})`);
+            this.logger.debug(`[스킵] 이미 처리 중`);
             return;
         }
 
         const RESPONSE_COOLDOWN_MS = 3000;
-        const timeSinceLastResponse = Date.now() - context.lastResponseTime;
-        if (context.lastResponseTime > 0 && timeSinceLastResponse < RESPONSE_COOLDOWN_MS) {
-            this.logger.warn(`[스킵] 응답 쿨다운 중`);
+        if (context.lastResponseTime > 0 && Date.now() - context.lastResponseTime < RESPONSE_COOLDOWN_MS) {
+            this.logger.debug(`[스킵] 응답 쿨다운`);
             return;
         }
 
         const requestId = Date.now();
         context.currentRequestId = requestId;
-
         const startTime = Date.now();
-        this.logger.log(`\n========== [음성 처리 시작] ${userId} ==========`);
-        this.logger.log(`오디오 크기: ${audioBuffer.length} bytes, 상태: ${context.botState}`);
+
+        this.logger.log(`\n========== [음성 처리] ${userId} ==========`);
 
         try {
             context.isPublishing = true;
 
-            // ========================================
+            // ================================================
             // 1. STT (음성 → 텍스트) ~300ms
-            // ========================================
+            // ================================================
             const sttStart = Date.now();
             const transcript = await this.sttService.transcribeFromBufferStream(audioBuffer, 'live-audio.pcm');
-            const sttLatency = Date.now() - sttStart;
-            this.logger.log(`[1. STT] ${sttLatency}ms - "${transcript}"`);
+            this.logger.log(`[1.STT] ${Date.now() - sttStart}ms - "${transcript}"`);
 
-            if (context.currentRequestId !== requestId) {
-                this.logger.log(`[취소됨] 더 최신 요청이 있음 (STT 후)`);
-                return;
-            }
+            if (context.currentRequestId !== requestId) return;
+            if (!transcript.trim()) return;
 
-            if (!transcript.trim()) {
-                this.logger.log(`[스킵] 빈 텍스트`);
-                return;
-            }
-
-            // ========================================
-            // 2. 빠른 의도 분석 (패턴 + 퍼지 매칭) ~5ms
-            // ========================================
+            // ================================================
+            // 2. Intent 분석 (패턴 + 퍼지 매칭) ~5ms
+            // ================================================
             const intentStart = Date.now();
             const intentAnalysis = this.intentClassifier.classify(transcript);
-            const intentLatency = Date.now() - intentStart;
-            
-            this.logger.log(`[2. Intent] ${intentLatency}ms - call=${intentAnalysis.isCallIntent}, conf=${intentAnalysis.confidence.toFixed(2)}, cat=${intentAnalysis.category || 'none'}, needsLlm=${intentAnalysis.needsLlmCorrection}`);
-            this.logger.log(`   patterns: ${intentAnalysis.matchedPatterns.join(', ') || 'none'}`);
+            this.logger.log(`[2.Intent] ${Date.now() - intentStart}ms - call=${intentAnalysis.isCallIntent}, conf=${intentAnalysis.confidence.toFixed(2)}, cat=${intentAnalysis.category}, needsLlm=${intentAnalysis.needsLlmCorrection}`);
 
-            // 너무 짧은 텍스트 필터링 (웨이크워드/스톱워드 제외)
-            const isShort = transcript.trim().length <= 2;
-            const hasStopWord = this.STOP_WORDS.some(word =>
-                intentAnalysis.normalizedText.toLowerCase().includes(word.toLowerCase())
+            // 짧은 텍스트 필터링
+            const hasStopWord = this.STOP_WORDS.some(w =>
+                intentAnalysis.normalizedText.toLowerCase().includes(w.toLowerCase())
             );
-            
-            if (isShort && !intentAnalysis.isCallIntent && !hasStopWord) {
-                this.logger.log(`[스킵] 짧은 추임새: "${transcript}"`);
+            if (transcript.trim().length <= 2 && !intentAnalysis.isCallIntent && !hasStopWord) {
+                this.logger.log(`[스킵] 짧은 추임새`);
                 return;
             }
 
-            // ========================================
+            // ================================================
             // 3. 스톱워드 처리
-            // ========================================
+            // ================================================
             if (context.botState !== BotState.SLEEP && hasStopWord) {
-                this.logger.log(`[스톱워드 감지] "${transcript}" → SLEEP 전환`);
-                context.shouldInterrupt = true;
-                context.shouldInterrupt = false;
+                this.logger.log(`[스톱워드] → SLEEP`);
                 context.botState = BotState.SPEAKING;
                 await this.speakAndPublish(context, roomName, requestId, "알겠습니다. 다시 불러주세요.");
                 context.botState = BotState.SLEEP;
@@ -425,38 +384,32 @@ export class VoiceBotService {
                 return;
             }
 
-            // ========================================
-            // 4. 웨이크워드 감지 + LLM 교정 (필요시)
-            // ========================================
+            // ================================================
+            // 4. 웨이크워드 판단 + LLM 교정 (필요시만!)
+            // ================================================
             let shouldRespond = intentAnalysis.isCallIntent;
             let processedText = intentAnalysis.normalizedText;
             let searchKeyword = intentAnalysis.extractedKeyword;
             let searchType = intentAnalysis.searchType;
             let category = intentAnalysis.category;
 
-            // 웨이크워드가 확실하면 (confidence >= 0.6) 바로 처리
-            // 불확실하지만 가능성 있으면 (needsLlmCorrection) LLM 교정
+            // 확실하지 않지만 가능성 있으면 LLM 교정
             if (!shouldRespond && intentAnalysis.needsLlmCorrection) {
-                this.logger.log(`[3. LLM 교정 시작] confidence=${intentAnalysis.confidence.toFixed(2)}`);
-                
-                const llmCorrectionStart = Date.now();
-                const correctionResult = await this.sttService.correctWithLlm(transcript);
-                const llmCorrectionLatency = Date.now() - llmCorrectionStart;
-                
-                this.logger.log(`[3. LLM 교정] ${llmCorrectionLatency}ms - wake=${correctionResult.hasWakeWord}, cat=${correctionResult.category}, kw="${correctionResult.searchKeyword}"`);
+                this.logger.log(`[3.LLM교정] 시작 (conf=${intentAnalysis.confidence.toFixed(2)})`);
+                const correctionStart = Date.now();
+                const voiceIntent = await this.llmService.processVoiceIntent(transcript, intentAnalysis);
+                this.logger.log(`[3.LLM교정] ${Date.now() - correctionStart}ms - respond=${voiceIntent.shouldRespond}`);
 
-                if (correctionResult.hasWakeWord) {
-                    shouldRespond = true;
-                    processedText = correctionResult.correctedText;
-                    searchKeyword = correctionResult.searchKeyword;
-                    searchType = correctionResult.searchType;
-                    category = correctionResult.category;
-                }
+                shouldRespond = voiceIntent.shouldRespond;
+                processedText = voiceIntent.correctedText;
+                searchKeyword = voiceIntent.searchKeyword;
+                searchType = voiceIntent.searchType;
+                category = voiceIntent.category;
             }
 
-            // ========================================
-            // 5. SLEEP 상태: 웨이크워드 없으면 무시
-            // ========================================
+            // ================================================
+            // 5. SLEEP 상태 처리
+            // ================================================
             if (context.botState === BotState.SLEEP) {
                 if (!shouldRespond) {
                     this.logger.log(`[SLEEP] 웨이크워드 없음 - 무시`);
@@ -464,161 +417,158 @@ export class VoiceBotService {
                 }
 
                 // 웨이크워드 감지 → ARMED 전환
-                this.logger.log(`[웨이크워드 감지] "${transcript}" → ARMED 전환`);
-                context.lastInteractionTime = Date.now();
-                context.activeUserId = userId;
+                this.logger.log(`[웨이크워드] → ARMED`);
                 context.botState = BotState.ARMED;
+                context.activeUserId = userId;
+                context.lastInteractionTime = Date.now();
 
-                // 웨이크워드만 있고 질문이 없으면 안내 응답
+                // 질문이 있는지 확인
                 const hasQuestion = intentAnalysis.isQuestionIntent ||
                     intentAnalysis.hasCommandWord ||
-                    intentAnalysis.hasRequestPattern;
+                    intentAnalysis.hasRequestPattern ||
+                    (searchKeyword && searchKeyword.length >= 2);
 
-                if (!hasQuestion || !searchKeyword || searchKeyword.length < 2) {
+                // 웨이크워드만 있고 질문 없으면 안내 응답
+                if (!hasQuestion) {
                     this.logger.log(`[웨이크워드만] 안내 응답`);
                     context.botState = BotState.SPEAKING;
                     await this.speakAndPublish(context, roomName, requestId, "네, 무엇을 도와드릴까요?");
                     context.botState = BotState.ARMED;
-                    context.lastInteractionTime = Date.now();
                     context.lastResponseTime = Date.now();
                     return;
                 }
+
+                // 질문이 있으면 아래 ARMED 블록에서 계속 처리!
             }
 
-            // ========================================
-            // 6. SPEAKING 상태: 무시 (웨이크워드/스톱워드는 위에서 처리됨)
-            // ========================================
+            // ================================================
+            // 6. SPEAKING 상태: 무시
+            // ================================================
             if (context.botState === BotState.SPEAKING) {
-                this.logger.log(`[SPEAKING] 응답 중 - 무시`);
+                this.logger.log(`[SPEAKING] 발화 중 - 무시`);
                 return;
             }
 
-            // ========================================
+            // ================================================
             // 7. ARMED 상태: 명령 처리
-            // ========================================
+            // ================================================
             if (context.botState === BotState.ARMED) {
-                // 활성 사용자만 명령 가능
+                // 활성 사용자 체크
                 if (context.activeUserId && context.activeUserId !== userId) {
-                    this.logger.log(`[스킵] ${userId}는 활성 사용자(${context.activeUserId})가 아님`);
+                    this.logger.log(`[스킵] ${userId}는 활성 사용자 아님`);
                     return;
                 }
 
-                // 웨이크워드/봇 호칭 없으면 무시
+                // 웨이크워드/봇 호칭 없으면 무시 (SLEEP에서 전환된 경우는 shouldRespond=true)
                 if (!shouldRespond && !intentAnalysis.isBotRelated) {
                     this.logger.log(`[스킵] 웨이크워드/호칭 없음`);
                     return;
                 }
 
-                // 질문이 아니면 무시
+                // 질문/명령 체크
                 if (!intentAnalysis.isQuestionIntent &&
                     !intentAnalysis.hasCommandWord &&
-                    !intentAnalysis.hasRequestPattern) {
+                    !intentAnalysis.hasRequestPattern &&
+                    (!searchKeyword || searchKeyword.length < 2)) {
                     this.logger.log(`[스킵] 질문/명령 아님`);
                     return;
                 }
 
                 context.lastInteractionTime = Date.now();
 
-                // ========================================
+                // ============================================
                 // 8. 검색 키워드 준비
-                // ========================================
+                // ============================================
                 let finalSearchKeyword = searchKeyword;
-                let finalSearchType = searchType || 'news';
+                let finalCategory = category;
 
-                // 키워드가 없거나 짧으면 LLM으로 추출
                 if (!finalSearchKeyword || finalSearchKeyword.length < 2) {
-                    this.logger.log(`[키워드 추출] LLM buildSearchPlan 호출`);
+                    this.logger.log(`[키워드 추출] buildSearchPlan 호출`);
                     const searchPlan = await this.llmService.buildSearchPlan(processedText);
                     finalSearchKeyword = searchPlan.query;
-                    finalSearchType = searchPlan.searchType;
-                    category = searchPlan.category || category;
+                    finalCategory = searchPlan.category || category;
                 }
 
-                this.logger.log(`[검색 준비] keyword="${finalSearchKeyword}", type=${finalSearchType}, cat=${category}`);
+                this.logger.log(`[검색 준비] keyword="${finalSearchKeyword}", cat=${finalCategory}`);
 
-                // ========================================
-                // 9. 생각중 응답 (LLM 응답이 늦을 경우)
-                // ========================================
-                const thinkingPhrases = [
-                    "잠깐만요, 생각해볼게요.",
-                    "음… 정리해볼게요.",
-                    "잠시만요, 확인하고 말씀드릴게요."
-                ];
+                // ============================================
+                // 9. LLM 호출 (생각중 응답 포함)
+                // ============================================
+                const thinkingPhrases = ["잠깐만요, 찾아볼게요.", "음, 확인해볼게요.", "잠시만요."];
                 const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
                 let thinkingSpoken = false;
                 let llmResolved = false;
 
                 const llmStart = Date.now();
-                const llmPromise = this.llmService.sendMessage(processedText, intentAnalysis.searchDomain, roomName).finally(() => {
-                    llmResolved = true;
-                });
+                const llmPromise = this.llmService.sendMessage(
+                    processedText,
+                    intentAnalysis.searchDomain,
+                    roomName
+                ).finally(() => { llmResolved = true; });
 
+                // 700ms 후에도 응답 없으면 "생각중" 발화
                 const thinkingTask = (async () => {
                     await this.sleep(700);
-                    if (llmResolved || context.currentRequestId !== requestId) {
-                        return;
-                    }
-                    this.logger.log(`[생각중] 응답 준비 중...`);
-                    context.shouldInterrupt = false;
+                    if (llmResolved || context.currentRequestId !== requestId) return;
+                    this.logger.log(`[생각중] 응답 대기...`);
                     context.botState = BotState.SPEAKING;
                     thinkingSpoken = true;
                     await this.speakAndPublish(context, roomName, requestId, thinkingPhrase);
                     context.botState = BotState.ARMED;
-                    context.lastInteractionTime = Date.now();
                 })();
 
                 const llmResult = await llmPromise;
                 await thinkingTask;
 
+                this.logger.log(`[4.LLM] ${Date.now() - llmStart}ms - "${llmResult.text.substring(0, 50)}..."`);
+
+                if (context.currentRequestId !== requestId) return;
+
                 const finalResponse = thinkingSpoken ? `네, ${llmResult.text.trim()}` : llmResult.text;
-                const llmLatency = Date.now() - llmStart;
-                this.logger.log(`[4. LLM 응답] ${llmLatency}ms - "${llmResult.text.substring(0, 50)}..."`);
 
-                if (context.currentRequestId !== requestId) {
-                    this.logger.log(`[취소됨] 더 최신 요청이 있음 (LLM 후)`);
-                    return;
-                }
-
-                // ========================================
-                // 10. 검색 결과 DataChannel 전송
-                // ========================================
+                // ============================================
+                // 10. DataChannel 전송 (검색 결과)
+                // ============================================
                 if (llmResult.searchResults && llmResult.searchResults.length > 0) {
-                    this.logger.log(`[검색 결과] ${llmResult.searchResults.length}개`);
                     const primaryResult = llmResult.searchResults[0];
                     const routeInfo = await this.llmService.getRouteInfo(primaryResult);
+
                     const searchMessage = {
                         type: 'search_answer',
                         text: finalResponse,
-                        category: category,
+                        category: finalCategory,
                         results: llmResult.searchResults,
                         route: routeInfo || undefined,
                     };
+
                     const encoder = new TextEncoder();
-                    const data = encoder.encode(JSON.stringify(searchMessage));
-                    await context.room.localParticipant.publishData(data, { reliable: true });
-                    this.logger.log(`[DataChannel 전송 완료]`);
+                    await context.room.localParticipant.publishData(
+                        encoder.encode(JSON.stringify(searchMessage)),
+                        { reliable: true }
+                    );
+                    this.logger.log(`[DataChannel] 검색 결과 전송 (${llmResult.searchResults.length}개)`);
                 }
 
-                // ========================================
-                // 11. TTS + 오디오 발행
-                // ========================================
+                // ============================================
+                // 11. TTS 발화
+                // ============================================
                 context.shouldInterrupt = false;
                 context.botState = BotState.SPEAKING;
                 await this.speakAndPublish(context, roomName, requestId, finalResponse);
 
-                // 응답 완료 후 SLEEP으로 복귀
+                // 응답 완료 → SLEEP
                 context.botState = BotState.SLEEP;
                 context.activeUserId = null;
-                context.lastInteractionTime = Date.now();
                 context.lastResponseTime = Date.now();
 
-                const totalLatency = Date.now() - startTime;
-                this.logger.log(`========== [완료] 총 ${totalLatency}ms ==========\n`);
+                this.logger.log(`========== [완료] 총 ${Date.now() - startTime}ms ==========\n`);
             }
 
         } catch (error) {
-            this.logger.error(`[처리 실패] ${error.message}`, error.stack);
-            context.botState = BotState.ARMED;
+            this.logger.error(`[에러] ${error.message}`, error.stack);
+            // 에러 시 안전하게 SLEEP 복귀
+            context.botState = BotState.SLEEP;
+            context.activeUserId = null;
         } finally {
             if (context.currentRequestId === requestId) {
                 context.isPublishing = false;
@@ -633,8 +583,6 @@ export class VoiceBotService {
         const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE;
         const BATCH_SIZE = 4;
 
-        this.logger.log(`[오디오 발행] 총 ${pcmBuffer.length} bytes`);
-
         let offset = 0;
         let frameCount = 0;
         const startTime = Date.now();
@@ -642,7 +590,7 @@ export class VoiceBotService {
         while (offset < pcmBuffer.length) {
             const context = this.activeRooms.get(roomName);
             if (context?.shouldInterrupt) {
-                this.logger.log(`[오디오 발행 중단] Barge-in`);
+                this.logger.log(`[오디오 중단] Barge-in`);
                 context.shouldInterrupt = false;
                 break;
             }
@@ -663,7 +611,7 @@ export class VoiceBotService {
                 frameCount++;
             }
 
-            const expectedTime = (frameCount * 30);
+            const expectedTime = frameCount * 30;
             const actualTime = Date.now() - startTime;
             const sleepTime = Math.max(0, expectedTime - actualTime - 10);
 
@@ -671,8 +619,6 @@ export class VoiceBotService {
                 await this.sleep(sleepTime);
             }
         }
-
-        this.logger.log(`[오디오 발행 완료] ${frameCount} 프레임, ${Date.now() - startTime}ms`);
     }
 
     private sleep(ms: number): Promise<void> {
@@ -686,17 +632,14 @@ export class VoiceBotService {
         message: string
     ): Promise<void> {
         context.shouldInterrupt = false;
+
         const ttsStart = Date.now();
         const pcmAudio = await this.ttsService.synthesizePcm(message);
-        const ttsLatency = Date.now() - ttsStart;
-        this.logger.log(`[TTS] ${ttsLatency}ms - ${pcmAudio.length} bytes`);
+        this.logger.log(`[TTS] ${Date.now() - ttsStart}ms - ${pcmAudio.length} bytes`);
 
         context.speakingStartTime = Date.now();
 
-        if (context.currentRequestId !== requestId) {
-            this.logger.log(`[취소됨] 더 최신 요청이 있음 (TTS 후)`);
-            return;
-        }
+        if (context.currentRequestId !== requestId) return;
 
         await this.publishAudio(roomName, context.audioSource, pcmAudio);
     }
@@ -725,9 +668,8 @@ export class VoiceBotService {
         if (context) {
             try {
                 await this.ragClientService.disconnect(roomName);
-                this.logger.log(`[RAG 연결 해제 완료]`);
             } catch (error) {
-                this.logger.error(`[RAG 연결 해제 실패] ${error.message}`);
+                this.logger.error(`[RAG 해제 실패] ${error.message}`);
             }
 
             await context.room.disconnect();
