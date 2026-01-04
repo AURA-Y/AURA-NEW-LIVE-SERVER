@@ -585,7 +585,7 @@ SEARCH RULES:
         return matches ? matches : [];
     }
 
-    private async buildSearchPlan(rawQuery: string): Promise<{ query: string; cacheKey: string; searchType: 'local' | 'news'; category: string | null }> {
+    public async buildSearchPlan(rawQuery: string): Promise<{ query: string; cacheKey: string; searchType: 'local' | 'news'; category: string | null }> {
         const base = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
         const fallback = this.buildSearchQuery(rawQuery);
         const fallbackCategory = this.pickCategoryLabel(rawQuery, []);
@@ -1005,5 +1005,131 @@ SEARCH RULES:
 
     private setCachedSearch(cacheKey: string, results: SearchResult[]): void {
         this.searchCache.set(cacheKey, { expiresAt: Date.now() + this.SEARCH_CACHE_TTL_MS, results });
+    }
+
+    async processVoiceIntent(
+        rawTranscript: string,
+        intentAnalysis: {
+            isCallIntent: boolean;
+            confidence: number;
+            normalizedText: string;
+            category?: string | null;
+            extractedKeyword?: string | null;
+            searchType?: 'local' | 'news' | null;
+            needsLlmCorrection: boolean;
+        },
+    ): Promise<{
+        shouldRespond: boolean;
+        correctedText: string;
+        searchKeyword: string | null;
+        searchType: 'local' | 'news' | null;
+        category: string | null;
+    }> {
+        // 이미 웨이크워드가 확실하면 IntentClassifier 결과 사용
+        if (intentAnalysis.isCallIntent && intentAnalysis.confidence >= 0.6) {
+            // 키워드가 없으면 LLM으로 추출
+            if (!intentAnalysis.extractedKeyword) {
+                const { query, searchType } = await this.buildSearchPlan(intentAnalysis.normalizedText);
+                return {
+                    shouldRespond: true,
+                    correctedText: intentAnalysis.normalizedText,
+                    searchKeyword: query,
+                    searchType,
+                    category: intentAnalysis.category || null,
+                };
+            }
+
+            return {
+                shouldRespond: true,
+                correctedText: intentAnalysis.normalizedText,
+                searchKeyword: intentAnalysis.extractedKeyword,
+                searchType: intentAnalysis.searchType || 'news',
+                category: intentAnalysis.category || null,
+            };
+        }
+
+        // LLM 보정 필요한 경우
+        if (intentAnalysis.needsLlmCorrection) {
+            return this.correctAndExtract(rawTranscript);
+        }
+
+        // 웨이크워드 없음
+        return {
+            shouldRespond: false,
+            correctedText: intentAnalysis.normalizedText,
+            searchKeyword: null,
+            searchType: null,
+            category: null,
+        };
+    }
+
+    private async correctAndExtract(rawTranscript: string): Promise<{
+        shouldRespond: boolean;
+        correctedText: string;
+        searchKeyword: string | null;
+        searchType: 'local' | 'news' | null;
+        category: string | null;
+    }> {
+        const prompt = `화상회의 음성인식 결과를 분석하세요.
+
+## 웨이크워드
+표준: 빅스야, 빅스비, 헤이빅스
+변형: 믹스야, 익수야, 빅세야, 빅쓰, 픽스야, 비수야, 긱스야, 익쇠야, 해빅스, 에이빅스 등
+
+## 카테고리
+카페, 맛집, 술집, 분식, 치킨, 피자, 빵집, 디저트, 쇼핑, 팝업, 전시, 날씨, 뉴스, 주식, 스포츠, 영화
+
+## 검색타입
+- local: 장소/맛집/카페/가게
+- news: 뉴스/날씨/정보/주식
+
+## 입력
+"${rawTranscript}"
+
+## 출력 (JSON만)
+{"hasWakeWord":true/false,"correctedText":"교정문장","searchKeyword":"키워드","searchType":"local/news","category":"카테고리","confidence":0.0-1.0}`;
+
+        try {
+            const payload = {
+                anthropic_version: "bedrock-2023-05-31",
+                max_tokens: 200,
+                messages: [{ role: "user", content: prompt }],
+            };
+
+            const command = new InvokeModelCommand({
+                modelId: this.modelId,
+                contentType: 'application/json',
+                accept: 'application/json',
+                body: JSON.stringify(payload),
+            });
+
+            const response = await this.bedrockClient.send(command);
+            const body = JSON.parse(new TextDecoder().decode(response.body));
+            const text = body.content?.[0]?.text || '{}';
+
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) throw new Error('JSON not found');
+
+            const result = JSON.parse(jsonMatch[0]);
+
+            this.logger.log(`[LLM 통합] "${rawTranscript.substring(0, 30)}..." → wake=${result.hasWakeWord}, cat=${result.category}, kw="${result.searchKeyword}"`);
+
+            return {
+                shouldRespond: result.hasWakeWord ?? false,
+                correctedText: result.correctedText ?? rawTranscript,
+                searchKeyword: result.searchKeyword ?? null,
+                searchType: result.searchType === 'local' ? 'local' : (result.searchType === 'news' ? 'news' : null),
+                category: result.category ?? null,
+            };
+        } catch (error) {
+            this.logger.warn(`[LLM 통합 실패] ${error.message}`);
+            return {
+                shouldRespond: false,
+                correctedText: rawTranscript,
+                searchKeyword: null,
+                searchType: null,
+                category: null,
+            };
+        }
     }
 }
