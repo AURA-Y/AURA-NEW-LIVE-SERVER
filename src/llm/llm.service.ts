@@ -585,31 +585,73 @@ SEARCH RULES:
         return matches ? matches : [];
     }
 
-    public async buildSearchPlan(rawQuery: string): Promise<{ query: string; cacheKey: string; searchType: 'local' | 'news'; category: string | null }> {
+    public async buildSearchPlan(rawQuery: string): Promise<{ 
+        query: string; 
+        cacheKey: string; 
+        searchType: 'local' | 'news'; 
+        category: string | null 
+    }> {
         const base = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
-        const fallback = this.buildSearchQuery(rawQuery);
+        
+        // 1. 날씨 관련 - LLM 없이 바로 처리
+        const weatherKeywords = ['날씨', '기온', '온도', '비', '눈', '미세먼지', '우산', '더워', '추워'];
+        const isWeather = weatherKeywords.some(kw => base.includes(kw));
+        
+        if (isWeather) {
+            const location = this.extractLocation(base) || '서울';
+            const timeWord = base.includes('내일') ? '내일' : 
+                            base.includes('모레') ? '모레' : 
+                            base.includes('이번주') ? '이번주' : '오늘';
+            const query = `${location} ${timeWord} 날씨`;
+            
+            this.logger.log(`[검색 계획] 날씨 감지 → query="${query}"`);
+            return {
+                query,
+                cacheKey: `weather|${query}`,
+                searchType: 'news',
+                category: '날씨',
+            };
+        }
+    
+        // 2. 장소 관련 - 간단 키워드
+        const localKeywords = ['카페', '맛집', '식당', '술집', '빵집', '디저트', '치킨', '피자', '팝업', '전시'];
+        const isLocal = localKeywords.some(kw => base.includes(kw));
+        
+        if (isLocal) {
+            const location = this.extractLocation(base);
+            const category = localKeywords.find(kw => base.includes(kw));
+            const query = location ? `${location} ${category}` : category!;
+            
+            this.logger.log(`[검색 계획] 장소 감지 → query="${query}"`);
+            return {
+                query,
+                cacheKey: `local|${query}`,
+                searchType: 'local',
+                category: category || '기타',
+            };
+        }
+    
+        // 3. 그 외 - LLM으로 키워드 추출
         const fallbackCategory = this.pickCategoryLabel(rawQuery, []);
+        
         const system = [
             'You are a search query planner for Korean user requests.',
             'Return only a JSON object with keys: searchType, category, and query.',
             'searchType must be "local" for places/food/shops, otherwise "news".',
-            'category must be one of: 카페, 맛집, 팝업, 전시, 쇼핑, 기타.',
-            'query must be short Korean nouns (e.g., "성수동 카페").',
-            'Remove verbs, particles, and filler words.',
+            'category must be one of: 카페, 맛집, 팝업, 전시, 쇼핑, 날씨, 뉴스, 주식, 스포츠, 기타.',
+            'query must be short Korean nouns only (2-4 words max).',
+            'Remove verbs, particles, filler words, and DO NOT add site: or date filters.',
+            'Examples: "성수동 카페", "서울 날씨", "삼성전자 주가"',
             'No extra text, no markdown.',
         ].join(' ');
+    
         const payload = {
             anthropic_version: "bedrock-2023-05-31",
             max_tokens: 120,
             system,
-            messages: [
-                {
-                    role: "user",
-                    content: rawQuery,
-                },
-            ],
+            messages: [{ role: "user", content: rawQuery }],
         };
-
+    
         try {
             const command = new InvokeModelCommand({
                 modelId: this.modelId,
@@ -617,40 +659,83 @@ SEARCH RULES:
                 accept: 'application/json',
                 body: JSON.stringify(payload),
             });
+            
             const response = await this.bedrockClient.send(command);
             const responseBody = JSON.parse(new TextDecoder().decode(response.body));
             const textBlock = responseBody.content.find((block: any) => block.type === 'text');
             const rawText = (textBlock?.text || '').trim();
             const jsonText = rawText.match(/\{[\s\S]*\}/)?.[0];
+            
             if (!jsonText) {
-                throw new Error('Search plan JSON not found');
+                throw new Error('JSON not found');
             }
+            
             const parsed = JSON.parse(jsonText);
             const searchType = parsed.searchType === 'local' ? 'local' : 'news';
             let query = typeof parsed.query === 'string' ? parsed.query.trim() : '';
+            
             if (!query) {
-                throw new Error('Empty plan query');
+                throw new Error('Empty query');
             }
+    
+            // site: 필터 제거 (LLM이 실수로 넣었을 경우)
+            query = query.replace(/site:\S+/gi, '').trim();
+            // 날짜 제거
+            query = query.replace(/\d{4}-\d{2}-\d{2}/g, '').trim();
+            // "최신" 제거
+            query = query.replace(/최신/g, '').trim();
+    
             const category = typeof parsed.category === 'string' ? parsed.category.trim() : fallbackCategory;
-            if (searchType === 'local') {
-                query = this.normalizeLocalQuery(query);
-            } else {
-                query = this.formatNewsQuery(query);
-            }
-            const cacheKey = `${base}|${searchType}|${query}`;
+            const cacheKey = `${searchType}|${query}`;
+            
             this.lastSearchCategory = category || fallbackCategory;
+            this.logger.log(`[검색 계획] LLM → type=${searchType}, cat=${category}, query="${query}"`);
+            
             return { query, cacheKey, searchType, category };
         } catch (error) {
-            this.logger.warn(`[검색 계획 실패] ${error.message}`);
-            this.lastSearchCategory = fallbackCategory;
-            return { ...fallback, category: fallbackCategory };
+            this.logger.warn(`[검색 계획 실패] ${error.message} - 폴백 사용`);
+            
+            // 폴백: 단순 키워드 추출
+            const query = base
+                .replace(/[을를이가은는에서의으로]/g, ' ')
+                .replace(/알려줘|추천해줘|찾아줘|검색해줘/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+                
+            return {
+                query: query || base,
+                cacheKey: `news|${query}`,
+                searchType: 'news',
+                category: fallbackCategory,
+            };
         }
+    }
+    
+    private extractLocation(text: string): string | null {
+        const locations = [
+            // 광역시/도
+            '서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종',
+            '경기', '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주',
+            // 서울 주요 지역
+            '강남', '홍대', '신촌', '잠실', '여의도', '판교', '성수', '이태원',
+            '명동', '종로', '압구정', '청담', '삼성', '역삼', '선릉', '건대',
+            '합정', '망원', '연남', '을지로', '성북', '혜화', '대학로',
+            // 경기 주요 지역
+            '분당', '일산', '수원', '용인', '화성', '평택', '안양', '부천',
+        ];
+    
+        for (const loc of locations) {
+            if (text.includes(loc)) {
+                return loc;
+            }
+        }
+        return null;
     }
 
     private formatNewsQuery(rawQuery: string): string {
-        const kstDate = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        // 네이버 API는 site: 연산자 지원 안 함 - 단순 키워드만
         const normalized = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
-        return `${normalized} ${kstDate} 최신 site:naver.com OR site:blog.naver.com OR site:kin.naver.com`;
+        return normalized;
     }
 
     private buildNaverDirectionUrl(mapx: string, mapy: string, title: string, placeId?: string): string | null {
