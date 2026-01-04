@@ -319,10 +319,10 @@ export class SttService {
     }
 
     private async transcribeFromBufferStreamClova(audioBuffer: Buffer, fileName: string): Promise<string> {
-        this.logger.log(`[Clova 스트림 STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
-        const audioStream = Readable.from([audioBuffer]);
+        this.logger.log(`[Clova 파일 STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
+        // recognizeOnceClova 사용: 버퍼를 청크로 나눠서 전송 (스트리밍 API보다 안정적)
         try {
-            const transcript = await this.transcribeStreamClova(audioStream);
+            const transcript = await this.recognizeOnceClova(audioBuffer);
             this.logger.log(`[Clova STT 완료] 전체 결과: ${transcript}`);
             return transcript || '';
         } catch (error) {
