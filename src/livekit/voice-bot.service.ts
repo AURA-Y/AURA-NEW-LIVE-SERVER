@@ -649,7 +649,7 @@ export class VoiceBotService {
     }
 
     /**
-     * TTS + 오디오 발행 헬퍼
+     * TTS + 오디오 발행 헬퍼 (with viseme events for lip-sync)
      */
     private async speakAndPublish(
         context: RoomContext,
@@ -660,9 +660,11 @@ export class VoiceBotService {
         // 직전 끼어들기 플래그가 있으면 초기화해 발화가 즉시 끊기지 않게 함
         context.shouldInterrupt = false;
         const ttsStart = Date.now();
-        const pcmAudio = await this.ttsService.synthesizePcm(message);
+
+        // Get audio with viseme data
+        const ttsResult = await this.ttsService.synthesizeWithVisemes(message);
         const ttsLatency = Date.now() - ttsStart;
-        this.logger.log(`[TTS] ${ttsLatency}ms - ${pcmAudio.length} bytes`);
+        this.logger.log(`[TTS] ${ttsLatency}ms - ${ttsResult.audio.length} bytes, ${ttsResult.visemes.length} visemes`);
 
         // 최신 요청 체크
         if (context.currentRequestId !== requestId) {
@@ -670,8 +672,24 @@ export class VoiceBotService {
             return;
         }
 
+        // Send viseme events via DataChannel for frontend lip-sync
+        if (ttsResult.visemes.length > 0) {
+            try {
+                const visemeMessage = {
+                    type: 'viseme_events',
+                    visemes: ttsResult.visemes,
+                };
+                const encoder = new TextEncoder();
+                const data = encoder.encode(JSON.stringify(visemeMessage));
+                await context.room.localParticipant.publishData(data, { reliable: true });
+                this.logger.log(`[Viseme 전송] ${ttsResult.visemes.length}개 이벤트`);
+            } catch (e) {
+                this.logger.warn(`[Viseme 전송 실패] ${e.message}`);
+            }
+        }
+
         // LiveKit으로 오디오 발행
-        await this.publishAudio(roomName, context.audioSource, pcmAudio);
+        await this.publishAudio(roomName, context.audioSource, ttsResult.audio);
     }
 
     /**
