@@ -415,6 +415,17 @@ SEARCH RULES:
                     finalMessage = this.buildSingleRecommendation(searchResults[0]);
                 } else if (this.lastSearchType === 'encyc') {
                     finalMessage = this.buildEncycSummary(finalMessage, searchResults);
+                } else if (this.lastSearchType === 'news' && this.lastSearchCategory === '공연') {
+                    finalMessage = this.buildMovieListSummary(searchResults);
+                } else if (this.lastSearchType === 'web' && this.lastSearchCategory === '공연') {
+                    const lastUserText = this.getLastUserText(messages);
+                    if (this.isMovieQuery(lastUserText)) {
+                        finalMessage = this.buildMovieListSummary(searchResults);
+                        const cinemaLink = await this.buildNearbyCinemaLink();
+                        if (cinemaLink) {
+                            finalMessage = `${finalMessage}\n근처 영화관 예약 페이지: ${cinemaLink}`;
+                        }
+                    }
                 }
             }
 
@@ -529,6 +540,10 @@ SEARCH RULES:
             '뉴스', '속보', '이슈', '사건', '사고', '재난', '정치', '대통령', '국회', '정부', '법안', '선거',
             '경제', '환율', '물가', '금리', '주가', '증시', '코스피', '코스닥', '비트코인', '가상화폐', '코인',
             '기업', '실적', '투자', '상장', '인수', '합병', '파산', '재무',
+            '흥행',
+        ];
+        const entertainmentKeywords = [
+            '영화', '개봉', '상영', '개봉작', '예매', '박스오피스',
         ];
         const medicalKeywords = [
             '약', '약물', '약품', '성분', '효능', '효과', '부작용', '복용', '용량', '금기', '질병', '증상', '진단', '치료',
@@ -561,6 +576,9 @@ SEARCH RULES:
         }
         if (newsKeywords.some((word) => normalized.includes(word))) {
             return 'news';
+        }
+        if (entertainmentKeywords.some((word) => normalized.includes(word))) {
+            return 'web';
         }
         if (medicalKeywords.some((word) => normalized.includes(word)) || definitionKeywords.some((word) => normalized.includes(word))) {
             return 'encyc';
@@ -656,6 +674,7 @@ SEARCH RULES:
             'Return only a JSON object with keys: searchType, category, and query.',
             'searchType must be one of: local, news, web, encyc, it, law, finance, education.',
             'Use local for places/food/shops, news for current events, encyc for definitions/medical terms.',
+            'Use web for entertainment topics like movies/releases/box office unless the user explicitly asks for news.',
             'Use it/law/finance/education when the topic matches those domains; otherwise use web.',
             'category must be one of: 카페, 맛집, 술집, 쇼핑, 전시, 팝업, 공연, 여행, 숙소, 의학, 법률, IT, 금융, 교육, 기타.',
             'query must be short Korean nouns (e.g., "성수동 카페").',
@@ -721,7 +740,7 @@ SEARCH RULES:
     private formatNewsQuery(rawQuery: string): string {
         const kstDate = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
         const normalized = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
-        return `${normalized} ${kstDate} 최신 site:naver.com OR site:blog.naver.com OR site:kin.naver.com`;
+        return `${normalized} ${kstDate} 최신`;
     }
 
     private formatGeneralQuery(rawQuery: string): string {
@@ -1037,6 +1056,115 @@ SEARCH RULES:
         return `${cleanSummary}\n해당 정보를 채팅창으로 공유드릴게요.`.trim();
     }
 
+    private buildMovieListSummary(results: SearchResult[]): string {
+        const titles = this.extractMovieTitles(results)
+            .slice(0, 3);
+        if (!titles.length) {
+            return '최근 개봉 영화 정보를 찾지 못했어요.\n해당 정보를 채팅창으로 공유드릴게요.';
+        }
+        return `최근 개봉 영화로는 ${titles.join(', ')}가 있어요.\n해당 정보를 채팅창으로 공유드릴게요.`;
+    }
+
+    private extractMovieTitles(results: SearchResult[]): string[] {
+        const candidates: string[] = [];
+        for (const result of results) {
+            const sanitized = this.sanitizeTitle(result.title);
+            if (!sanitized) continue;
+            const parts = sanitized
+                .split(/[:\-\|·]/g)
+                .map((p) => p.replace(/\b(top|rank|순위|랭킹|추천|정보|정리|최신|개봉|상영)\b/gi, '').trim())
+                .filter(Boolean);
+            if (parts.length === 0) {
+                candidates.push(sanitized);
+                continue;
+            }
+            for (const part of parts) {
+                if (part.length >= 2 && part.length <= 20) {
+                    candidates.push(part);
+                }
+            }
+        }
+        const seen = new Set<string>();
+        const unique = candidates.filter((title) => {
+            const key = title.replace(/\s+/g, '');
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        return unique.length ? unique : results.map((r) => this.sanitizeTitle(r.title)).filter(Boolean);
+    }
+
+    private sanitizeTitle(title: string): string {
+        return title
+            .replace(/^\[[^\]]+\]\s*/g, '')
+            .replace(/\b(오늘|이번|최근|현재|국내|한국)\b/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    private getLastUserText(messages: any[]): string {
+        const lastUser = [...messages].reverse().find((msg) => msg.role === 'user');
+        return typeof lastUser?.content === 'string' ? lastUser.content : '';
+    }
+
+    private isMovieQuery(text: string): boolean {
+        const normalized = text.toLowerCase();
+        return ['영화', '개봉', '상영', '개봉작', '예매', '박스오피스'].some((word) => normalized.includes(word));
+    }
+
+    private async buildNearbyCinemaLink(): Promise<string | null> {
+        const origin = this.configService.get<string>('NAVER_MAP_ORIGIN');
+        if (!origin) {
+            return null;
+        }
+        const [originLng, originLat] = origin.split(',').map((v) => v.trim());
+        let query = '영화관';
+
+        const region = await this.reverseGeocodeRegion(originLng, originLat);
+        const area = region?.area2 || region?.area3 || region?.area1;
+        if (area) {
+            query = `${area} 영화관`;
+        }
+
+        try {
+            const results = await this.searchWithNaver(query, 'local', 1, 'sim');
+            return results[0]?.mapUrl || null;
+        } catch (error) {
+            this.logger.warn(`[영화관 검색 실패] ${error.message}`);
+            return null;
+        }
+    }
+
+    private async reverseGeocodeRegion(
+        lng: string,
+        lat: string
+    ): Promise<{ area1?: string; area2?: string; area3?: string } | null> {
+        if (!this.naverMapKeyId || !this.naverMapKey) {
+            return null;
+        }
+        const url = new URL('https://naveropenapi.apigw.ntruss.com/map-reversegeocode/v2/gc');
+        url.searchParams.set('coords', `${lng},${lat}`);
+        url.searchParams.set('orders', 'legalcode');
+        url.searchParams.set('output', 'json');
+
+        const response = await fetch(url.toString(), {
+            headers: {
+                'X-NCP-APIGW-API-KEY-ID': this.naverMapKeyId,
+                'X-NCP-APIGW-API-KEY': this.naverMapKey,
+            },
+        });
+        if (!response.ok) {
+            return null;
+        }
+        const body = await response.json();
+        const region = body?.results?.[0]?.region;
+        return {
+            area1: region?.area1?.name,
+            area2: region?.area2?.name,
+            area3: region?.area3?.name,
+        };
+    }
+
     private buildSearchQuery(rawQuery: string): { query: string; cacheKey: string; searchType: SearchType } {
         const trimmed = this.normalizeSearchQuery(rawQuery);
         const searchType = this.pickSearchType(trimmed);
@@ -1062,7 +1190,7 @@ SEARCH RULES:
         if (text.includes('술집') || text.includes('바') || text.includes('포차') || text.includes('와인바')) return '술집';
         if (text.includes('팝업') || text.includes('팝업스토어')) return '팝업';
         if (text.includes('전시') || text.includes('갤러리') || text.includes('미술관') || text.includes('박물관')) return '전시';
-        if (text.includes('공연') || text.includes('연극') || text.includes('뮤지컬') || text.includes('콘서트') || text.includes('영화관') || text.includes('극장')) return '공연';
+        if (text.includes('공연') || text.includes('연극') || text.includes('뮤지컬') || text.includes('콘서트') || text.includes('영화') || text.includes('영화관') || text.includes('극장')) return '공연';
         if (text.includes('쇼핑') || text.includes('백화점') || text.includes('아울렛') || text.includes('매장') || text.includes('가게') || text.includes('편집샵')) return '쇼핑';
         if (text.includes('여행') || text.includes('관광') || text.includes('코스')) return '여행';
         if (text.includes('숙소') || text.includes('호텔') || text.includes('펜션') || text.includes('리조트') || text.includes('게스트하우스')) return '숙소';
