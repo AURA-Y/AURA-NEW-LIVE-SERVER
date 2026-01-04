@@ -8,6 +8,7 @@ import { LlmService } from '../llm/llm.service'; //통합 검색
 import { TtsService } from '../tts/tts.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
+import { LinkReportDto } from './dto/link-report.dto';
 
 @Controller('room')
 export class LivekitController {
@@ -15,9 +16,17 @@ export class LivekitController {
     private readonly livekitService: LivekitService,
     private readonly voiceBotService: VoiceBotService,
     private readonly sttService: SttService,
-    private readonly llmService: LlmService, //통합 검색 
+    private readonly llmService: LlmService, //통합 검색
     private readonly ttsService: TtsService,
   ) { }
+
+  @Post('link-report')
+  async linkReportToRoom(@Body() linkReportDto: LinkReportDto) {
+    await this.livekitService.updateRoomMetadata(linkReportDto.roomId, {
+      reportId: linkReportDto.reportId,
+    });
+    return { success: true };
+  }
 
   // AI 음성 봇 시작
   @Post('voice-bot/:roomName')
