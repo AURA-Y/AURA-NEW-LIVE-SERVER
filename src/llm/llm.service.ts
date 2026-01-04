@@ -5,6 +5,7 @@ import {
     BedrockRuntimeClient,
     InvokeModelCommand,
 } from '@aws-sdk/client-bedrock-runtime';
+import { RagClientService } from '../rag/rag-client.service';
 
 type SearchResult = {
     title: string;
@@ -37,7 +38,10 @@ export class LlmService {
     private readonly naverMapKeyId: string;
     private readonly naverMapKey: string;
 
-    constructor(private configService: ConfigService) {
+    constructor(
+        private configService: ConfigService,
+        private ragClientService: RagClientService,
+    ) {
         this.bedrockClient = new BedrockRuntimeClient({
             region: this.configService.get<string>('AWS_REGION') || 'ap-northeast-2',
             credentials: {
@@ -55,14 +59,34 @@ export class LlmService {
         }
     }
 
-    async sendMessage(userMessage: string, searchDomain?: 'weather' | 'naver' | null): Promise<{
+    async sendMessage(userMessage: string, searchDomain?: 'weather' | 'naver' | null, roomId?: string): Promise<{
         text: string;
         searchResults?: SearchResult[];
     }> {
-        if (userMessage.includes('회의')) {
-            return {
-                text: 'TODO: 회의록 RAG 연동 예정입니다.',
-            };
+        // 회의 관련 질문이고 roomId가 있으면 RAG 서버에 질문
+        if (userMessage.includes('회의') && roomId) {
+            try {
+                // RAG 서버 연결 확인
+                if (!this.ragClientService.isConnected(roomId)) {
+                    this.logger.warn(`[RAG] 연결되지 않음: ${roomId} - 일반 응답으로 대체`);
+                    return {
+                        text: '회의록 기능을 사용할 수 없습니다. RAG 서버에 연결되지 않았습니다.',
+                    };
+                }
+
+                this.logger.log(`[RAG 질문] Room: ${roomId}, 질문: "${userMessage}"`);
+                const ragAnswer = await this.ragClientService.sendQuestion(roomId, userMessage);
+                this.logger.log(`[RAG 응답] "${ragAnswer.substring(0, 100)}..."`);
+
+                return {
+                    text: ragAnswer,
+                };
+            } catch (error) {
+                this.logger.error(`[RAG 에러] ${error.message}`);
+                return {
+                    text: '회의록을 조회하는 중 오류가 발생했습니다.',
+                };
+            }
         }
 
         // 동시 요청 방지: 이미 처리 중이면 대기

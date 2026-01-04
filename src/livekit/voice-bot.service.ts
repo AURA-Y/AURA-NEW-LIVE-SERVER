@@ -548,7 +548,7 @@ export class VoiceBotService {
                 const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
                 let thinkingSpoken = false;
                 let llmResolved = false;
-                const llmPromise = this.llmService.sendMessage(processText, intentAnalysis.searchDomain).finally(() => {
+                const llmPromise = this.llmService.sendMessage(processText, intentAnalysis.searchDomain, roomName).finally(() => {
                     llmResolved = true;
                 });
                 const thinkingTask = (async () => {
