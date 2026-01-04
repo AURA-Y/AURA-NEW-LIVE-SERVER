@@ -75,6 +75,7 @@ export class LivekitService {
     } = createRoomDto;
 
     try {
+      this.logger.log(`Creating room via LiveKit: ${this.livekitUrl}`);
       // LiveKit에 방 생성
       const room = await this.roomService.createRoom({
         name: roomTitle,
@@ -106,6 +107,10 @@ export class LivekitService {
         livekitUrl: wsUrl,
       };
     } catch (error) {
+      this.logger.error(`Create room failed: ${error.message}`);
+      if (error.cause) {
+        this.logger.error(`Create room cause: ${error.cause}`);
+      }
       throw new Error(`Failed to create room: ${error.message}`);
     }
   }
@@ -143,8 +148,7 @@ export class LivekitService {
       if (!finalRoomName) {
         throw new Error('Either roomId or roomName must be provided');
       }
-
-
+      this.logger.log(`Joining room via LiveKit: ${this.livekitUrl}`);
       await this.ensureAgentDispatch(finalRoomName);
       this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${finalRoomName}`);
       const token = await this.generateTokenForUser(finalRoomName, userName, isBot);
@@ -164,6 +168,9 @@ export class LivekitService {
       };
     } catch (error) {
       this.logger.error(`Join failed: ${error.message}`);
+      if (error.cause) {
+        this.logger.error(`Join cause: ${error.cause}`);
+      }
       throw new Error(`Failed to join room: ${error.message}`);
     }
   }
@@ -205,6 +212,48 @@ export class LivekitService {
       };
     } catch (error) {
       throw new Error(`Failed to list rooms: ${error.message}`);
+    }
+  }
+
+  async hasBotParticipant(roomName: string): Promise<boolean> {
+    try {
+      const participants = await (this.roomService as unknown as {
+        listParticipants: (room: string) => Promise<{ identity: string }[]>;
+      }).listParticipants(roomName);
+      return participants.some((participant) => participant.identity.startsWith('ai-bot'));
+    } catch (error) {
+      this.logger.warn(`Failed to list participants for ${roomName}: ${error.message}`);
+      return false;
+    }
+  }
+
+  async listBotIdentities(roomName: string): Promise<string[]> {
+    try {
+      const participants = await (this.roomService as unknown as {
+        listParticipants: (room: string) => Promise<{ identity: string }[]>;
+      }).listParticipants(roomName);
+      return participants
+        .map((participant) => participant.identity)
+        .filter((identity) => identity.startsWith('ai-bot'));
+    } catch (error) {
+      this.logger.warn(`Failed to list participants for ${roomName}: ${error.message}`);
+      return [];
+    }
+  }
+
+  async removeBots(roomName: string): Promise<void> {
+    const botIdentities = await this.listBotIdentities(roomName);
+    if (botIdentities.length === 0) return;
+
+    for (const identity of botIdentities) {
+      try {
+        await (this.roomService as unknown as {
+          removeParticipant: (room: string, identity: string) => Promise<void>;
+        }).removeParticipant(roomName, identity);
+        this.logger.log(`Removed bot participant: ${roomName} (${identity})`);
+      } catch (error) {
+        this.logger.warn(`Failed to remove bot ${identity} from ${roomName}: ${error.message}`);
+      }
     }
   }
 
