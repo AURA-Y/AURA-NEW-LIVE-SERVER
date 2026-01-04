@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as WebSocket from 'ws';
+import { WebSocket } from 'ws';
 
 interface PendingRequest {
     resolve: (value: string) => void;

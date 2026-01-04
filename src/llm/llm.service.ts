@@ -24,7 +24,7 @@ type SearchResult = {
 export class LlmService {
     private readonly logger = new Logger(LlmService.name);
     private bedrockClient: BedrockRuntimeClient;
-    private readonly modelId = 'anthropic.claude-3-haiku-20240307-v1:0';
+    private readonly modelId = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
 
     // Rate limiting
     private lastRequestTime = 0;
