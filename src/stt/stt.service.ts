@@ -270,9 +270,13 @@ export class SttService {
             });
 
             call.write({ type: 'CONFIG', config: { config } });
+            this.logger.debug(`[Clova Stream] CONFIG 전송 완료`);
 
             let seqId = 0;
+            let totalBytes = 0;
             audioStream.on('data', (chunk: Buffer) => {
+                totalBytes += chunk.length;
+                this.logger.debug(`[Clova Stream] DATA 전송 #${seqId}: ${chunk.length} bytes (총: ${totalBytes} bytes)`);
                 call.write({
                     type: 'DATA',
                     data: {
@@ -283,6 +287,8 @@ export class SttService {
                 seqId += 1;
             });
             audioStream.on('end', () => {
+                this.logger.log(`[Clova Stream] 오디오 스트림 종료 - 총 ${seqId}개 청크, ${totalBytes} bytes`);
+                this.logger.debug(`[Clova Stream] 최종 DATA 전송 (epFlag: true, seqId: ${seqId})`);
                 call.write({
                     type: 'DATA',
                     data: {
@@ -291,6 +297,7 @@ export class SttService {
                     },
                 });
                 call.end();
+                this.logger.debug(`[Clova Stream] gRPC call.end() 호출 완료`);
             });
             audioStream.on('error', (error) => {
                 this.logger.error(`[Clova STT 스트림 에러] ${error.message}`);
