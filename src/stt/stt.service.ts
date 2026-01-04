@@ -209,14 +209,23 @@ export class SttService {
             const call = this.clovaClient.recognize(metadata);
 
             const transcripts: string[] = [];
+            let responseCount = 0;
             call.on('data', (response: any) => {
+                responseCount++;
+                this.logger.debug(`[Clova Stream] 응답 #${responseCount} 수신`);
+
                 const contents = response?.contents || '';
-                if (!contents) return;
+                if (!contents) {
+                    this.logger.warn(`[Clova Stream] 응답 #${responseCount} - contents 없음`);
+                    return;
+                }
 
                 try {
                     // contents는 JSON 문자열이므로 파싱
                     const parsed = JSON.parse(contents);
                     const responseType = parsed?.responseType || [];
+
+                    this.logger.debug(`[Clova Stream] 응답 #${responseCount} 구조: ${JSON.stringify(parsed)}`);
 
                     // config 응답은 스킵
                     if (responseType.includes('config')) {
@@ -224,28 +233,28 @@ export class SttService {
                         return;
                     }
 
-                    // 응답 전체 구조 로깅 (디버깅용)
-                    this.logger.debug(`[Clova Stream] 응답 구조: ${JSON.stringify(parsed)}`);
-
                     // 실제 텍스트 추출 (text 또는 transcription.text 필드)
                     const text = parsed?.text || parsed?.transcription?.text || '';
                     if (text) {
-                        this.logger.debug(`[Clova Stream] 인식된 텍스트: ${text}`);
+                        this.logger.log(`[Clova Stream] 인식된 텍스트: ${text}`);
                         transcripts.push(text);
                     } else {
-                        this.logger.warn(`[Clova Stream] 텍스트 없음 - responseType: ${JSON.stringify(responseType)}`);
+                        this.logger.warn(`[Clova Stream] 텍스트 없음 - responseType: ${JSON.stringify(responseType)}, 전체: ${JSON.stringify(parsed)}`);
                     }
                 } catch (e) {
                     // JSON 파싱 실패 시 그냥 contents 사용 (plain text인 경우)
-                    this.logger.debug(`[Clova Stream] Raw contents: ${contents}`);
+                    this.logger.warn(`[Clova Stream] JSON 파싱 실패, Raw: ${contents}`);
                     transcripts.push(contents);
                 }
             });
             call.on('error', (error: any) => {
+                this.logger.error(`[Clova Stream] gRPC 에러: ${error.message}`);
                 reject(error);
             });
             call.on('end', () => {
-                resolve(transcripts.join(' ').trim());
+                const result = transcripts.join(' ').trim();
+                this.logger.log(`[Clova Stream] 스트림 종료 - 총 ${responseCount}개 응답, 최종 결과: "${result}"`);
+                resolve(result);
             });
 
             const config = JSON.stringify({
