@@ -150,13 +150,14 @@ export class LivekitService {
       const token = await this.generateTokenForUser(finalRoomName, userName, isBot);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
 
-      // 사용자 입장 시 봇이 없으면 자동 시작 (봇 자신의 입장 제외)
-      if (!isBot && !this.voiceBotService.isActive(finalRoomName)) {
-        this.logger.log(`[봇 재시작] 방에 봇이 없어서 자동 시작: ${finalRoomName}`);
-        this.startBotForRoom(finalRoomName).catch(err => {
-          this.logger.error(`[봇 재시작 실패] ${err.message}`);
-        });
-      }
+      // 봇은 방 생성 시에만 시작 (join 시에는 봇 시작하지 않음)
+      // 이유: join할 때마다 봇을 시작하면 중복 생성 문제 발생
+      // if (!isBot && !this.voiceBotService.isActive(finalRoomName)) {
+      //   this.logger.log(`[봇 재시작] 방에 봇이 없어서 자동 시작: ${finalRoomName}`);
+      //   this.startBotForRoom(finalRoomName).catch(err => {
+      //     this.logger.error(`[봇 재시작 실패] ${err.message}`);
+      //   });
+      // }
 
       return {
         token: token,
