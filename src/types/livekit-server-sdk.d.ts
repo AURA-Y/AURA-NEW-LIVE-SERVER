@@ -16,6 +16,7 @@ declare module 'livekit-server-sdk' {
     constructor(url: string, apiKey: string, apiSecret: string);
     createRoom(options: Record<string, unknown>): Promise<any>;
     listRooms(): Promise<any[]>;
+    deleteRoom(room: string): Promise<void>;
   }
 
   export class AgentDispatchClient {
