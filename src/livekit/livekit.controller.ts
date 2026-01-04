@@ -72,7 +72,7 @@ export class LivekitController {
     const result = await this.livekitService.createRoom(createRoomDto);
     const normalizedRoomTitle = result.roomTitle.trim();
 
-    // 방 생성 시 자동으로 Voice Bot 시작
+    // 방 생성 시 자동으로 Voice Bot 시작 (응답 지연 방지를 위해 비동기 처리)
     try {
       if (this.voiceBotService.isActive(normalizedRoomTitle)) {
         await this.voiceBotService.stopBot(normalizedRoomTitle);
@@ -83,8 +83,11 @@ export class LivekitController {
         roomName: normalizedRoomTitle,
       }, true);
 
-      await this.voiceBotService.startBot(normalizedRoomTitle, token);
-      console.log(`[자동 봇 시작] 방 '${normalizedRoomTitle}'에 봇이 자동으로 입장했습니다.`);
+      void this.voiceBotService.startBot(normalizedRoomTitle, token).then(() => {
+        console.log(`[자동 봇 시작] 방 '${normalizedRoomTitle}'에 봇이 자동으로 입장했습니다.`);
+      }).catch((error) => {
+        console.error(`[자동 봇 시작 실패] ${error.message}`);
+      });
     } catch (error) {
       console.error(`[자동 봇 시작 실패] ${error.message}`);
       // 봇 시작 실패해도 방 생성은 성공으로 처리
