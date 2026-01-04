@@ -36,6 +36,8 @@ interface RoomContext {
     botState: BotState; // 상태머신 상태
     lastInteractionTime: number; // 마지막 상호작용 시간 (ARMED 타임아웃용)
     lastSttTime: number; // 마지막 STT 처리 시간 (쿨다운용)
+    lastResponseTime: number; // 마지막 응답 완료 시간 (중복 응답 방지용)
+    speakingStartTime: number; // 발화 시작 시간 (에코 방지용)
     activeUserId: string | null; // 현재 대화 중인 사용자 ID
 }
 
@@ -138,6 +140,8 @@ export class VoiceBotService {
                 botState: BotState.SLEEP, // 초기 상태는 SLEEP
                 lastInteractionTime: Date.now(),
                 lastSttTime: 0,
+                lastResponseTime: 0, // 초기값
+                speakingStartTime: 0, // 발화 시작 시간
                 activeUserId: null, // 초기에는 활성 사용자 없음
             };
             this.activeRooms.set(roomName, context);
@@ -190,9 +194,10 @@ export class VoiceBotService {
         const SILENCE_THRESHOLD = 35; // 35 프레임 (~1.1초 침묵 시 처리)
         const MIN_AUDIO_LENGTH = 16000; // 최소 오디오 길이 (~0.5초)
         const MIN_VOICE_FRAMES = 8; // 최소 8프레임 연속 발화 필요
-        const BARGE_IN_DECIBEL_THRESHOLD = -28; // Barge-in용 높은 임계값
+        const BARGE_IN_DECIBEL_THRESHOLD = -20; // Barge-in 임계값 (에코 방지를 위해 높임)
         const STRONG_VOICE_THRESHOLD = -24; // 매우 강한 발화 기준
         const STT_COOLDOWN_MS = 1200; // STT 처리 후 최소 쿨다운
+        const BARGE_IN_DELAY_FRAMES = 30; // 봇 발화 시작 후 ~1초간 Barge-in 무시
 
         // 동적 임계값 (초기값, 캘리브레이션 후 자동 조정)
         let MIN_DECIBEL_THRESHOLD = -45;
@@ -290,6 +295,14 @@ export class VoiceBotService {
 
             // SPEAKING 중에는 끼어들기 판단만 수행
             if (context?.isPublishing && context.botState === BotState.SPEAKING) {
+                // 발화 시작 후 0.5초간은 Barge-in 무시 (에코 방지)
+                const BARGE_IN_GRACE_PERIOD_MS = 500;
+                const timeSinceSpeakingStart = Date.now() - context.speakingStartTime;
+
+                if (timeSinceSpeakingStart < BARGE_IN_GRACE_PERIOD_MS) {
+                    continue; // 유예 기간 중에는 무시
+                }
+
                 if (isVoice && voiceCount >= MIN_VOICE_FRAMES && !context.shouldInterrupt &&
                     decibel > BARGE_IN_DECIBEL_THRESHOLD &&
                     (context.activeUserId === null || context.activeUserId === userId)) {
@@ -317,8 +330,12 @@ export class VoiceBotService {
 
                 // Barge-in: AI가 실제로 말하고 있을 때만 중단 가능
                 // 더 높은 데시벨 임계값 적용 (봇 자기 목소리 차단)
+                // 발화 시작 후 0.5초간은 Barge-in 무시 (에코 방지)
+                const BARGE_IN_GRACE_MS = 500;
+                const speakingElapsed = context ? Date.now() - context.speakingStartTime : Infinity;
                 if (context && context.isPublishing && voiceCount >= MIN_VOICE_FRAMES &&
-                    !context.shouldInterrupt && decibel > BARGE_IN_DECIBEL_THRESHOLD) {
+                    !context.shouldInterrupt && decibel > BARGE_IN_DECIBEL_THRESHOLD &&
+                    speakingElapsed >= BARGE_IN_GRACE_MS) {
                     // SPEAKING 상태(AI 발화 중)이고, 활성 사용자의 발화인 경우에만 중단
                     if (context.botState === BotState.SPEAKING &&
                         (context.activeUserId === null || context.activeUserId === userId)) {
@@ -387,6 +404,14 @@ export class VoiceBotService {
         // 처리 중이면 새 요청을 막아 말 끊김/취소 방지
         if (context.isPublishing) {
             this.logger.warn(`[스킵] 처리 중 (${context.botState}) - 새 요청 무시`);
+            return;
+        }
+
+        // 응답 직후 쿨다운 (3초 이내 중복 응답 방지)
+        const RESPONSE_COOLDOWN_MS = 3000;
+        const timeSinceLastResponse = Date.now() - context.lastResponseTime;
+        if (context.lastResponseTime > 0 && timeSinceLastResponse < RESPONSE_COOLDOWN_MS) {
+            this.logger.warn(`[스킵] 응답 쿨다운 중 (${timeSinceLastResponse}ms < ${RESPONSE_COOLDOWN_MS}ms)`);
             return;
         }
 
@@ -465,6 +490,7 @@ export class VoiceBotService {
                         await this.speakAndPublish(context, roomName, requestId, "네, 무엇을 도와드릴까요?");
                         context.botState = BotState.ARMED;
                         context.lastInteractionTime = Date.now();
+                        context.lastResponseTime = Date.now();
                         return;
                     }
 
@@ -478,6 +504,7 @@ export class VoiceBotService {
                     await this.speakAndPublish(context, roomName, requestId, "네, 무엇을 도와드릴까요?");
                     context.botState = BotState.ARMED;
                     context.lastInteractionTime = Date.now();
+                    context.lastResponseTime = Date.now();
                     return;
                 }
             }
@@ -496,6 +523,7 @@ export class VoiceBotService {
                     // 응답 완료 후 SLEEP으로 전환
                     context.botState = BotState.SLEEP;
                     context.activeUserId = null; // 활성 사용자 초기화
+                    context.lastResponseTime = Date.now();
                     return;
                 }
             }
@@ -563,6 +591,7 @@ export class VoiceBotService {
                     await this.speakAndPublish(context, roomName, requestId, thinkingPhrase);
                     context.botState = BotState.ARMED;
                     context.lastInteractionTime = Date.now();
+                    // 생각중 응답은 쿨다운 설정 안 함 (바로 실제 응답 이어서 해야 함)
                 })();
                 const llmResult = await llmPromise;
                 await thinkingTask;
@@ -607,6 +636,7 @@ export class VoiceBotService {
                 context.botState = BotState.SLEEP;
                 context.activeUserId = null;
                 context.lastInteractionTime = Date.now();
+                context.lastResponseTime = Date.now(); // 중복 응답 방지용 쿨다운 시작
 
                 const totalLatency = Date.now() - startTime;
                 this.logger.log(`========== [완료] 총 ${totalLatency}ms ==========\n`);
@@ -632,10 +662,14 @@ export class VoiceBotService {
         const FRAME_SIZE = 480; // 30ms 프레임 (16000 / 1000 * 30)
         const BYTES_PER_SAMPLE = 2; // 16-bit = 2 bytes
         const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE;
+        const BATCH_SIZE = 4; // 4프레임씩 배치 처리 (120ms 단위)
 
         this.logger.log(`[오디오 발행] 총 ${pcmBuffer.length} bytes, ${Math.ceil(pcmBuffer.length / FRAME_BYTES)} 프레임`);
 
         let offset = 0;
+        let frameCount = 0;
+        const startTime = Date.now();
+
         while (offset < pcmBuffer.length) {
             // Barge-in 체크: 사용자가 끼어들면 즉시 중단
             const context = this.activeRooms.get(roomName);
@@ -645,26 +679,36 @@ export class VoiceBotService {
                 break;
             }
 
-            const chunkEnd = Math.min(offset + FRAME_BYTES, pcmBuffer.length);
-            const chunkLength = chunkEnd - offset;
-            const numSamples = Math.floor(chunkLength / BYTES_PER_SAMPLE);
+            // 배치 단위로 프레임 전송
+            for (let batch = 0; batch < BATCH_SIZE && offset < pcmBuffer.length; batch++) {
+                const chunkEnd = Math.min(offset + FRAME_BYTES, pcmBuffer.length);
+                const chunkLength = chunkEnd - offset;
+                const numSamples = Math.floor(chunkLength / BYTES_PER_SAMPLE);
 
-            // Buffer에서 Int16 Little Endian으로 직접 읽기
-            const samples = new Int16Array(FRAME_SIZE);
-            for (let i = 0; i < numSamples && i < FRAME_SIZE; i++) {
-                samples[i] = pcmBuffer.readInt16LE(offset + i * BYTES_PER_SAMPLE);
+                // Buffer에서 Int16 Little Endian으로 직접 읽기
+                const samples = new Int16Array(FRAME_SIZE);
+                for (let i = 0; i < numSamples && i < FRAME_SIZE; i++) {
+                    samples[i] = pcmBuffer.readInt16LE(offset + i * BYTES_PER_SAMPLE);
+                }
+
+                const frame = new AudioFrame(samples, SAMPLE_RATE, 1, FRAME_SIZE);
+                await audioSource.captureFrame(frame);
+
+                offset += FRAME_BYTES;
+                frameCount++;
             }
 
-            const frame = new AudioFrame(samples, SAMPLE_RATE, 1, FRAME_SIZE);
-            await audioSource.captureFrame(frame);
+            // 배치 후 타이밍 동기화 (실제 경과 시간 기반)
+            const expectedTime = (frameCount * 30); // 30ms per frame
+            const actualTime = Date.now() - startTime;
+            const sleepTime = Math.max(0, expectedTime - actualTime - 10); // 10ms 버퍼
 
-            offset += FRAME_BYTES;
-
-            // 실시간 재생 속도에 맞추기 (30ms per frame)
-            await this.sleep(25); // 약간의 버퍼 확보를 위해 25ms
+            if (sleepTime > 0) {
+                await this.sleep(sleepTime);
+            }
         }
 
-        this.logger.log(`[오디오 발행 완료]`);
+        this.logger.log(`[오디오 발행 완료] ${frameCount} 프레임, ${Date.now() - startTime}ms`);
     }
 
     private sleep(ms: number): Promise<void> {
@@ -686,6 +730,9 @@ export class VoiceBotService {
         const pcmAudio = await this.ttsService.synthesizePcm(message);
         const ttsLatency = Date.now() - ttsStart;
         this.logger.log(`[TTS] ${ttsLatency}ms - ${pcmAudio.length} bytes`);
+
+        // 발화 시작 시간 기록 (Barge-in 유예 기간용)
+        context.speakingStartTime = Date.now();
 
         // 최신 요청 체크
         if (context.currentRequestId !== requestId) {
