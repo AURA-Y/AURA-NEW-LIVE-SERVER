@@ -4,7 +4,7 @@ import { Response } from 'express';
 import { LivekitService } from './livekit.service';
 import { VoiceBotService } from './voice-bot.service';
 import { SttService } from '../stt/stt.service';
-// import { LlmService } from '../llm/llm.service'; // RAG로 대체
+import { LlmService } from '../llm/llm.service'; //통합 검색
 import { TtsService } from '../tts/tts.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
@@ -15,7 +15,7 @@ export class LivekitController {
     private readonly livekitService: LivekitService,
     private readonly voiceBotService: VoiceBotService,
     private readonly sttService: SttService,
-    // private readonly llmService: LlmService, // RAG로 대체
+    private readonly llmService: LlmService, //통합 검색 
     private readonly ttsService: TtsService,
   ) { }
 

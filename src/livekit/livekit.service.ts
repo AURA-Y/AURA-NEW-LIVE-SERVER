@@ -90,11 +90,7 @@ export class LivekitService {
       const token = await this.generateTokenForUser(room.name, userName);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
 
-      // 방 생성 시 AI 봇 자동 시작
-      this.logger.log(`[자동 봇 시작] 방 생성으로 AI 봇 자동 시작: ${room.name}`);
-      this.startBotForRoom(room.name).catch(err => {
-        this.logger.error(`[자동 봇 시작 실패] ${err.message}`);
-      });
+      // 방 생성 시 AI 봇은 사용자가 입장할 때 자동 시작됨 (joinRoom에서 처리)
 
       return {
         roomId: room.sid,
