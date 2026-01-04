@@ -211,7 +211,28 @@ export class SttService {
             const transcripts: string[] = [];
             call.on('data', (response: any) => {
                 const contents = response?.contents || '';
-                if (contents) {
+                if (!contents) return;
+
+                try {
+                    // contents는 JSON 문자열이므로 파싱
+                    const parsed = JSON.parse(contents);
+                    const responseType = parsed?.responseType || [];
+
+                    // config 응답은 스킵
+                    if (responseType.includes('config')) {
+                        this.logger.debug(`[Clova Stream] Config 응답 스킵`);
+                        return;
+                    }
+
+                    // 실제 텍스트 추출 (text 또는 transcription.text 필드)
+                    const text = parsed?.text || parsed?.transcription?.text || '';
+                    if (text) {
+                        this.logger.debug(`[Clova Stream] 인식된 텍스트: ${text}`);
+                        transcripts.push(text);
+                    }
+                } catch (e) {
+                    // JSON 파싱 실패 시 그냥 contents 사용 (plain text인 경우)
+                    this.logger.debug(`[Clova Stream] Raw contents: ${contents}`);
                     transcripts.push(contents);
                 }
             });
@@ -403,7 +424,28 @@ export class SttService {
             const transcripts: string[] = [];
             call.on('data', (response: any) => {
                 const contents = response?.contents || '';
-                if (contents) {
+                if (!contents) return;
+
+                try {
+                    // contents는 JSON 문자열이므로 파싱
+                    const parsed = JSON.parse(contents);
+                    const responseType = parsed?.responseType || [];
+
+                    // config 응답은 스킵
+                    if (responseType.includes('config')) {
+                        this.logger.debug(`[Clova] Config 응답 스킵`);
+                        return;
+                    }
+
+                    // 실제 텍스트 추출 (text 또는 transcription.text 필드)
+                    const text = parsed?.text || parsed?.transcription?.text || '';
+                    if (text) {
+                        this.logger.debug(`[Clova] 인식된 텍스트: ${text}`);
+                        transcripts.push(text);
+                    }
+                } catch (e) {
+                    // JSON 파싱 실패 시 그냥 contents 사용 (plain text인 경우)
+                    this.logger.debug(`[Clova] Raw contents: ${contents}`);
                     transcripts.push(contents);
                 }
             });
