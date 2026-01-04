@@ -74,6 +74,11 @@ export class LivekitController {
     return this.livekitService.getRoom(roomId);
   }
 
+  @Delete(':roomId')
+  async deleteRoom(@Param('roomId') roomId: string) {
+    return this.livekitService.deleteRoom(roomId);
+  }
+
   // 오디오 파일로 STT 테스트 (마이크 없이 테스트용)
   @Post('stt-test')
   @UseInterceptors(FileInterceptor('audio'))
