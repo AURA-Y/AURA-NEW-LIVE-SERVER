@@ -37,6 +37,83 @@ export class LlmService {
     private readonly naverMapKeyId: string;
     private readonly naverMapKey: string;
 
+    // 의미없는 키워드 필터링용
+    private readonly MEANINGLESS_KEYWORDS = [
+        '어', '음', '그', '저', '아', '응', '네', '예', '뭐', '야',
+        '.', '..', '...', '?', '!', ',',
+    ];
+
+    // 카테고리별 키워드
+    private readonly CATEGORY_KEYWORDS: Record<string, { keywords: string[]; searchType: 'local' | 'news' }> = {
+        '카페': {
+            keywords: ['카페', '커피', '커피숍', '카페테리아', '스타벅스', '투썸', '이디야', '할리스', '블루보틀', '카공'],
+            searchType: 'local',
+        },
+        '맛집': {
+            keywords: ['맛집', '식당', '레스토랑', '밥집', '음식점', '맛있는', '먹을만한', '저녁', '점심', '아침', '브런치'],
+            searchType: 'local',
+        },
+        '술집': {
+            keywords: ['술집', '바', '포차', '호프', '이자카야', '와인바', '칵테일', '소주', '맥주', '회식'],
+            searchType: 'local',
+        },
+        '분식': {
+            keywords: ['분식', '떡볶이', '김밥', '라면', '튀김', '순대', '어묵'],
+            searchType: 'local',
+        },
+        '치킨': {
+            keywords: ['치킨', 'BBQ', 'BHC', '교촌', '굽네', '네네', '페리카나'],
+            searchType: 'local',
+        },
+        '피자': {
+            keywords: ['피자', '도미노', '피자헛', '파파존스', '미스터피자'],
+            searchType: 'local',
+        },
+        '빵집': {
+            keywords: ['빵집', '베이커리', '제과점', '빵', '케이크', '파리바게뜨', '뚜레쥬르', '성심당'],
+            searchType: 'local',
+        },
+        '디저트': {
+            keywords: ['디저트', '케이크', '마카롱', '아이스크림', '젤라또', '와플', '크로플', '타르트'],
+            searchType: 'local',
+        },
+        '쇼핑': {
+            keywords: ['쇼핑', '백화점', '마트', '아울렛', '몰', '매장', '가게', '상점'],
+            searchType: 'local',
+        },
+        '팝업': {
+            keywords: ['팝업', '팝업스토어', '팝업 스토어', '한정', '오픈'],
+            searchType: 'local',
+        },
+        '전시': {
+            keywords: ['전시', '전시회', '갤러리', '미술관', '박물관', '아트'],
+            searchType: 'local',
+        },
+        '날씨': {
+            keywords: ['날씨', '기온', '온도', '비', '눈', '바람', '흐림', '맑음', '습도', '미세먼지', '우산', '더워', '추워', '덥', '춥', '기상', '일기예보'],
+            searchType: 'news',
+        },
+        '뉴스': {
+            keywords: ['뉴스', '소식', '기사', '속보', '이슈', '사건', '사고'],
+            searchType: 'news',
+        },
+        '주식': {
+            keywords: ['주식', '주가', '코스피', '코스닥', '나스닥', '증시', '투자', '종목'],
+            searchType: 'news',
+        },
+        '스포츠': {
+            keywords: ['스포츠', '축구', '야구', '농구', '배구', '경기', '결과', '스코어', '승패'],
+            searchType: 'news',
+        },
+        '영화': {
+            keywords: ['영화', '개봉', '상영', '박스오피스', '영화관', 'CGV', '롯데시네마', '메가박스'],
+            searchType: 'news',
+        },
+    };
+
+    // hybrid 검색이 필요한 카테고리 (뉴스 + 장소 둘 다 필요)
+    private readonly HYBRID_CATEGORIES = ['팝업', '전시', '영화'];
+
     constructor(
         private configService: ConfigService,
         private ragClientService: RagClientService,
@@ -68,7 +145,6 @@ export class LlmService {
         roomId?: string
     ): Promise<{ text: string; searchResults?: SearchResult[] }> {
         // 회의 관련 질문이고 roomId가 있으면 RAG 서버에 질문
-        // TODO.. rag service 연결 필요
         if (userMessage.includes('회의') && roomId) {
             try {
                 if (!this.ragClientService.isConnected(roomId)) {
@@ -110,52 +186,113 @@ export class LlmService {
     public async buildSearchPlan(rawQuery: string): Promise<{
         query: string;
         cacheKey: string;
-        searchType: 'local' | 'news' | 'hybrid';
+        searchType: 'local' | 'news' | 'hybrid' | 'none';
         category: string | null;
     }> {
         const base = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
+        const lowerBase = base.toLowerCase();
 
-        // 1. 날씨
-        const weatherKeywords = ['날씨', '기온', '온도', '비', '눈', '미세먼지', '우산', '더워', '추워'];
-        if (weatherKeywords.some(kw => base.includes(kw))) {
-            const location = this.extractLocation(base) || '서울';
+        // 1. CATEGORY_KEYWORDS에서 매칭되는 카테고리 찾기
+        let matchedCategory: string | null = null;
+        let matchedKeyword: string | null = null;
+        let baseSearchType: 'local' | 'news' | null = null;
+
+        for (const [category, config] of Object.entries(this.CATEGORY_KEYWORDS)) {
+            for (const keyword of config.keywords) {
+                if (lowerBase.includes(keyword.toLowerCase())) {
+                    matchedCategory = category;
+                    matchedKeyword = keyword;
+                    baseSearchType = config.searchType;
+                    break;
+                }
+            }
+            if (matchedCategory) break;
+        }
+
+        // 2. 카테고리가 없으면 검색하지 않음
+        if (!matchedCategory) {
+            // 의미없는 쿼리인지 체크
+            const cleanedQuery = base
+                .replace(/[을를이가은는에서의으로]/g, ' ')
+                .replace(/알려줘|추천해줘|찾아줘|검색해줘/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            if (this.isMeaninglessQuery(cleanedQuery)) {
+                this.logger.log(`[검색 계획] 의미없는 쿼리 → 검색 안함`);
+                return { query: '', cacheKey: '', searchType: 'none', category: null };
+            }
+
+            // 최소 길이 체크 (한글 2글자 이상)
+            const koreanChars = (cleanedQuery.match(/[가-힣]/g) || []).length;
+            if (koreanChars < 2) {
+                this.logger.log(`[검색 계획] 쿼리 너무 짧음 → 검색 안함`);
+                return { query: '', cacheKey: '', searchType: 'none', category: null };
+            }
+
+            this.logger.log(`[검색 계획] 카테고리 없음 → 검색 안함 (query="${cleanedQuery}")`);
+            return { query: '', cacheKey: '', searchType: 'none', category: null };
+        }
+
+        // 3. 위치 추출
+        const location = this.extractLocation(base);
+
+        // 4. 검색 타입 결정
+        let searchType: 'local' | 'news' | 'hybrid' = baseSearchType!;
+        
+        // hybrid 카테고리는 뉴스 + 장소 둘 다 검색
+        if (this.HYBRID_CATEGORIES.includes(matchedCategory)) {
+            searchType = 'hybrid';
+        }
+
+        // 5. 쿼리 생성
+        let query: string;
+        
+        if (matchedCategory === '날씨') {
+            // 날씨는 특별 처리
+            const weatherLocation = location || '서울';
             const timeWord = base.includes('내일') ? '내일' :
                 base.includes('모레') ? '모레' :
-                    base.includes('이번주') ? '이번주' : '오늘';
-            const query = `${location} ${timeWord} 날씨`;
-            this.logger.log(`[검색 계획] 날씨 → query="${query}"`);
-            return { query, cacheKey: `weather|${query}`, searchType: 'news', category: '날씨' };
+                base.includes('이번주') ? '이번주' : '오늘';
+            query = `${weatherLocation} ${timeWord} 날씨`;
+        } else if (searchType === 'local' || searchType === 'hybrid') {
+            // 장소 검색: 위치 + 카테고리
+            query = location ? `${location} ${matchedCategory}` : matchedCategory;
+        } else {
+            // 뉴스 검색: 키워드 기반
+            query = base
+                .replace(/[을를이가은는에서의으로]/g, ' ')
+                .replace(/알려줘|추천해줘|찾아줘|검색해줘/g, '')
+                .replace(/\s+/g, ' ')
+                .trim() || matchedKeyword!;
         }
 
-        // 2. 팝업/전시/영화 (hybrid)
-        const hybridKeywords = ['팝업', '팝업스토어', '전시', '전시회', '영화', '공연', '콘서트', '페스티벌', '축제'];
-        const hybridMatch = hybridKeywords.find(kw => base.includes(kw));
-        if (hybridMatch) {
-            const location = this.extractLocation(base);
-            const query = location ? `${location} ${hybridMatch}` : hybridMatch;
-            this.logger.log(`[검색 계획] 하이브리드 → query="${query}"`);
-            return { query, cacheKey: `hybrid|${query}`, searchType: 'hybrid', category: hybridMatch };
-        }
+        this.logger.log(`[검색 계획] ${matchedCategory}(${searchType}) → query="${query}"`);
+        return { 
+            query, 
+            cacheKey: `${searchType}|${query}`, 
+            searchType, 
+            category: matchedCategory 
+        };
+    }
 
-        // 3. 장소 (local)
-        const localKeywords = ['카페', '맛집', '식당', '술집', '빵집', '디저트', '치킨', '피자', '분식'];
-        const localMatch = localKeywords.find(kw => base.includes(kw));
-        if (localMatch) {
-            const location = this.extractLocation(base);
-            const query = location ? `${location} ${localMatch}` : localMatch;
-            this.logger.log(`[검색 계획] 장소 → query="${query}"`);
-            return { query, cacheKey: `local|${query}`, searchType: 'local', category: localMatch };
-        }
-
-        // 4. 그 외 (news 폴백)
-        const fallbackCategory = this.pickCategoryLabel(rawQuery, []);
-        const query = base
-            .replace(/[을를이가은는에서의으로]/g, ' ')
-            .replace(/알려줘|추천해줘|찾아줘|검색해줘/g, '')
-            .replace(/\s+/g, ' ')
-            .trim() || base;
-        this.logger.log(`[검색 계획] 폴백 → query="${query}"`);
-        return { query, cacheKey: `news|${query}`, searchType: 'news', category: fallbackCategory };
+    /**
+     * 의미없는 쿼리인지 체크
+     */
+    private isMeaninglessQuery(query: string): boolean {
+        const trimmed = query.trim();
+        
+        // 빈 문자열
+        if (!trimmed) return true;
+        
+        // 의미없는 키워드만 있는 경우
+        const words = trimmed.split(/\s+/);
+        const meaningfulWords = words.filter(word => {
+            const cleaned = word.replace(/[.,?!]/g, '');
+            return cleaned.length > 0 && !this.MEANINGLESS_KEYWORDS.includes(cleaned);
+        });
+        
+        return meaningfulWords.length === 0;
     }
 
     // ============================================================
@@ -301,6 +438,16 @@ export class LlmService {
 
             if (trimmedQuery.length > 5) {
                 const { query, cacheKey, searchType } = await this.buildSearchPlan(trimmedQuery);
+                
+                // searchType이 'none'이면 검색하지 않음
+                if (searchType === 'none') {
+                    this.logger.log(`[검색 스킵] 카테고리/키워드 없음`);
+                    return { 
+                        text: '네, 무엇을 도와드릴까요? 카페, 맛집, 날씨 등을 물어보시면 검색해드릴게요!',
+                        searchResults: undefined 
+                    };
+                }
+
                 this.logger.log(`[검색] type=${searchType}, query="${query}"`);
 
                 const cached = this.getCachedSearch(cacheKey);
@@ -351,15 +498,19 @@ export class LlmService {
             const textBlock = responseBody.content?.find((b: any) => b.type === 'text');
             let finalMessage = textBlock?.text || "죄송합니다, 응답을 생성할 수 없습니다.";
 
-            // 장소 검색이면 단일 추천 형식
+            // 검색 결과가 있는 경우 응답 형식 결정
             if (searchResults && searchResults.length > 0) {
                 const hasLocation = searchResults.some(r => r.address || r.roadAddress);
+                
                 if (hasLocation) {
-                    // 장소 검색 → 단일 추천 (안전)
-                    finalMessage = this.buildSingleRecommendation(searchResults[0]);
+                    // 장소 검색 → 단일 추천 형식 (경로 안내 포함)
+                    const placeResult = searchResults.find(r => r.address || r.roadAddress);
+                    if (placeResult) {
+                        finalMessage = this.buildPlaceRecommendation(placeResult);
+                    }
                 } else {
-                    // 뉴스/날씨 등 → 할루시네이션 검증
-                    finalMessage = this.validateSearchAnswer(finalMessage, searchResults);
+                    // 뉴스/정보 검색 → 정보 전달 형식 (경로 안내 없음)
+                    finalMessage = this.validateAndBuildNewsResponse(finalMessage, searchResults);
                 }
             }
 
@@ -412,22 +563,34 @@ export class LlmService {
     // ============================================================
 
     private buildSystemPrompt(userMessage: string, searchResults: SearchResult[]): string {
-        // 날씨
-        const weatherKeywords = ['날씨', '기온', '온도', '비', '눈', '미세먼지', '우산', '더워', '추워'];
-        if (weatherKeywords.some(kw => userMessage.includes(kw))) {
-            const location = this.extractLocation(userMessage) || '서울';
-            const timeWord = userMessage.includes('내일') ? '내일' :
-                userMessage.includes('모레') ? '모레' :
-                    userMessage.includes('이번주') ? '이번주' : '오늘';
+        const lowerMessage = userMessage.toLowerCase();
+        
+        // 매칭된 카테고리 찾기
+        let matchedCategory: string | null = null;
+        for (const [category, config] of Object.entries(this.CATEGORY_KEYWORDS)) {
+            if (config.keywords.some(kw => lowerMessage.includes(kw.toLowerCase()))) {
+                matchedCategory = category;
+                break;
+            }
+        }
 
-            return `당신은 화상회의 AI 비서입니다.
+        const location = this.extractLocation(userMessage) || '서울';
+        const hasLocation = searchResults.some(r => r.address || r.roadAddress);
+
+        // 카테고리별 프롬프트 생성
+        switch (matchedCategory) {
+            case '날씨': {
+                const timeWord = userMessage.includes('내일') ? '내일' :
+                    userMessage.includes('모레') ? '모레' :
+                    userMessage.includes('이번주') ? '이번주' : '오늘';
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 "${location}" "${timeWord}" 날씨를 물어봤습니다.
 
 ## 응답 규칙
 1. **${location}** 날씨만 답변 (다른 지역 절대 금지)
-2. **${timeWord}** 정보만 답변 (다른 날짜 금지)
-3. 2문장 이내
+2. **${timeWord}** 정보만 답변
+3. 2문장 이내로 간결하게
 4. 기호 금지: ° → "도", % → "퍼센트"
 
 ## 응답 예시
@@ -435,35 +598,98 @@ export class LlmService {
 
 ## 검색 결과
 ${searchResults.map(r => r.content || r.title).join('\n').slice(0, 500)}`;
-        }
+            }
 
-        // 팝업/전시/영화 (hybrid)
-        const hybridKeywords = ['팝업', '전시', '영화', '공연', '콘서트', '페스티벌'];
-        if (hybridKeywords.some(kw => userMessage.includes(kw))) {
-            const location = this.extractLocation(userMessage) || '서울';
-            const category = hybridKeywords.find(kw => userMessage.includes(kw)) || '팝업';
-            const hasLocation = searchResults.some(r => r.address || r.roadAddress);
+            case '카페':
+            case '맛집':
+            case '술집':
+            case '분식':
+            case '치킨':
+            case '피자':
+            case '빵집':
+            case '디저트':
+            case '쇼핑': {
+                // 장소 검색 (local)
+                if (!hasLocation || searchResults.length === 0) {
+                    return this.buildNoResultPrompt(matchedCategory, location);
+                }
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
-            return `당신은 화상회의 AI 비서입니다.
-
-사용자가 "${location}" 근처 ${category} 정보를 물어봤습니다.
+사용자가 "${location}" 근처 ${matchedCategory}을 찾고 있습니다.
 
 ## 응답 규칙
-1. 최신 정보: 어떤 ${category}이 열리는지 (뉴스에서)
-2. 장소 정보: 위치가 있으면 주소 언급
-3. ${hasLocation ? '마지막에 "해당 위치까지 경로를 채팅창으로 공유드릴게요" 추가' : ''}
-4. 2-3문장 이내
+1. 검색 결과 중 **첫 번째 장소 1개만** 추천
+2. 상호명을 정확히 말하기
+3. 주소 간단히 언급
+4. 2문장 이내
+5. 마지막에 "해당 지점까지 경로를 채팅창으로 공유드릴게요" 추가
 
 ## 응답 예시
-"${location}에서 지금 OOO ${category}이 열리고 있어요. OO역 근처에 있어요.${hasLocation ? ' 해당 위치까지 경로를 채팅창으로 공유드릴게요!' : ''}"
+"네, [상호명]을 추천해요. [주소]에 있어요. 해당 지점까지 경로를 채팅창으로 공유드릴게요."
+
+## 검색 결과 (첫 번째만 사용)
+${JSON.stringify(searchResults[0])}`;
+            }
+
+            case '팝업':
+            case '전시':
+            case '영화': {
+                // 하이브리드 검색 (뉴스 + 장소)
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
+
+사용자가 "${location}" 근처 ${matchedCategory} 정보를 찾고 있습니다.
+
+## 응답 규칙
+1. 어떤 ${matchedCategory}이 열리는지 언급 (뉴스 정보)
+2. 장소가 있으면 위치 언급
+3. 2-3문장 이내
+${hasLocation ? '4. 마지막에 "해당 위치까지 경로를 채팅창으로 공유드릴게요" 추가' : ''}
+
+## 응답 예시
+"${location}에서 [${matchedCategory}명]이 열리고 있어요. [위치/기간] 정보예요.${hasLocation ? ' 해당 위치까지 경로를 채팅창으로 공유드릴게요.' : ''}"
 
 ## 검색 결과
 ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
-        }
+            }
 
-        // 장소 검색
-        if (searchResults.length > 0 && (searchResults[0].address || searchResults[0].roadAddress)) {
-            return `당신은 화상회의 AI 비서 '빅스'입니다.
+            case '뉴스':
+            case '주식':
+            case '스포츠': {
+                // 뉴스/정보 검색
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
+
+사용자가 ${matchedCategory} 정보를 물어봤습니다.
+
+## 응답 규칙
+1. 검색 결과를 요약해서 전달
+2. 2-3문장 이내
+3. "추천해요", "경로를 공유" 등 장소 관련 표현 절대 금지
+4. 정보 전달 형식으로 자연스럽게
+
+## 응답 예시
+"최근 [주제] 소식이에요. [요약 내용]이라고 하네요."
+
+## 검색 결과
+${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
+            }
+
+            default: {
+                // 카테고리 없음 또는 검색 결과 없음
+                if (searchResults.length === 0) {
+                    return `당신은 화상회의 AI 비서 '빅스'입니다.
+
+## 응답 규칙
+- 사용자가 무엇을 원하는지 친절하게 물어보기
+- 1-2문장 이내
+- 예시로 "카페, 맛집, 날씨" 등을 안내
+
+## 응답 예시
+"네, 무엇을 도와드릴까요? 카페, 맛집, 날씨 등을 물어보시면 검색해드릴게요!"`;
+                }
+
+                // 검색 결과는 있지만 카테고리 불명
+                if (hasLocation) {
+                    return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 ## 응답 규칙
 1. 검색 결과 중 **1개만** 추천
@@ -473,18 +699,102 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
 ## 검색 결과
 ${JSON.stringify(searchResults[0])}`;
-        }
+                }
 
-        // 기본
-        return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 ## 응답 규칙
-- 1-2문장, 30-80자 이내
+- 검색 결과를 간단히 요약
+- 2문장 이내
 - 친근한 존댓말
-- 기호 금지: ° → "도", % → "퍼센트"
-- 질문한 주제만 답변
 
-${searchResults.length > 0 ? `## 검색 결과\n${JSON.stringify(searchResults.slice(0, 2))}` : ''}`;
+## 검색 결과
+${JSON.stringify(searchResults.slice(0, 2))}`;
+            }
+        }
+    }
+
+    /**
+     * 검색 결과 없을 때 프롬프트
+     */
+    private buildNoResultPrompt(category: string, location: string): string {
+        return `당신은 화상회의 AI 비서 '빅스'입니다.
+
+사용자가 "${location}" 근처 ${category}을 찾았지만 검색 결과가 없습니다.
+
+## 응답 규칙
+- 결과가 없다고 안내
+- 다른 검색어나 지역을 제안
+- 1-2문장 이내
+
+## 응답 예시
+"${location} 근처 ${category} 검색 결과가 없어요. 다른 지역이나 키워드로 다시 검색해볼까요?"`;
+    }
+
+    // ============================================================
+    // Response Builders
+    // ============================================================
+
+    /**
+     * 장소 추천 응답 생성 (address/roadAddress가 있는 경우에만 사용)
+     */
+    private buildPlaceRecommendation(result: SearchResult): string {
+        const title = result.title || '해당 장소';
+        const address = result.roadAddress || result.address || '';
+        const newsHighlight = (result as any).newsHighlight;
+
+        let response = `네, ${title}을 추천해요.`;
+        if (newsHighlight) {
+            response += ` ${newsHighlight}까지 한대요.`;
+        }
+        if (address) {
+            response += ` ${address}에 있어요.`;
+        }
+        response += ' 해당 지점까지 경로를 채팅창으로 공유드릴게요.';
+
+        return response.replace(/\s+/g, ' ').trim();
+    }
+
+    /**
+     * 뉴스/정보 응답 검증 및 생성 (장소가 아닌 경우)
+     */
+    private validateAndBuildNewsResponse(llmResponse: string, results: SearchResult[]): string {
+        // "추천해요", "경로를 공유" 등 장소 관련 표현이 있으면 제거
+        const placePatterns = [
+            /을?\s*추천해요\.?/g,
+            /해당\s*지점까지\s*경로를\s*채팅창으로\s*공유드릴게요\.?/g,
+            /경로를\s*공유드릴게요\.?/g,
+            /위치까지\s*경로를.*?공유.*?\.?/g,
+        ];
+
+        let cleaned = llmResponse;
+        for (const pattern of placePatterns) {
+            cleaned = cleaned.replace(pattern, '');
+        }
+        cleaned = cleaned.replace(/\s+/g, ' ').trim();
+
+        // 응답이 너무 짧거나 비어있으면 기본 응답 생성
+        if (!cleaned || cleaned.length < 10) {
+            if (results.length > 0) {
+                const firstResult = results[0];
+                return `${firstResult.title}에 대한 소식이에요. ${firstResult.content.slice(0, 80)}`;
+            }
+            return '관련 정보를 찾았어요. 검색 결과를 확인해주세요.';
+        }
+
+        return cleaned;
+    }
+
+    /**
+     * 기존 buildSingleRecommendation은 deprecated - buildPlaceRecommendation 사용
+     */
+    private buildSingleRecommendation(result: SearchResult): string {
+        // 장소인 경우만 추천 형식 사용
+        if (result.address || result.roadAddress) {
+            return this.buildPlaceRecommendation(result);
+        }
+        // 장소가 아니면 정보 전달 형식
+        return this.validateAndBuildNewsResponse('', [result]);
     }
 
     // ============================================================
@@ -512,13 +822,8 @@ ${searchResults.length > 0 ? `## 검색 결과\n${JSON.stringify(searchResults.s
             destLng = String(Number(result.mapx) / 10000000);
             destLat = String(Number(result.mapy) / 10000000);
         } else {
-            return {
-                origin: { lng: originLng, lat: originLat },
-                destination: { lng: '0', lat: '0', name: result.title || '' },
-                distance: 0,
-                durationMs: 0,
-                directionUrl: result.directionUrl,
-            };
+            // 좌표가 없으면 경로 정보 없음 (장소가 아닌 경우)
+            return null;
         }
 
         const directionUrl = this.buildDirectionUrlFromCoords(
@@ -670,23 +975,6 @@ ${searchResults.length > 0 ? `## 검색 결과\n${JSON.stringify(searchResults.s
         return null;
     }
 
-    private buildSingleRecommendation(result: SearchResult): string {
-        const title = result.title || '해당 장소';
-        const address = result.roadAddress || result.address || '';
-        const newsHighlight = (result as any).newsHighlight;
-
-        let response = `${title}을 추천해요.`;
-        if (newsHighlight) {
-            response += ` ${newsHighlight}까지 한대요.`;
-        }
-        if (address) {
-            response += ` ${address}에 있어요.`;
-        }
-        response += ' 해당 지점까지 경로를 채팅창으로 공유드릴게요.';
-
-        return response.replace(/\s+/g, ' ').trim();
-    }
-
     private buildNaverDirectionUrl(mapx: string, mapy: string, title: string, placeId?: string): string | null {
         const origin = this.configService.get<string>('NAVER_MAP_ORIGIN');
         if (!origin || !mapx || !mapy) return null;
@@ -785,13 +1073,25 @@ ${searchResults.length > 0 ? `## 검색 결과\n${JSON.stringify(searchResults.s
     }> {
         if (intentAnalysis.isCallIntent && intentAnalysis.confidence >= 0.6) {
             if (!intentAnalysis.extractedKeyword) {
-                const { query, searchType } = await this.buildSearchPlan(intentAnalysis.normalizedText);
+                const { query, searchType, category } = await this.buildSearchPlan(intentAnalysis.normalizedText);
+                
+                // searchType이 'none'이면 키워드 없음
+                if (searchType === 'none') {
+                    return {
+                        shouldRespond: true,
+                        correctedText: intentAnalysis.normalizedText,
+                        searchKeyword: null,
+                        searchType: null,
+                        category: null,
+                    };
+                }
+                
                 return {
                     shouldRespond: true,
                     correctedText: intentAnalysis.normalizedText,
                     searchKeyword: query,
                     searchType: searchType === 'hybrid' ? 'local' : searchType,
-                    category: intentAnalysis.category || null,
+                    category: category || null,
                 };
             }
             return {
@@ -886,34 +1186,22 @@ ${searchResults.length > 0 ? `## 검색 결과\n${JSON.stringify(searchResults.s
         }
     }
 
-    // Helpers 섹션에 추가
-
     /**
      * LLM이 검색 결과에 없는 장소명을 지어내는 것 방지
+     * @deprecated validateAndBuildNewsResponse 사용
      */
     private validateSearchAnswer(answer: string, results: SearchResult[]): string {
-        // 검색 결과에서 모든 한글 단어 추출
-        const sourceText = results.map(r => `${r.title} ${r.content}`).join(' ');
-        const sourceWords = new Set(this.extractKoreanPhrases(sourceText));
-
-        // LLM 응답에서 한글 단어 추출
-        const answerWords = this.extractKoreanPhrases(answer);
-
-        // 검색 결과에 없는 고유명사가 있는지 확인 (2글자 이상)
-        const hasHallucination = answerWords.some(
-            word => word.length >= 2 && !sourceWords.has(word)
-        );
-
-        if (hasHallucination) {
-            this.logger.warn(`[할루시네이션 감지] LLM이 검색 결과에 없는 내용 생성 - 폴백 사용`);
-            // 검색 결과 첫 번째 항목으로 안전하게 응답
-            if (results.length > 0) {
-                return this.buildSingleRecommendation(results[0]);
+        // 장소인 경우 buildPlaceRecommendation 사용
+        const hasLocation = results.some(r => r.address || r.roadAddress);
+        if (hasLocation) {
+            const placeResult = results.find(r => r.address || r.roadAddress);
+            if (placeResult) {
+                return this.buildPlaceRecommendation(placeResult);
             }
-            return '검색 결과를 확인해주세요.';
         }
-
-        return answer;
+        
+        // 뉴스/정보인 경우
+        return this.validateAndBuildNewsResponse(answer, results);
     }
 
     private extractKoreanPhrases(text: string): string[] {
