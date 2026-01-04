@@ -256,7 +256,7 @@ export class VoiceBotService {
             let ragResponse: string;
             let ragLatency: number;
             try {
-                ragResponse = await this.ragClientService.sendQuestion(transcript);
+                ragResponse = await this.ragClientService.sendQuestion(roomName, transcript);
                 ragLatency = Date.now() - ragStart;
                 this.logger.log(`[2. RAG 답변 수신] ${ragLatency}ms - \"${ragResponse.substring(0, 50)}...\"`);
             } catch (error) {
@@ -360,7 +360,7 @@ export class VoiceBotService {
         if (context) {
             // RAG WebSocket 연결 해제
             try {
-                await this.ragClientService.disconnect();
+                await this.ragClientService.disconnect(roomName);
                 this.logger.log(`[RAG 연결 해제 완료]`);
             } catch (error) {
                 this.logger.error(`[RAG 연결 해제 실패] ${error.message}`);
