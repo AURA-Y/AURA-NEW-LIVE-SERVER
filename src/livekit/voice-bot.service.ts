@@ -26,6 +26,21 @@ enum BotState {
     SPEAKING = 'SPEAKING'
 }
 
+interface MeetingContext {
+    topic: string | null;                    // 회의 주제
+    recentTranscripts: TranscriptEntry[];    // 최근 대화 내용
+    discussedTopics: string[];               // 논의된 주제들
+    lastProactiveTime: number;               // 마지막 능동적 개입 시간
+    proactiveCount: number;                  // 능동적 개입 횟수 (너무 많이 안 하도록)
+}
+
+interface TranscriptEntry {
+    userId: string;
+    text: string;
+    timestamp: number;
+    category?: string | null;
+}
+
 interface RoomContext {
     room: Room;
     audioSource: AudioSource;
@@ -39,6 +54,10 @@ interface RoomContext {
     lastResponseTime: number;
     speakingStartTime: number;
     activeUserId: string | null;
+    // 능동적 개입을 위한 추가 필드
+    meetingContext: MeetingContext;
+    lastSpeechTime: number;                  // 마지막 발화 시간 (누구든)
+    proactiveTimer: NodeJS.Timeout | null;   // 능동적 개입 타이머
 }
 
 @Injectable()
@@ -48,6 +67,16 @@ export class VoiceBotService {
 
     private readonly STOP_WORDS = ['멈춰', '그만', '스톱', '중지'];
     private readonly ARMED_TIMEOUT_MS = 30000;
+
+    // 능동적 개입 설정
+    private readonly PROACTIVE_SILENCE_THRESHOLD_MS = 20_000;  // 20초 침묵
+    private readonly PROACTIVE_MIN_TRANSCRIPTS = 3;            // 최소 3개 대화 필요
+    private readonly PROACTIVE_MAX_PER_MEETING = 5;            // 회의당 최대 5회
+    private readonly PROACTIVE_COOLDOWN_MS = 60_000;           // 개입 후 1분 쿨다운
+    private readonly MAX_RECENT_TRANSCRIPTS = 15;              // 최근 15개 대화 저장
+
+    // 동시 실행 방지 락
+    private processingLock: Map<string, boolean> = new Map();
 
     constructor(
         private configService: ConfigService,
@@ -96,7 +125,7 @@ export class VoiceBotService {
 
         room.on(RoomEvent.Disconnected, (reason?: any) => {
             this.logger.warn(`[봇 연결 끊김] 사유: ${reason || 'UNKNOWN'}`);
-            this.activeRooms.delete(roomName);
+            this.cleanupRoom(roomName);
         });
 
         try {
@@ -130,10 +159,21 @@ export class VoiceBotService {
                 lastResponseTime: 0,
                 speakingStartTime: 0,
                 activeUserId: null,
+                // 능동적 개입 초기화
+                meetingContext: {
+                    topic: null,
+                    recentTranscripts: [],
+                    discussedTopics: [],
+                    lastProactiveTime: 0,
+                    proactiveCount: 0,
+                },
+                lastSpeechTime: Date.now(),
+                proactiveTimer: null,
             };
             this.activeRooms.set(roomName, context);
 
             this.startArmedTimeoutChecker(roomName);
+            this.startProactiveChecker(roomName);  // 능동적 개입 체커 시작
 
             this.logger.log(`[봇 입장 성공] 참여자: ${room.remoteParticipants.size}명`);
 
@@ -152,6 +192,292 @@ export class VoiceBotService {
             throw error;
         }
     }
+
+    // =====================================================
+    // 회의 맥락 관리
+    // =====================================================
+
+    /**
+     * 대화 내용을 회의 맥락에 추가
+     */
+    private addToMeetingContext(
+        context: RoomContext,
+        userId: string,
+        text: string,
+        category?: string | null
+    ): void {
+        const entry: TranscriptEntry = {
+            userId,
+            text,
+            timestamp: Date.now(),
+            category,
+        };
+
+        context.meetingContext.recentTranscripts.push(entry);
+
+        // 최대 개수 유지
+        if (context.meetingContext.recentTranscripts.length > this.MAX_RECENT_TRANSCRIPTS) {
+            context.meetingContext.recentTranscripts.shift();
+        }
+
+        // 논의된 주제 추출
+        if (category && !context.meetingContext.discussedTopics.includes(category)) {
+            context.meetingContext.discussedTopics.push(category);
+        }
+
+        // 회의 주제 추론 (첫 번째 의미있는 발화에서)
+        if (!context.meetingContext.topic && text.length > 10) {
+            this.inferMeetingTopic(context, text);
+        }
+
+        // 마지막 발화 시간 업데이트
+        context.lastSpeechTime = Date.now();
+    }
+
+    /**
+     * 회의 주제 추론
+     */
+    private inferMeetingTopic(context: RoomContext, text: string): void {
+        // 회의 관련 키워드가 있으면 주제로 설정
+        const topicPatterns = [
+            /오늘\s*회의\s*(주제|안건).*?[은는이가]\s*(.+)/,
+            /(.+?)\s*(관련|에\s*대해|논의|이야기)/,
+            /(.+?)\s*(기획|프로젝트|계획)/,
+        ];
+
+        for (const pattern of topicPatterns) {
+            const match = text.match(pattern);
+            if (match) {
+                const topic = match[2] || match[1];
+                if (topic && topic.length >= 2 && topic.length <= 30) {
+                    context.meetingContext.topic = topic.trim();
+                    this.logger.log(`[회의 주제 추론] "${context.meetingContext.topic}"`);
+                    return;
+                }
+            }
+        }
+    }
+
+    // =====================================================
+    // 능동적 개입 시스템
+    // =====================================================
+
+    /**
+     * 능동적 개입 체커 시작
+     */
+    private startProactiveChecker(roomName: string): void {
+        const checkInterval = setInterval(async () => {
+            const context = this.activeRooms.get(roomName);
+            if (!context) {
+                clearInterval(checkInterval);
+                return;
+            }
+
+            // 조건 체크
+            if (!this.shouldTriggerProactive(context)) {
+                return;
+            }
+
+            // 능동적 개입 실행
+            await this.triggerProactiveIntervention(roomName, context);
+
+        }, 5000);  // 5초마다 체크
+
+        // 컨텍스트에 타이머 저장 (정리용)
+        const context = this.activeRooms.get(roomName);
+        if (context) {
+            context.proactiveTimer = checkInterval;
+        }
+    }
+
+    /**
+     * 능동적 개입 조건 체크
+     */
+    private shouldTriggerProactive(context: RoomContext): boolean {
+        const now = Date.now();
+
+        // 1. 봇이 이미 말하고 있으면 안됨
+        if (context.botState === BotState.SPEAKING || context.isPublishing) {
+            return false;
+        }
+
+        // 2. 침묵 시간 체크
+        const silenceDuration = now - context.lastSpeechTime;
+        if (silenceDuration < this.PROACTIVE_SILENCE_THRESHOLD_MS) {
+            return false;
+        }
+
+        // 3. 최소 대화 수 체크
+        if (context.meetingContext.recentTranscripts.length < this.PROACTIVE_MIN_TRANSCRIPTS) {
+            return false;
+        }
+
+        // 4. 최대 개입 횟수 체크
+        if (context.meetingContext.proactiveCount >= this.PROACTIVE_MAX_PER_MEETING) {
+            return false;
+        }
+
+        // 5. 쿨다운 체크
+        if (now - context.meetingContext.lastProactiveTime < this.PROACTIVE_COOLDOWN_MS) {
+            return false;
+        }
+
+        // 6. 인간 참여자가 2명 이상일 때만 (혼자면 필요없음)
+        const humanCount = Array.from(context.room.remoteParticipants.values())
+            .filter(p => !p.identity.startsWith('ai-bot')).length;
+        if (humanCount < 2) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 능동적 개입 실행
+     */
+    private async triggerProactiveIntervention(roomName: string, context: RoomContext): Promise<void> {
+        // 락 획득 시도
+        if (this.processingLock.get(roomName)) {
+            this.logger.log(`[능동적 개입] 스킵 - 다른 처리 진행 중`);
+            return;
+        }
+
+        // 이미 발화 중이면 스킵
+        if (context.isPublishing || context.botState === BotState.SPEAKING) {
+            this.logger.log(`[능동적 개입] 스킵 - 봇 발화 중`);
+            return;
+        }
+
+        // 락 설정
+        this.processingLock.set(roomName, true);
+        this.logger.log(`\n========== [능동적 개입] ==========`);
+
+        try {
+            context.isPublishing = true;
+            const requestId = Date.now();
+            context.currentRequestId = requestId;
+
+            // 1. 회의 맥락 기반 제안 생성
+            const suggestion = await this.generateProactiveSuggestion(context);
+
+            // 제안 생성 중 사용자가 말했으면 취소
+            if (context.lastSpeechTime > Date.now() - 2000) {
+                this.logger.log(`[능동적 개입] 취소 - 사용자 발화 감지`);
+                return;
+            }
+
+            if (!suggestion) {
+                this.logger.log(`[능동적 개입] 제안 생성 실패 - 스킵`);
+                return;
+            }
+
+            this.logger.log(`[능동적 개입] "${suggestion.substring(0, 50)}..."`);
+
+            // 2. 상태 업데이트
+            context.meetingContext.lastProactiveTime = Date.now();
+            context.meetingContext.proactiveCount++;
+
+            // 3. DataChannel로 전송
+            const proactiveMessage = {
+                type: 'proactive_suggestion',
+                text: suggestion,
+                context: {
+                    topic: context.meetingContext.topic,
+                    discussedTopics: context.meetingContext.discussedTopics,
+                },
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(proactiveMessage)),
+                { reliable: true }
+            );
+
+            // 4. TTS 발화
+            context.botState = BotState.SPEAKING;
+            context.speakingStartTime = Date.now();
+
+            await this.speakAndPublish(context, roomName, requestId, suggestion);
+
+            // 5. 완료 후 SLEEP으로 (ARMED 아님 - 직접 호출이 아니니까)
+            context.botState = BotState.SLEEP;
+            context.lastSpeechTime = Date.now();  // 봇 발화도 마지막 발화로 기록
+
+            this.logger.log(`[능동적 개입 완료] 총 ${context.meetingContext.proactiveCount}회`);
+
+        } catch (error) {
+            this.logger.error(`[능동적 개입 에러] ${error.message}`);
+        } finally {
+            context.isPublishing = false;
+            this.processingLock.set(roomName, false);  // 락 해제
+        }
+    }
+
+    /**
+     * 회의 맥락 기반 제안 생성
+     */
+    private async generateProactiveSuggestion(context: MeetingContext | RoomContext): Promise<string | null> {
+        const meetingCtx = 'meetingContext' in context ? context.meetingContext : context;
+
+        // 최근 대화 내용 정리
+        const recentTexts = meetingCtx.recentTranscripts
+            .slice(-10)
+            .map(t => `[${t.userId}] ${t.text}`)
+            .join('\n');
+
+        if (!recentTexts || recentTexts.length < 20) {
+            return null;
+        }
+
+        const prompt = this.buildProactivePrompt(meetingCtx, recentTexts);
+
+        try {
+            const response = await this.llmService.sendMessage(prompt, null);
+            return response.text;
+        } catch (error) {
+            this.logger.error(`[제안 생성 실패] ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * 능동적 개입 프롬프트 생성
+     */
+    private buildProactivePrompt(meetingCtx: MeetingContext, recentTexts: string): string {
+        const topic = meetingCtx.topic || '(주제 미정)';
+        const discussedTopics = meetingCtx.discussedTopics.length > 0
+            ? meetingCtx.discussedTopics.join(', ')
+            : '없음';
+
+        return `당신은 화상회의 AI 비서 '빅스'입니다.
+회의 참여자들이 20초 이상 침묵하고 있습니다. 자연스럽게 대화를 이어가도록 도와주세요.
+
+## 회의 정보
+- 주제: ${topic}
+- 지금까지 논의된 키워드: ${discussedTopics}
+
+## 최근 대화 내용
+${recentTexts}
+
+## 응답 규칙
+1. "혹시 제가 도움드릴 부분이 있을까요?" 또는 논의 내용 기반 제안
+2. 대화 흐름에 맞는 자연스러운 질문이나 의견
+3. 2-3문장 이내로 간결하게
+4. 너무 튀지 않게, 부드럽게 개입
+5. 강요하지 않고 선택지를 제시
+
+## 응답 유형 (상황에 맞게 선택)
+- 요약형: "지금까지 [주제]에 대해 논의하셨는데, 다음으로 넘어갈까요?"
+- 질문형: "혹시 [관련 주제]에 대해서도 이야기해볼까요?"
+- 제안형: "제가 [관련 정보]를 찾아드릴까요?"
+- 확인형: "정리가 필요하시면 말씀해주세요!"
+
+## 응답 (1개만, 자연스럽게)`;
+    }
+
+    // =====================================================
+    // 오디오 처리
+    // =====================================================
 
     private async handleAudioTrack(roomName: string, track: RemoteTrack, userId: string) {
         this.logger.log(`[오디오 처리 시작] ${userId}`);
@@ -270,6 +596,7 @@ export class VoiceBotService {
                 voiceCount++;
                 if (context && voiceCount >= MIN_VOICE_FRAMES) {
                     context.lastInteractionTime = Date.now();
+                    context.lastSpeechTime = Date.now();  // 능동적 개입용 타이머 리셋
                 }
                 if (decibel > STRONG_VOICE_THRESHOLD) {
                     silenceCount = 0;
@@ -325,6 +652,12 @@ export class VoiceBotService {
         const context = this.activeRooms.get(roomName);
         if (!context) return;
 
+        // 락 획득 시도
+        if (this.processingLock.get(roomName)) {
+            this.logger.debug(`[스킵] 다른 처리 진행 중 (락)`);
+            return;
+        }
+
         if (context.isPublishing) {
             this.logger.debug(`[스킵] 이미 처리 중`);
             return;
@@ -335,6 +668,9 @@ export class VoiceBotService {
             this.logger.debug(`[스킵] 응답 쿨다운`);
             return;
         }
+
+        // 락 설정
+        this.processingLock.set(roomName, true);
 
         const requestId = Date.now();
         context.currentRequestId = requestId;
@@ -355,11 +691,15 @@ export class VoiceBotService {
             if (context.currentRequestId !== requestId) return;
             if (!transcript.trim()) return;
 
+            // ★ 회의 맥락에 추가 (모든 발화 저장)
+            const intentForContext = this.intentClassifier.classify(transcript);
+            this.addToMeetingContext(context, userId, transcript, intentForContext.category);
+
             // ================================================
             // 2. Intent 분석 (패턴 + 퍼지 매칭) ~5ms
             // ================================================
             const intentStart = Date.now();
-            const intentAnalysis = this.intentClassifier.classify(transcript);
+            const intentAnalysis = intentForContext;  // 이미 위에서 분석함
             this.logger.log(`[2.Intent] ${Date.now() - intentStart}ms - call=${intentAnalysis.isCallIntent}, conf=${intentAnalysis.confidence.toFixed(2)}, cat=${intentAnalysis.category}, needsLlm=${intentAnalysis.needsLlmCorrection}`);
 
             // 짧은 텍스트 필터링
@@ -560,6 +900,7 @@ export class VoiceBotService {
                 context.botState = BotState.SLEEP;
                 context.activeUserId = null;
                 context.lastResponseTime = Date.now();
+                context.lastSpeechTime = Date.now();  // 봇 발화도 마지막 발화로 기록
 
                 this.logger.log(`========== [완료] 총 ${Date.now() - startTime}ms ==========\n`);
             }
@@ -573,6 +914,7 @@ export class VoiceBotService {
             if (context.currentRequestId === requestId) {
                 context.isPublishing = false;
             }
+            this.processingLock.set(roomName, false);  // 락 해제
         }
     }
 
@@ -663,6 +1005,17 @@ export class VoiceBotService {
         }, 5000);
     }
 
+    /**
+     * 방 정리 (타이머 등)
+     */
+    private cleanupRoom(roomName: string): void {
+        const context = this.activeRooms.get(roomName);
+        if (context?.proactiveTimer) {
+            clearInterval(context.proactiveTimer);
+        }
+        this.activeRooms.delete(roomName);
+    }
+
     async stopBot(roomName: string): Promise<void> {
         const context = this.activeRooms.get(roomName);
         if (context) {
@@ -670,6 +1023,11 @@ export class VoiceBotService {
                 await this.ragClientService.disconnect(roomName);
             } catch (error) {
                 this.logger.error(`[RAG 해제 실패] ${error.message}`);
+            }
+
+            // 타이머 정리
+            if (context.proactiveTimer) {
+                clearInterval(context.proactiveTimer);
             }
 
             await context.room.disconnect();
@@ -680,5 +1038,13 @@ export class VoiceBotService {
 
     isActive(roomName: string): boolean {
         return this.activeRooms.has(roomName);
+    }
+
+    /**
+     * 회의 맥락 조회 (디버깅/테스트용)
+     */
+    getMeetingContext(roomName: string): MeetingContext | null {
+        const context = this.activeRooms.get(roomName);
+        return context?.meetingContext || null;
     }
 }
