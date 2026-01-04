@@ -277,6 +277,39 @@ export class LivekitService {
     }
   }
 
+  async deleteRoom(roomId: string) {
+    try {
+      this.logger.log(`Deleting room: ${roomId}`);
+
+      // roomId가 실제로는 room name일 수 있으므로 확인
+      const allRooms = await this.roomService.listRooms();
+      let roomToDelete = allRooms.find(r => r.sid === roomId);
+
+      // SID로 못 찾으면 이름으로 찾기
+      if (!roomToDelete) {
+        roomToDelete = allRooms.find(r => r.name === roomId);
+      }
+
+      if (!roomToDelete) {
+        throw new Error('Room not found');
+      }
+
+      // LiveKit 서버에서 방 삭제 (모든 참가자 자동 disconnect)
+      await this.roomService.deleteRoom(roomToDelete.name);
+
+      this.logger.log(`Room deleted successfully: ${roomToDelete.name}`);
+
+      return {
+        message: 'Room deleted successfully',
+        roomId: roomToDelete.sid,
+        roomName: roomToDelete.name,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to delete room: ${error.message}`);
+      throw new Error(`Failed to delete room: ${error.message}`);
+    }
+  }
+
   private async generateTokenForUser(roomName: string, userName: string, isBot: boolean = false): Promise<string> {
     const at = new AccessToken(this.apiKey, this.apiSecret, {
       identity: userName,
