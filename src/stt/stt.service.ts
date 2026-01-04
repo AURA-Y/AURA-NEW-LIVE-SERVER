@@ -296,8 +296,20 @@ export class SttService {
                         extra_contents: JSON.stringify({ seqId, epFlag: true }),
                     },
                 });
-                call.end();
-                this.logger.debug(`[Clova Stream] gRPC call.end() 호출 완료`);
+                // call.end()를 즉시 호출하지 않음
+                // Clova가 모든 응답을 보낼 때까지 대기
+                // 응답이 없으면 10초 후 타임아웃
+                const timeoutId = setTimeout(() => {
+                    this.logger.warn(`[Clova Stream] 타임아웃 (10초) - 강제 종료`);
+                    call.end();
+                }, 10000);
+
+                // 응답이 오면 타임아웃 취소하고 정상 종료
+                const originalOnEnd = call.on.bind(call);
+                call.on('end', () => {
+                    clearTimeout(timeoutId);
+                    this.logger.debug(`[Clova Stream] 정상 종료`);
+                });
             });
             audioStream.on('error', (error) => {
                 this.logger.error(`[Clova STT 스트림 에러] ${error.message}`);
