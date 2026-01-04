@@ -3,9 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import * as speechsdk from 'microsoft-cognitiveservices-speech-sdk';
 import { Readable } from 'stream';
-import * as grpc from '@grpc/grpc-js';
-import * as protoLoader from '@grpc/proto-loader';
-import path from 'path';
 import {
     BedrockRuntimeClient,
     InvokeModelCommand,
@@ -17,27 +14,21 @@ export class SttService {
     private deepgramClient: any;
     private azureSpeechConfig: speechsdk.SpeechConfig | null = null;
     private readonly provider: string;
-    private readonly clovaSpeechEndpoint: string;
-    private readonly clovaSpeechSecret: string;
-    private readonly clovaSpeechLang: string;
-    private clovaClient: any;
 
     // LLM 교정용
     private bedrockClient: BedrockRuntimeClient;
     private readonly llmModelId = 'anthropic.claude-3-haiku-20240307-v1:0';
 
     constructor(private configService: ConfigService) {
-        this.provider = (this.configService.get<string>('STT_PROVIDER') || 'clova').toLowerCase();
-        this.clovaSpeechEndpoint = this.configService.get<string>('CLOVA_SPEECH_GRPC_ENDPOINT') || 'clovaspeech-gw.ncloud.com:50051';
-        this.clovaSpeechSecret = this.configService.get<string>('CLOVA_SPEECH_SECRET') || '';
-        this.clovaSpeechLang = this.configService.get<string>('CLOVA_SPEECH_LANG') || 'ko';
+        const requestedProvider = (this.configService.get<string>('STT_PROVIDER') || 'deepgram').toLowerCase();
+        this.provider = requestedProvider === 'azure' || requestedProvider === 'deepgram'
+            ? requestedProvider
+            : 'deepgram';
+        if (this.provider !== requestedProvider) {
+            this.logger.warn(`[STT] Unsupported provider "${requestedProvider}", defaulting to "${this.provider}"`);
+        }
 
-        if (this.provider === 'clova') {
-            if (!this.clovaSpeechSecret) {
-                this.logger.error('[Clova STT] CLOVA_SPEECH_SECRET이 설정되지 않았습니다!');
-            }
-            this.initClovaClient();
-        } else if (this.provider === 'azure') {
+        if (this.provider === 'azure') {
             const azureKey = this.configService.get<string>('AZURE_SPEECH_KEY');
             const azureRegion = this.configService.get<string>('AZURE_SPEECH_REGION') || 'koreacentral';
             if (!azureKey) {
@@ -70,9 +61,6 @@ export class SttService {
     // =====================================================
 
     async transcribeFromBuffer(audioBuffer: Buffer, fileName: string): Promise<string> {
-        if (this.provider === 'clova') {
-            return this.transcribeFromBufferClova(audioBuffer, fileName);
-        }
         if (this.provider === 'azure') {
             return this.transcribeFromBufferAzure(audioBuffer, fileName);
         }
@@ -109,9 +97,6 @@ export class SttService {
     }
 
     async transcribeStream(audioStream: Readable): Promise<string> {
-        if (this.provider === 'clova') {
-            return this.transcribeStreamClova(audioStream);
-        }
         if (this.provider === 'azure') {
             return this.transcribeStreamAzure(audioStream);
         }
@@ -164,9 +149,6 @@ export class SttService {
     }
 
     async transcribeFromBufferStream(audioBuffer: Buffer, fileName: string): Promise<string> {
-        if (this.provider === 'clova') {
-            return this.transcribeFromBufferStreamClova(audioBuffer, fileName);
-        }
         if (this.provider === 'azure') {
             return this.transcribeFromBufferStreamAzure(audioBuffer, fileName);
         }
@@ -188,147 +170,6 @@ export class SttService {
             throw new Error('AZURE_SPEECH_KEY is not set');
         }
         return this.azureSpeechConfig;
-    }
-
-    private async transcribeFromBufferClova(audioBuffer: Buffer, fileName: string): Promise<string> {
-        this.logger.log(`[Clova 파일 STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
-        return this.recognizeOnceClova(audioBuffer);
-    }
-
-    private async transcribeStreamClova(audioStream: Readable): Promise<string> {
-        if (!this.clovaSpeechSecret) {
-            throw new Error('CLOVA_SPEECH_SECRET is not set');
-        }
-        if (!this.clovaClient) {
-            this.initClovaClient();
-        }
-
-        return new Promise((resolve, reject) => {
-            const metadata = new grpc.Metadata();
-            metadata.add('authorization', `Bearer ${this.clovaSpeechSecret}`);
-            const call = this.clovaClient.recognize(metadata);
-
-            const transcripts: string[] = [];
-            let responseCount = 0;
-            call.on('data', (response: any) => {
-                responseCount++;
-                this.logger.debug(`[Clova Stream] 응답 #${responseCount} 수신`);
-
-                const contents = response?.contents || '';
-                if (!contents) {
-                    this.logger.warn(`[Clova Stream] 응답 #${responseCount} - contents 없음`);
-                    return;
-                }
-
-                try {
-                    // contents는 JSON 문자열이므로 파싱
-                    const parsed = JSON.parse(contents);
-                    const responseType = parsed?.responseType || [];
-
-                    this.logger.debug(`[Clova Stream] 응답 #${responseCount} 구조: ${JSON.stringify(parsed)}`);
-
-                    // config 응답은 스킵
-                    if (responseType.includes('config')) {
-                        this.logger.debug(`[Clova Stream] Config 응답 스킵`);
-                        return;
-                    }
-
-                    // 실제 텍스트 추출 (text 또는 transcription.text 필드)
-                    const text = parsed?.text || parsed?.transcription?.text || '';
-                    if (text) {
-                        this.logger.log(`[Clova Stream] 인식된 텍스트: ${text}`);
-                        transcripts.push(text);
-                    } else {
-                        this.logger.warn(`[Clova Stream] 텍스트 없음 - responseType: ${JSON.stringify(responseType)}, 전체: ${JSON.stringify(parsed)}`);
-                    }
-                } catch (e) {
-                    // JSON 파싱 실패 시 그냥 contents 사용 (plain text인 경우)
-                    this.logger.warn(`[Clova Stream] JSON 파싱 실패, Raw: ${contents}`);
-                    transcripts.push(contents);
-                }
-            });
-            call.on('error', (error: any) => {
-                this.logger.error(`[Clova Stream] gRPC 에러: ${error.message}`);
-                reject(error);
-            });
-            call.on('end', () => {
-                const result = transcripts.join(' ').trim();
-                this.logger.log(`[Clova Stream] 스트림 종료 - 총 ${responseCount}개 응답, 최종 결과: "${result}"`);
-                resolve(result);
-            });
-
-            const config = JSON.stringify({
-                transcription: { language: this.clovaSpeechLang },
-                semanticEpd: {
-                    skipEmptyText: false,
-                    useWordEpd: false,
-                    usePeriodEpd: true,
-                    gapThreshold: 2000,
-                    durationThreshold: 20000,
-                    syllableThreshold: 0,
-                },
-            });
-
-            call.write({ type: 'CONFIG', config: { config } });
-            this.logger.debug(`[Clova Stream] CONFIG 전송 완료`);
-
-            let seqId = 0;
-            let totalBytes = 0;
-            audioStream.on('data', (chunk: Buffer) => {
-                totalBytes += chunk.length;
-                this.logger.debug(`[Clova Stream] DATA 전송 #${seqId}: ${chunk.length} bytes (총: ${totalBytes} bytes)`);
-                call.write({
-                    type: 'DATA',
-                    data: {
-                        chunk,
-                        extra_contents: JSON.stringify({ seqId, epFlag: false }),
-                    },
-                });
-                seqId += 1;
-            });
-            audioStream.on('end', () => {
-                this.logger.log(`[Clova Stream] 오디오 스트림 종료 - 총 ${seqId}개 청크, ${totalBytes} bytes`);
-                this.logger.debug(`[Clova Stream] 최종 DATA 전송 (epFlag: true, seqId: ${seqId})`);
-                call.write({
-                    type: 'DATA',
-                    data: {
-                        chunk: Buffer.alloc(0),
-                        extra_contents: JSON.stringify({ seqId, epFlag: true }),
-                    },
-                });
-                // call.end()를 즉시 호출하지 않음
-                // Clova가 모든 응답을 보낼 때까지 대기
-                // 응답이 없으면 10초 후 타임아웃
-                const timeoutId = setTimeout(() => {
-                    this.logger.warn(`[Clova Stream] 타임아웃 (10초) - 강제 종료`);
-                    call.end();
-                }, 10000);
-
-                // 응답이 오면 타임아웃 취소하고 정상 종료
-                const originalOnEnd = call.on.bind(call);
-                call.on('end', () => {
-                    clearTimeout(timeoutId);
-                    this.logger.debug(`[Clova Stream] 정상 종료`);
-                });
-            });
-            audioStream.on('error', (error) => {
-                this.logger.error(`[Clova STT 스트림 에러] ${error.message}`);
-                reject(error);
-            });
-        });
-    }
-
-    private async transcribeFromBufferStreamClova(audioBuffer: Buffer, fileName: string): Promise<string> {
-        this.logger.log(`[Clova 파일 STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
-        // recognizeOnceClova 사용: 버퍼를 청크로 나눠서 전송 (스트리밍 API보다 안정적)
-        try {
-            const transcript = await this.recognizeOnceClova(audioBuffer);
-            this.logger.log(`[Clova STT 완료] 전체 결과: ${transcript}`);
-            return transcript || '';
-        } catch (error) {
-            this.logger.error(`[Clova STT 에러] ${error.message}`);
-            throw error;
-        }
     }
 
     private async transcribeFromBufferAzure(audioBuffer: Buffer, fileName: string): Promise<string> {
@@ -422,110 +263,4 @@ export class SttService {
         });
     }
 
-    private initClovaClient(): void {
-        const protoPath = path.join(__dirname, 'nest.proto');
-        const packageDef = protoLoader.loadSync(protoPath, {
-            longs: String,
-            enums: String,
-            defaults: true,
-            oneofs: true,
-        });
-        const proto = grpc.loadPackageDefinition(packageDef) as any;
-        const service = proto?.com?.nbp?.cdncp?.nest?.grpc?.proto?.v1?.NestService;
-        if (!service) {
-            throw new Error('Failed to load Clova gRPC proto');
-        }
-        this.clovaClient = new service(
-            this.clovaSpeechEndpoint,
-            grpc.credentials.createSsl()
-        );
-    }
-
-    private async recognizeOnceClova(audioBuffer: Buffer): Promise<string> {
-        if (!this.clovaSpeechSecret) {
-            throw new Error('CLOVA_SPEECH_SECRET is not set');
-        }
-        if (!this.clovaClient) {
-            this.initClovaClient();
-        }
-
-        return new Promise((resolve, reject) => {
-            const metadata = new grpc.Metadata();
-            metadata.add('authorization', `Bearer ${this.clovaSpeechSecret}`);
-            const call = this.clovaClient.recognize(metadata);
-
-            const transcripts: string[] = [];
-            call.on('data', (response: any) => {
-                const contents = response?.contents || '';
-                if (!contents) return;
-
-                try {
-                    // contents는 JSON 문자열이므로 파싱
-                    const parsed = JSON.parse(contents);
-                    const responseType = parsed?.responseType || [];
-
-                    // config 응답은 스킵
-                    if (responseType.includes('config')) {
-                        this.logger.debug(`[Clova] Config 응답 스킵`);
-                        return;
-                    }
-
-                    // 응답 전체 구조 로깅 (디버깅용)
-                    this.logger.debug(`[Clova] 응답 구조: ${JSON.stringify(parsed)}`);
-
-                    // 실제 텍스트 추출 (text 또는 transcription.text 필드)
-                    const text = parsed?.text || parsed?.transcription?.text || '';
-                    if (text) {
-                        this.logger.debug(`[Clova] 인식된 텍스트: ${text}`);
-                        transcripts.push(text);
-                    } else {
-                        this.logger.warn(`[Clova] 텍스트 없음 - responseType: ${JSON.stringify(responseType)}`);
-                    }
-                } catch (e) {
-                    // JSON 파싱 실패 시 그냥 contents 사용 (plain text인 경우)
-                    this.logger.debug(`[Clova] Raw contents: ${contents}`);
-                    transcripts.push(contents);
-                }
-            });
-            call.on('error', (error: any) => {
-                reject(error);
-            });
-            call.on('end', () => {
-                resolve(transcripts.join(' ').trim());
-            });
-
-            const config = JSON.stringify({
-                transcription: { language: this.clovaSpeechLang },
-                semanticEpd: {
-                    skipEmptyText: false,
-                    useWordEpd: false,
-                    usePeriodEpd: true,
-                    gapThreshold: 2000,
-                    durationThreshold: 20000,
-                    syllableThreshold: 0,
-                },
-            });
-
-            call.write({ type: 'CONFIG', config: { config } });
-
-            const chunkSize = 32000;
-            let offset = 0;
-            let seqId = 0;
-            while (offset < audioBuffer.length) {
-                const end = Math.min(offset + chunkSize, audioBuffer.length);
-                const chunk = audioBuffer.subarray(offset, end);
-                const epFlag = end >= audioBuffer.length;
-                call.write({
-                    type: 'DATA',
-                    data: {
-                        chunk,
-                        extra_contents: JSON.stringify({ seqId, epFlag }),
-                    },
-                });
-                offset = end;
-                seqId += 1;
-            }
-            call.end();
-        });
-    }
 }
