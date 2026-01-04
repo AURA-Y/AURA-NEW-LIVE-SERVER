@@ -224,11 +224,16 @@ export class SttService {
                         return;
                     }
 
+                    // 응답 전체 구조 로깅 (디버깅용)
+                    this.logger.debug(`[Clova Stream] 응답 구조: ${JSON.stringify(parsed)}`);
+
                     // 실제 텍스트 추출 (text 또는 transcription.text 필드)
                     const text = parsed?.text || parsed?.transcription?.text || '';
                     if (text) {
                         this.logger.debug(`[Clova Stream] 인식된 텍스트: ${text}`);
                         transcripts.push(text);
+                    } else {
+                        this.logger.warn(`[Clova Stream] 텍스트 없음 - responseType: ${JSON.stringify(responseType)}`);
                     }
                 } catch (e) {
                     // JSON 파싱 실패 시 그냥 contents 사용 (plain text인 경우)
@@ -437,11 +442,16 @@ export class SttService {
                         return;
                     }
 
+                    // 응답 전체 구조 로깅 (디버깅용)
+                    this.logger.debug(`[Clova] 응답 구조: ${JSON.stringify(parsed)}`);
+
                     // 실제 텍스트 추출 (text 또는 transcription.text 필드)
                     const text = parsed?.text || parsed?.transcription?.text || '';
                     if (text) {
                         this.logger.debug(`[Clova] 인식된 텍스트: ${text}`);
                         transcripts.push(text);
+                    } else {
+                        this.logger.warn(`[Clova] 텍스트 없음 - responseType: ${JSON.stringify(responseType)}`);
                     }
                 } catch (e) {
                     // JSON 파싱 실패 시 그냥 contents 사용 (plain text인 경우)
