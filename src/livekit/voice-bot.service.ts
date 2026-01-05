@@ -534,6 +534,136 @@ ${recentTexts}
     }
 
     // =====================================================
+    // 아이디어 감지 및 브로드캐스트
+    // =====================================================
+
+    /**
+     * 아이디어 의도 감지 및 DataChannel 전송
+     */
+    private async detectAndBroadcastIdea(
+        roomName: string,
+        context: RoomContext,
+        transcript: string,
+        userId: string
+    ): Promise<void> {
+        // 아이디어 트리거 패턴
+        const IDEA_TRIGGER_PATTERNS = [
+            /(.+?)[은는이가]\s*어때/,           // "~는 어때?"
+            /(.+?)[하면으면]\s*어떨까/,         // "~하면 어떨까?"
+            /(.+?)[도이가]\s*좋을\s*것\s*같/,   // "~도 좋을 것 같아"
+            /(.+?)[하자해보자]/,                // "~하자"
+            /(.+?)\s*추천/,                     // "~추천"
+            /(.+?)\s*아이디어/,                 // "~아이디어"
+            /(.+?)\s*제안/,                     // "~제안"
+        ];
+
+        let isIdeaIntent = false;
+        let extractedIdea = '';
+
+        // 패턴 매칭으로 아이디어 의도 감지
+        for (const pattern of IDEA_TRIGGER_PATTERNS) {
+            const match = transcript.match(pattern);
+            if (match && match[1]) {
+                isIdeaIntent = true;
+                extractedIdea = match[1].trim();
+                break;
+            }
+        }
+
+        if (!isIdeaIntent || extractedIdea.length < 2) {
+            return;  // 아이디어가 아니면 스킵
+        }
+
+        this.logger.log(`[아이디어 감지] "${extractedIdea}"`);
+
+        try {
+            // LLM으로 아이디어 정제
+            const refinedIdea = await this.refineIdea(extractedIdea, transcript);
+
+            if (!refinedIdea || refinedIdea.length < 3) {
+                this.logger.log(`[아이디어] 정제 실패 - 스킵`);
+                return;
+            }
+
+            this.logger.log(`[아이디어 정제] "${refinedIdea}"`);
+
+            // DataChannel로 브로드캐스트
+            const ideaMessage = {
+                type: 'NEW_IDEA',
+                idea: {
+                    id: `idea-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                    content: refinedIdea,
+                    author: userId || '익명',
+                },
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(ideaMessage)),
+                { reliable: true }
+            );
+
+            this.logger.log(`[아이디어 전송] "${refinedIdea}" by ${userId}`);
+        } catch (error) {
+            this.logger.error(`[아이디어 처리 에러] ${error.message}`);
+        }
+    }
+
+    /**
+     * LLM으로 아이디어 정제
+     */
+    private async refineIdea(extractedIdea: string, originalTranscript: string): Promise<string> {
+        const prompt = `당신은 회의 중 나온 아이디어를 정제하는 전문가입니다.
+다음 발화에서 핵심 아이디어만 짧고 명확하게 추출해주세요.
+
+## 원본 발화
+"${originalTranscript}"
+
+## 추출된 키워드
+"${extractedIdea}"
+
+## 규칙
+1. 포스트잇에 적을 수 있도록 짧게 (최대 30자)
+2. 불필요한 조사, 말투 제거
+3. 핵심 내용만 명사형으로
+4. 이모티콘 없이 텍스트만
+
+## 예시
+입력: "SNS 마케팅 강화하면 어떨까요?"
+출력: "SNS 마케팅 강화"
+
+입력: "AI 기반 추천 시스템 도입은 어때?"
+출력: "AI 기반 추천 시스템"
+
+입력: "고객 피드백 자동 분석 툴 만들자"
+출력: "고객 피드백 자동 분석 툴"
+
+## 정제된 아이디어 (30자 이내):`;
+
+        try {
+            const response = await this.llmService.sendMessage(prompt, null);
+
+            // 응답에서 따옴표 제거 및 정리
+            let refined = response.text
+                .replace(/["'""'']/g, '')
+                .replace(/^정제된\s*아이디어[:\s]*/i, '')
+                .replace(/^출력[:\s]*/i, '')
+                .trim();
+
+            // 너무 길면 자르기
+            if (refined.length > 30) {
+                refined = refined.substring(0, 30) + '...';
+            }
+
+            return refined;
+        } catch (error) {
+            this.logger.error(`[아이디어 정제 실패] ${error.message}`);
+            // 실패 시 원본 반환
+            return extractedIdea.substring(0, 30);
+        }
+    }
+
+    // =====================================================
     // 오디오 처리
     // =====================================================
 
@@ -757,6 +887,9 @@ ${recentTexts}
             // ★ 회의 맥락에 추가 (모든 발화 저장)
             const intentForContext = this.intentClassifier.classify(transcript);
             this.addToMeetingContext(context, userId, transcript, intentForContext.category);
+
+            // ★ 아이디어 의도 감지 및 전송
+            await this.detectAndBroadcastIdea(roomName, context, transcript, userId);
 
             // ================================================
             // 2. Intent 분석 (패턴 + 퍼지 매칭) ~5ms
