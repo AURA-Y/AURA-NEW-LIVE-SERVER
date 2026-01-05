@@ -58,6 +58,8 @@ interface RoomContext {
     meetingContext: MeetingContext;
     lastSpeechTime: number;                  // 마지막 발화 시간 (누구든)
     proactiveTimer: NodeJS.Timeout | null;   // 능동적 개입 타이머
+    // 아이디어 모드
+    ideaModeActive: boolean;                 // 아이디어 보드 활성화 여부
 }
 
 @Injectable()
@@ -128,6 +130,25 @@ export class VoiceBotService {
             this.cleanupRoom(roomName);
         });
 
+        // 아이디어 모드 시작/종료 메시지 수신
+        room.on(RoomEvent.DataReceived, (payload: Uint8Array, participant: any) => {
+            try {
+                const message = JSON.parse(new TextDecoder().decode(payload));
+                const context = this.activeRooms.get(roomName);
+                if (!context) return;
+
+                if (message.type === 'IDEA_MODE_START') {
+                    context.ideaModeActive = true;
+                    this.logger.log(`[아이디어 모드] 시작 by ${participant?.identity || 'unknown'}`);
+                } else if (message.type === 'IDEA_MODE_END') {
+                    context.ideaModeActive = false;
+                    this.logger.log(`[아이디어 모드] 종료`);
+                }
+            } catch (error) {
+                // JSON 파싱 실패는 무시 (다른 메시지일 수 있음)
+            }
+        });
+
         try {
             await room.connect(livekitUrl, botToken);
 
@@ -169,6 +190,8 @@ export class VoiceBotService {
                 },
                 lastSpeechTime: Date.now(),
                 proactiveTimer: null,
+                // 아이디어 모드 초기화
+                ideaModeActive: false,
             };
             this.activeRooms.set(roomName, context);
 
@@ -538,7 +561,7 @@ ${recentTexts}
     // =====================================================
 
     /**
-     * 아이디어 의도 감지 및 DataChannel 전송
+     * LLM이 좋은 아이디어라고 판단하면 DataChannel 전송
      */
     private async detectAndBroadcastIdea(
         roomName: string,
@@ -546,53 +569,27 @@ ${recentTexts}
         transcript: string,
         userId: string
     ): Promise<void> {
-        // 아이디어 트리거 패턴
-        const IDEA_TRIGGER_PATTERNS = [
-            /(.+?)[은는이가]\s*어때/,           // "~는 어때?"
-            /(.+?)[하면으면]\s*어떨까/,         // "~하면 어떨까?"
-            /(.+?)[도이가]\s*좋을\s*것\s*같/,   // "~도 좋을 것 같아"
-            /(.+?)[하자해보자]/,                // "~하자"
-            /(.+?)\s*추천/,                     // "~추천"
-            /(.+?)\s*아이디어/,                 // "~아이디어"
-            /(.+?)\s*제안/,                     // "~제안"
-        ];
-
-        let isIdeaIntent = false;
-        let extractedIdea = '';
-
-        // 패턴 매칭으로 아이디어 의도 감지
-        for (const pattern of IDEA_TRIGGER_PATTERNS) {
-            const match = transcript.match(pattern);
-            if (match && match[1]) {
-                isIdeaIntent = true;
-                extractedIdea = match[1].trim();
-                break;
-            }
+        // 너무 짧은 발화는 스킵
+        if (transcript.length < 5) {
+            return;
         }
-
-        if (!isIdeaIntent || extractedIdea.length < 2) {
-            return;  // 아이디어가 아니면 스킵
-        }
-
-        this.logger.log(`[아이디어 감지] "${extractedIdea}"`);
 
         try {
-            // LLM으로 아이디어 정제
-            const refinedIdea = await this.refineIdea(extractedIdea, transcript);
+            // LLM에게 아이디어 여부 판단 요청
+            const result = await this.evaluateIdea(transcript);
 
-            if (!refinedIdea || refinedIdea.length < 3) {
-                this.logger.log(`[아이디어] 정제 실패 - 스킵`);
-                return;
+            if (!result.isGoodIdea || !result.refinedIdea) {
+                return;  // 좋은 아이디어가 아니면 스킵
             }
 
-            this.logger.log(`[아이디어 정제] "${refinedIdea}"`);
+            this.logger.log(`[좋은 아이디어 감지] "${result.refinedIdea}"`);
 
             // DataChannel로 브로드캐스트
             const ideaMessage = {
                 type: 'NEW_IDEA',
                 idea: {
                     id: `idea-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-                    content: refinedIdea,
+                    content: result.refinedIdea,
                     author: userId || '익명',
                 },
             };
@@ -603,63 +600,68 @@ ${recentTexts}
                 { reliable: true }
             );
 
-            this.logger.log(`[아이디어 전송] "${refinedIdea}" by ${userId}`);
+            this.logger.log(`[아이디어 전송] "${result.refinedIdea}" by ${userId}`);
         } catch (error) {
             this.logger.error(`[아이디어 처리 에러] ${error.message}`);
         }
     }
 
     /**
-     * LLM으로 아이디어 정제
+     * LLM이 아이디어 여부 및 품질 판단
      */
-    private async refineIdea(extractedIdea: string, originalTranscript: string): Promise<string> {
-        const prompt = `당신은 회의 중 나온 아이디어를 정제하는 전문가입니다.
-다음 발화에서 핵심 아이디어만 짧고 명확하게 추출해주세요.
+    private async evaluateIdea(transcript: string): Promise<{ isGoodIdea: boolean; refinedIdea?: string }> {
+        const prompt = `당신은 회의에서 좋은 아이디어를 감지하는 전문가입니다.
 
-## 원본 발화
-"${originalTranscript}"
+## 발화
+"${transcript}"
 
-## 추출된 키워드
-"${extractedIdea}"
+## 판단 기준
+좋은 아이디어란:
+- 새로운 제안이나 개선안 ("~하면 어떨까?", "~해보자", "~추천")
+- 구체적인 실행 방안
+- 문제 해결책
+- 창의적인 접근
 
-## 규칙
-1. 포스트잇에 적을 수 있도록 짧게 (최대 30자)
-2. 불필요한 조사, 말투 제거
-3. 핵심 내용만 명사형으로
-4. 이모티콘 없이 텍스트만
+좋은 아이디어가 아닌 것:
+- 단순 질문 ("이거 뭐야?", "언제 해?")
+- 일상 대화 ("안녕", "네", "알겠어")
+- 단순 사실 전달 ("회의는 3시야")
+- 불평/불만만 있고 대안이 없는 것
+
+## 응답 형식 (반드시 이 형식으로만 응답)
+좋은 아이디어면: YES|정제된 아이디어 (20자 이내)
+좋은 아이디어 아니면: NO
 
 ## 예시
-입력: "SNS 마케팅 강화하면 어떨까요?"
-출력: "SNS 마케팅 강화"
+발화: "SNS 마케팅을 더 강화하면 좋을 것 같아요"
+응답: YES|SNS 마케팅 강화
 
-입력: "AI 기반 추천 시스템 도입은 어때?"
-출력: "AI 기반 추천 시스템"
+발화: "오늘 점심 뭐 먹지?"
+응답: NO
 
-입력: "고객 피드백 자동 분석 툴 만들자"
-출력: "고객 피드백 자동 분석 툴"
+발화: "고객 데이터를 AI로 분석해서 맞춤 추천하면 어때?"
+응답: YES|AI 고객 데이터 분석 추천
 
-## 정제된 아이디어 (30자 이내):`;
+발화: "네 알겠습니다"
+응답: NO
+
+## 응답:`;
 
         try {
             const response = await this.llmService.sendMessage(prompt, null);
+            const answer = response.text.trim();
 
-            // 응답에서 따옴표 제거 및 정리
-            let refined = response.text
-                .replace(/["'""'']/g, '')
-                .replace(/^정제된\s*아이디어[:\s]*/i, '')
-                .replace(/^출력[:\s]*/i, '')
-                .trim();
-
-            // 너무 길면 자르기
-            if (refined.length > 30) {
-                refined = refined.substring(0, 30) + '...';
+            if (answer.startsWith('YES|')) {
+                const refinedIdea = answer.substring(4).trim();
+                if (refinedIdea.length >= 2 && refinedIdea.length <= 30) {
+                    return { isGoodIdea: true, refinedIdea };
+                }
             }
 
-            return refined;
+            return { isGoodIdea: false };
         } catch (error) {
-            this.logger.error(`[아이디어 정제 실패] ${error.message}`);
-            // 실패 시 원본 반환
-            return extractedIdea.substring(0, 30);
+            this.logger.error(`[아이디어 평가 실패] ${error.message}`);
+            return { isGoodIdea: false };
         }
     }
 
@@ -888,8 +890,10 @@ ${recentTexts}
             const intentForContext = this.intentClassifier.classify(transcript);
             this.addToMeetingContext(context, userId, transcript, intentForContext.category);
 
-            // ★ 아이디어 의도 감지 및 전송
-            await this.detectAndBroadcastIdea(roomName, context, transcript, userId);
+            // ★ 아이디어 모드일 때만 아이디어 감지 및 전송
+            if (context.ideaModeActive) {
+                await this.detectAndBroadcastIdea(roomName, context, transcript, userId);
+            }
 
             // ================================================
             // 2. Intent 분석 (패턴 + 퍼지 매칭) ~5ms
