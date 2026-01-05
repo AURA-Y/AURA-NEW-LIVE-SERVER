@@ -111,38 +111,6 @@ export class LivekitService {
     }
   }
 
-  /**
-   * Room Metadata 업데이트 (Link API 용)
-   */
-  async updateRoomMetadata(roomId: string, metadata: any) {
-    try {
-      this.logger.log(`Updating room metadata: roomId=${roomId}, metadata=${JSON.stringify(metadata)}`);
-      
-      const metadataStr = JSON.stringify(metadata);
-
-      // roomId가 SID인 경우 Name으로 변환 필요 (LiveKit API는 주로 Name을 사용)
-      let targetRoomName = roomId;
-      if (roomId.startsWith('RM_')) {
-        const rooms = await this.roomService.listRooms();
-        const found = rooms.find(r => r.sid === roomId);
-        if (found) {
-          targetRoomName = found.name;
-          this.logger.log(`Resolved Room SID ${roomId} to Name ${targetRoomName}`);
-        } else {
-          // 방이 없으면 에러가 날 것이므로, 혹시 모르니 Name으로도 시도해보기 위해 그대로 둠
-          this.logger.warn(`Could not find room by SID ${roomId}, trying as name`);
-        }
-      }
-
-      await (this.roomService as any).updateRoomMetadata(targetRoomName, metadataStr);
-      
-      this.logger.log(`Room metadata updated successfully for ${targetRoomName}`);
-    } catch (error) {
-      this.logger.error(`Failed to update room metadata: ${error.message}`);
-      throw new Error(`Failed to update room metadata: ${error.message}`);
-    }
-  }
-
   async joinRoom(joinRoomDto: JoinRoomDto, isBot: boolean = false) {
     const { roomId, roomName, userName } = joinRoomDto;
     this.logger.log(`Join request: roomId=${roomId}, roomName=${roomName}, user=${userName}`);
