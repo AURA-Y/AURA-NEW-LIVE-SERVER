@@ -449,7 +449,7 @@ export class VoiceBotService {
             ? meetingCtx.discussedTopics.join(', ')
             : '없음';
 
-        return `당신은 화상회의 AI 비서 '빅스'입니다.
+        return `당신은 화상회의 AI 비서 '아우라'입니다.
 회의 참여자들이 20초 이상 침묵하고 있습니다. 자연스럽게 대화를 이어가도록 도와주세요.
 
 ## 회의 정보

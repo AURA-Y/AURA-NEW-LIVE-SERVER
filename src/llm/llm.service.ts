@@ -253,7 +253,7 @@ export class LlmService {
                 const timeWord = userMessage.includes('내일') ? '내일' :
                     userMessage.includes('모레') ? '모레' :
                     userMessage.includes('이번주') ? '이번주' : '오늘';
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 사용자가 "${location}" "${timeWord}" 날씨를 물어봤습니다.
 
@@ -279,7 +279,7 @@ ${searchResults.map(r => r.content || r.title).join('\n').slice(0, 500)}`;
                 if (!hasLocation || searchResults.length === 0) {
                     return this.buildNoResultPrompt(matchedCategory, location);
                 }
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 사용자가 "${location}" 근처 ${matchedCategory}을 찾고 있습니다.
 
@@ -296,7 +296,7 @@ ${JSON.stringify(searchResults[0])}`;
 
             case '팝업':
             case '전시': {
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 사용자가 "${location}" 근처 ${matchedCategory} 정보를 찾고 있습니다.
 
@@ -315,7 +315,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
                 const movieTheaters = searchResults.filter(r => r.address || r.roadAddress);
                 const hasTheater = movieTheaters.length > 0;
 
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 사용자가 영화 관련 정보를 찾고 있습니다.
 
@@ -338,7 +338,7 @@ ${JSON.stringify(movieTheaters.slice(0, 1), null, 2)}`;
             case '뉴스':
             case '주식':
             case '스포츠': {
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 사용자가 ${matchedCategory} 정보를 물어봤습니다.
 
@@ -352,7 +352,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
             }
 
             case '백과': {
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 사용자가 특정 개념/정의에 대해 물어봤습니다.
 
@@ -367,7 +367,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
             default: {
                 if (searchResults.length === 0) {
-                    return `당신은 화상회의 AI 비서 '빅스'입니다.
+                    return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 ## 응답 규칙
 - 사용자가 무엇을 원하는지 친절하게 물어보기
@@ -375,7 +375,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
                 }
 
                 if (hasLocation) {
-                    return `당신은 화상회의 AI 비서 '빅스'입니다.
+                    return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 ## 응답 규칙
 1. 검색 결과 중 **1개만** 추천
@@ -386,7 +386,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 ${JSON.stringify(searchResults[0])}`;
                 }
 
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 ## 응답 규칙
 - 검색 결과를 간단히 요약
@@ -399,7 +399,7 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
     }
 
     private buildNoResultPrompt(category: string, location: string): string {
-        return `당신은 화상회의 AI 비서 '빅스'입니다.
+        return `당신은 화상회의 AI 비서 '아우라'입니다.
 
 사용자가 "${location}" 근처 ${category}을 찾았지만 검색 결과가 없습니다.
 
@@ -531,8 +531,8 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
         const prompt = `화상회의 음성인식 결과를 분석하세요.
 
 ## 웨이크워드
-표준: 빅스야, 빅스비, 헤이빅스
-변형: 믹스야, 익수야, 빅세야, 빅쓰, 픽스야, 비수야 등
+표준: 아우라야, 헤이아우라, 헤이 아우라
+변형: 아울라야, 아우나야, 오우라야, 아오라야 등
 
 ## 카테고리
 카페, 맛집, 술집, 분식, 치킨, 피자, 빵집, 디저트, 쇼핑, 팝업, 전시, 날씨, 뉴스, 주식, 스포츠, 영화
