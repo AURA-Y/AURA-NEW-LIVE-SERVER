@@ -13,6 +13,8 @@ export class LlmService {
     private readonly logger = new Logger(LlmService.name);
     private bedrockClient: BedrockRuntimeClient;
     private readonly modelId = 'anthropic.claude-3-haiku-20240307-v1:0';
+    private readonly restApiUrl: string;
+    private readonly topicCache = new Map<string, string>();
 
     private lastRequestTime = 0;
     private isProcessing = false;
@@ -25,6 +27,11 @@ export class LlmService {
         private searchService: SearchService,
         private mapService: MapService,
     ) {
+        this.restApiUrl =
+            (this.configService.get<string>('REST_API_URL') ||
+                this.configService.get<string>('BACKEND_API_URL') ||
+                'http://localhost:3002').replace(/\/+$/, '');
+
         this.bedrockClient = new BedrockRuntimeClient({
             region: this.configService.get<string>('AWS_REGION') || 'ap-northeast-2',
             credentials: {
@@ -51,13 +58,23 @@ export class LlmService {
         const isMeetingQuery = meetingKeywords.some(kw => userMessage.toLowerCase().includes(kw));
         
         if (isMeetingQuery && roomId) {
+            const resolvedRoomId = await this.getRoomIdByTopic(roomId);
             try {
-                if (!this.ragClientService.isConnected(roomId)) {
-                    this.logger.warn(`[RAG] 연결되지 않음: ${roomId}`);
+                // RAG 연결이 없으면 시도해서 붙여본다
+                if (!this.ragClientService.isConnected(resolvedRoomId)) {
+                    try {
+                        await this.ragClientService.connect(resolvedRoomId);
+                    } catch (err) {
+                        this.logger.warn(`[RAG] 연결 시도 실패: ${resolvedRoomId} (${(err as Error).message})`);
+                    }
+                }
+
+                if (!this.ragClientService.isConnected(resolvedRoomId)) {
+                    this.logger.warn(`[RAG] 연결되지 않음: ${resolvedRoomId}`);
                     return { text: '회의록 기능을 사용할 수 없습니다.' };
                 }
-                this.logger.log(`[RAG 질문] Room: ${roomId}, 질문: "${userMessage}"`);
-                const ragAnswer = await this.ragClientService.sendQuestion(roomId, userMessage);
+                this.logger.log(`[RAG 질문] Room: ${resolvedRoomId}, 질문: "${userMessage}"`);
+                const ragAnswer = await this.ragClientService.sendQuestion(resolvedRoomId, userMessage);
                 return { text: ragAnswer };
             } catch (error) {
                 this.logger.error(`[RAG 에러] ${error.message}`);
@@ -119,6 +136,42 @@ export class LlmService {
     // ============================================================
     // Core Processing
     // ============================================================
+
+    /**
+     * topic → roomId 조회 (1) 캐시 확인 (2) REST API 호출
+     */
+    private async getRoomIdByTopic(topicOrId: string): Promise<string> {
+        if (!topicOrId) return topicOrId;
+        // 이미 id처럼 보이면 그대로 사용
+        const hasDash = topicOrId.includes('-');
+        if (topicOrId.length >= 30 && hasDash) return topicOrId;
+
+        // 캐시
+        const cached = this.topicCache.get(topicOrId);
+        if (cached) return cached;
+
+        if (!this.restApiUrl) return topicOrId;
+
+        try {
+            const resp = await fetch(
+                `${this.restApiUrl}/restapi/rooms/topic/${encodeURIComponent(topicOrId)}`,
+                { method: 'GET' }
+            );
+            if (!resp.ok) {
+                this.logger.warn(`[RAG] topic→roomId 조회 실패: ${topicOrId} (${resp.status})`);
+                return topicOrId;
+            }
+            const data = await resp.json();
+            if (data?.roomId) {
+                this.logger.log(`[RAG] topic "${topicOrId}" → roomId ${data.roomId}`);
+                this.topicCache.set(topicOrId, data.roomId);
+                return data.roomId;
+            }
+        } catch (err) {
+            this.logger.warn(`[RAG] topic→roomId 조회 에러: ${(err as Error).message}`);
+        }
+        return topicOrId;
+    }
 
     private async processWithTools(
         messages: any[],
