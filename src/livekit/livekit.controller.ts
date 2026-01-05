@@ -6,6 +6,7 @@ import { VoiceBotService } from './voice-bot.service';
 import { SttService } from '../stt/stt.service';
 import { LlmService } from '../llm/llm.service'; //통합 검색
 import { TtsService } from '../tts/tts.service';
+import { RagClientService } from '../rag/rag-client.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 
@@ -17,6 +18,7 @@ export class LivekitController {
     private readonly sttService: SttService,
     private readonly llmService: LlmService, //통합 검색 
     private readonly ttsService: TtsService,
+    private readonly ragClientService: RagClientService,
   ) { }
 
   // AI 음성 봇 시작
@@ -248,6 +250,24 @@ export class LivekitController {
     } catch (error) {
       console.error(`[TTS 에러] ${error.message}`);
       throw new HttpException(`TTS 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // 회의 종료 - room_name 수신 후 RAG 서버로 전달
+  @Post('end-meeting')
+  async endMeeting(@Body() body: { roomName: string }) {
+    console.log(`[End Meeting] Received room name: ${body.roomName}`);
+
+    // RAG 서버에 회의 종료 알림
+    const ragResult = await this.ragClientService.endMeeting(body.roomName);
+
+    if (ragResult.success) {
+      return { status: 'success', roomName: body.roomName, ragResponse: ragResult.message };
+    } else {
+      throw new HttpException(
+        { status: 'fail', message: ragResult.message },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 }

@@ -305,4 +305,25 @@ export class RagClientService implements OnModuleDestroy {
             clients: Array.from(this.connections.keys()),
         };
     }
+
+    /**
+     * 회의 종료 API 호출 (HTTP POST)
+     * POST /meetings/{room_name}/end
+     */
+    async endMeeting(roomName: string): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomName}/end`;
+
+        this.logger.log(`[RAG 회의 종료] POST ${endpoint}`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint);
+            this.logger.log(`[RAG 회의 종료 성공] ${roomName} - 응답: ${JSON.stringify(response.data)}`);
+            return { success: true, message: response.data };
+        } catch (error: any) {
+            this.logger.error(`[RAG 회의 종료 실패] ${roomName}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
 }
