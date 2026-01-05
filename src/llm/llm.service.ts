@@ -44,7 +44,7 @@ export class LlmService {
     ];
 
     // 카테고리별 키워드
-    private readonly CATEGORY_KEYWORDS: Record<string, { keywords: string[]; searchType: 'local' | 'news' }> = {
+    private readonly CATEGORY_KEYWORDS: Record<string, { keywords: string[]; searchType: 'local' | 'news' | 'web' | 'encyc' }> = {
         '카페': {
             keywords: ['카페', '커피', '커피숍', '카페테리아', '스타벅스', '투썸', '이디야', '할리스', '블루보틀', '카공'],
             searchType: 'local',
@@ -108,6 +108,11 @@ export class LlmService {
         '영화': {
             keywords: ['영화', '개봉', '상영', '박스오피스', '영화관', 'CGV', '롯데시네마', '메가박스'],
             searchType: 'news',
+        },
+        // 백과사전 검색 (정의/개념 질문)
+        '백과': {
+            keywords: ['뭐야', '뭐지', '무엇', '무슨', '정의', '의미', '개념', '역사', '원리', '효능', '효과', '부작용', '성분'],
+            searchType: 'encyc',
         },
     };
 
@@ -186,7 +191,7 @@ export class LlmService {
     public async buildSearchPlan(rawQuery: string): Promise<{
         query: string;
         cacheKey: string;
-        searchType: 'local' | 'news' | 'hybrid' | 'none';
+        searchType: 'local' | 'news' | 'web' | 'encyc' | 'hybrid' | 'none';
         category: string | null;
     }> {
         const base = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
@@ -209,12 +214,12 @@ export class LlmService {
             if (matchedCategory) break;
         }
 
-        // 2. 카테고리가 없으면 검색하지 않음
+        // 2. 카테고리가 없으면 일반 웹 검색으로 처리
         if (!matchedCategory) {
             // 의미없는 쿼리인지 체크
             const cleanedQuery = base
                 .replace(/[을를이가은는에서의으로]/g, ' ')
-                .replace(/알려줘|추천해줘|찾아줘|검색해줘/g, '')
+                .replace(/알려줘|추천해줘|찾아줘|검색해줘|에 대해|대해서/g, '')
                 .replace(/\s+/g, ' ')
                 .trim();
 
@@ -230,15 +235,21 @@ export class LlmService {
                 return { query: '', cacheKey: '', searchType: 'none', category: null };
             }
 
-            this.logger.log(`[검색 계획] 카테고리 없음 → 검색 안함 (query="${cleanedQuery}")`);
-            return { query: '', cacheKey: '', searchType: 'none', category: null };
+            // 카테고리 없으면 웹 검색으로 처리
+            this.logger.log(`[검색 계획] 일반검색(web) → query="${cleanedQuery}"`);
+            return { 
+                query: cleanedQuery, 
+                cacheKey: `web|${cleanedQuery}`, 
+                searchType: 'web', 
+                category: '일반' 
+            };
         }
 
         // 3. 위치 추출
         const location = this.extractLocation(base);
 
         // 4. 검색 타입 결정
-        let searchType: 'local' | 'news' | 'hybrid' = baseSearchType!;
+        let searchType: 'local' | 'news' | 'web' | 'encyc' | 'hybrid' = baseSearchType!;
         
         // hybrid 카테고리는 뉴스 + 장소 둘 다 검색
         if (this.HYBRID_CATEGORIES.includes(matchedCategory)) {
@@ -301,7 +312,7 @@ export class LlmService {
 
     private async searchWithNaver(
         query: string,
-        type: 'local' | 'news',
+        type: 'local' | 'news' | 'web' | 'encyc',
         display: number,
         sort: 'sim' | 'date' | 'comment' | 'random'
     ): Promise<SearchResult[]> {
@@ -312,13 +323,23 @@ export class LlmService {
             return [];
         }
 
-        const endpoint = type === 'local'
-            ? 'https://openapi.naver.com/v1/search/local.json'
-            : 'https://openapi.naver.com/v1/search/news.json';
+        // 검색 타입별 엔드포인트
+        const endpoints: Record<string, string> = {
+            local: 'https://openapi.naver.com/v1/search/local.json',
+            news: 'https://openapi.naver.com/v1/search/news.json',
+            web: 'https://openapi.naver.com/v1/search/webkr.json',
+            encyc: 'https://openapi.naver.com/v1/search/encyc.json',
+        };
+        
+        const endpoint = endpoints[type];
         const url = new URL(endpoint);
         url.searchParams.set('query', query);
         url.searchParams.set('display', String(display));
-        url.searchParams.set('sort', sort);
+        
+        // local과 news만 sort 지원
+        if (type === 'local' || type === 'news') {
+            url.searchParams.set('sort', sort);
+        }
 
         const response = await fetch(url.toString(), {
             headers: {
@@ -443,7 +464,7 @@ export class LlmService {
                 if (searchType === 'none') {
                     this.logger.log(`[검색 스킵] 카테고리/키워드 없음`);
                     return { 
-                        text: '네, 무엇을 도와드릴까요? 카페, 맛집, 날씨 등을 물어보시면 검색해드릴게요!',
+                        text: '네, 무엇을 도와드릴까요? 무엇이든 검색해드릴게요!',
                         searchResults: undefined 
                     };
                 }
@@ -533,7 +554,7 @@ export class LlmService {
         }
     }
 
-    private async executeSearch(query: string, searchType: 'local' | 'news' | 'hybrid'): Promise<SearchResult[]> {
+    private async executeSearch(query: string, searchType: 'local' | 'news' | 'web' | 'encyc' | 'hybrid'): Promise<SearchResult[]> {
         const timeoutMs = this.SEARCH_TIMEOUT_MS;
 
         if (searchType === 'hybrid') {
@@ -546,16 +567,17 @@ export class LlmService {
             return this.mergeHybridResults(newsResults, localResults);
         }
 
+        // web, encyc는 sort 없이 검색
         const sort = searchType === 'local' ? 'comment' as const : 'date' as const;
         const results = await Promise.race([
-            this.searchWithNaver(query, searchType, 2, sort),
+            this.searchWithNaver(query, searchType, 3, sort),
             new Promise<never>((_, reject) =>
                 setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
             )
         ]);
 
-        this.logger.log(`[검색 완료] ${results.length}개`);
-        return results.slice(0, 2);
+        this.logger.log(`[검색 완료] ${searchType}: ${results.length}개`);
+        return results.slice(0, 3);
     }
 
     // ============================================================
@@ -632,8 +654,7 @@ ${JSON.stringify(searchResults[0])}`;
             }
 
             case '팝업':
-            case '전시':
-            case '영화': {
+            case '전시': {
                 // 하이브리드 검색 (뉴스 + 장소)
                 return `당신은 화상회의 AI 비서 '빅스'입니다.
 
@@ -650,6 +671,37 @@ ${hasLocation ? '4. 마지막에 "해당 위치까지 경로를 채팅창으로 
 
 ## 검색 결과
 ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
+            }
+
+            case '영화': {
+                // 영화: 최근 영화 정보 + 근처 영화관 능동 안내
+                const movieNews = searchResults.filter(r => !r.address && !r.roadAddress);
+                const movieTheaters = searchResults.filter(r => r.address || r.roadAddress);
+                const hasTheater = movieTheaters.length > 0;
+
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
+
+사용자가 영화 관련 정보를 찾고 있습니다.
+
+## 응답 규칙
+1. 최근 인기/개봉 영화 1-2개 먼저 소개 (뉴스 결과에서 영화 제목만 추출)
+2. 능동적으로 "근처 영화관도 알려드릴게요!" 추가
+3. 영화관 이름 언급
+4. 3문장 이내, 간결하게
+${hasTheater ? '5. 마지막에 "해당 영화관까지 경로를 채팅창으로 공유드릴게요" 추가' : ''}
+
+## 주의사항
+- 뉴스 본문 내용을 그대로 읽지 말고, 영화 제목만 추출해서 언급
+- "정체가 발각된 후..." 같은 줄거리/리뷰 내용 절대 금지
+
+## 응답 예시
+"요즘 '미키17', '캡틴 아메리카'가 인기예요! 근처 CGV 용산아이파크몰에서 볼 수 있어요. 해당 영화관까지 경로를 채팅창으로 공유드릴게요."
+
+## 검색 결과 - 영화 뉴스 (제목에서 영화명만 추출)
+${JSON.stringify(movieNews.slice(0, 2), null, 2)}
+
+## 검색 결과 - 근처 영화관
+${JSON.stringify(movieTheaters.slice(0, 1), null, 2)}`;
             }
 
             case '뉴스':
@@ -671,6 +723,44 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
 ## 검색 결과
 ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
+            }
+
+            case '백과': {
+                // 백과사전 검색 (정의/개념)
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
+
+사용자가 특정 개념/정의에 대해 물어봤습니다.
+
+## 응답 규칙
+1. 검색 결과를 쉽게 요약해서 설명
+2. 2-3문장 이내로 핵심만
+3. 전문 용어는 쉽게 풀어서 설명
+4. "추천해요", "경로" 등 장소 관련 표현 금지
+
+## 응답 예시
+"[용어]는 [정의]예요. [추가 설명]이라고 해요."
+
+## 검색 결과
+${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
+            }
+
+            case '일반': {
+                // 일반 웹 검색
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
+
+사용자가 일반적인 정보를 물어봤습니다.
+
+## 응답 규칙
+1. 검색 결과를 요약해서 전달
+2. 2-3문장 이내로 핵심만
+3. "추천해요", "경로" 등 장소 관련 표현 금지
+4. 정보 전달 형식으로 자연스럽게
+
+## 응답 예시
+"[주제]에 대해 알려드릴게요. [요약 내용]이에요."
+
+## 검색 결과
+${JSON.stringify(searchResults.slice(0, 3), null, 2)}`;
             }
 
             default: {
