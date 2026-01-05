@@ -537,10 +537,28 @@ export class SttService {
             phraseList.addPhrase(hint);
         }
 
+        const STT_TIMEOUT_MS = 10000;  // 10초 타임아웃
+
         return new Promise((resolve, reject) => {
+            let resolved = false;
+            
+            // 타임아웃 설정
+            const timeoutId = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    this.logger.warn(`[Azure STT] 타임아웃 (${STT_TIMEOUT_MS}ms)`);
+                    recognizer.close();
+                    resolve('');
+                }
+            }, STT_TIMEOUT_MS);
+
             recognizer.recognizeOnceAsync(
                 (result) => {
+                    if (resolved) return;
+                    resolved = true;
+                    clearTimeout(timeoutId);
                     recognizer.close();
+                    
                     if (result.reason === speechsdk.ResultReason.RecognizedSpeech) {
                         resolve(result.text || '');
                         return;
@@ -565,6 +583,9 @@ export class SttService {
                     resolve('');
                 },
                 (error) => {
+                    if (resolved) return;
+                    resolved = true;
+                    clearTimeout(timeoutId);
                     recognizer.close();
                     reject(error);
                 }

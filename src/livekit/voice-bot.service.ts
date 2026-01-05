@@ -688,8 +688,13 @@ ${recentTexts}
             const transcript = await this.sttService.transcribeFromBufferStream(audioBuffer, 'live-audio.pcm');
             this.logger.log(`[1.STT] ${Date.now() - sttStart}ms - "${transcript}"`);
 
-            if (context.currentRequestId !== requestId) return;
-            if (!transcript.trim()) return;
+            if (context.currentRequestId !== requestId) {
+                return;  // finally에서 락 해제됨
+            }
+            if (!transcript.trim()) {
+                this.logger.log(`[스킵] 빈 STT 결과`);
+                return;  // finally에서 락 해제됨
+            }
 
             // ★ 회의 맥락에 추가 (모든 발화 저장)
             const intentForContext = this.intentClassifier.classify(transcript);
@@ -708,7 +713,7 @@ ${recentTexts}
             );
             if (transcript.trim().length <= 2 && !intentAnalysis.isCallIntent && !hasStopWord) {
                 this.logger.log(`[스킵] 짧은 추임새`);
-                return;
+                return;  // finally에서 락 해제됨
             }
 
             // ================================================
