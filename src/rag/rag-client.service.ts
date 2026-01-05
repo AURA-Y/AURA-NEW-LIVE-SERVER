@@ -305,4 +305,57 @@ export class RagClientService implements OnModuleDestroy {
             clients: Array.from(this.connections.keys()),
         };
     }
+
+    /**
+     * 회의 시작 요청 (HTTP POST)
+     * 프론트엔드에서 받은 embed-files 데이터를 RAG 서버로 전달
+     * @endpoint POST /meetings/{room_name}/start
+     */
+    async startMeeting(
+        roomName: string,
+        description: string,
+        files: { bucket: string; key: string }[]
+    ): Promise<{ success: boolean; message: string }> {
+        const baseUrl = this.configService.get<string>('RAG_WEBSOCKET_URL') || 'ws://localhost:8000';
+        // WebSocket URL에서 HTTP URL로 변환 (ws:// → http://, wss:// → https://)
+        const httpBaseUrl = baseUrl.replace(/^ws/, 'http');
+        const url = `${httpBaseUrl}/meetings/${encodeURIComponent(roomName)}/start`;
+
+        this.logger.log(`\n========== [RAG 회의 시작 요청] ==========`);
+        this.logger.log(`Room Name: ${roomName}`);
+        this.logger.log(`Description: ${description}`);
+        this.logger.log(`Files: ${files.length}개`);
+        this.logger.log(`URL: ${url}`);
+
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    description,
+                    files,
+                }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                this.logger.error(`[RAG 회의 시작 실패] HTTP ${response.status}: ${errorText}`);
+                throw new Error(`RAG server responded with ${response.status}: ${errorText}`);
+            }
+
+            const result = await response.json();
+            this.logger.log(`[RAG 회의 시작 성공] ${roomName}`);
+            this.logger.log(`========================================\n`);
+
+            return {
+                success: true,
+                message: result.message || '회의가 성공적으로 시작되었습니다.',
+            };
+        } catch (error) {
+            this.logger.error(`[RAG 회의 시작 에러] ${roomName}: ${error.message}`);
+            throw error;
+        }
+    }
 }
