@@ -4,6 +4,7 @@ export interface IntentAnalysis {
     isCallIntent: boolean;
     isQuestionIntent: boolean;
     isBotRelated: boolean;
+    isVisionIntent: boolean;  // 화면 공유 Vision 관련 의도
     confidence: number;
     matchedPatterns: string[];
     normalizedText: string;
@@ -189,6 +190,55 @@ export class IntentClassifierService {
     private readonly REQUEST_PATTERNS = [
         /해\s?줄래(요)?$/, /해\s?줘(요)?$/, /해\s?주세요$/,
         /줄래(요)?$/, /될까요?$/, /되나요?$/,
+    ];
+
+    // =====================================================
+    // Vision Intent 패턴 (화면 공유 분석)
+    // =====================================================
+
+    private readonly VISION_KEYWORDS: string[] = [
+        // 동작 키워드
+        '봐', '보고', '보면서', '봐줘', '봐봐', '보여',
+        '설명', '해명', '분석', '해석', '읽어', '알려',
+        '뭐야', '뭔지', '뭘지', '뭐냐', '어때', '어떻게',
+        // 대상 키워드
+        '화면', '스크린', '공유', '이거', '이게', '저거', '저게', '여기',
+        '코드', '에러', '오류', '버그', '문제', '이슈',
+    ];
+
+    private readonly VISION_PATTERNS: RegExp[] = [
+        // "화면" + 동사 (유연하게)
+        /화면.{0,10}(봐|보고|보면|설명|해명|분석|해석|읽|알려|뭐)/,
+        /화면\s*을?\s*(봐|보고|보면서|설명|해명|분석)/,
+
+        // "이거/이게/저거" + 동사 패턴
+        /이거\s*.{0,5}(봐|보|설명|해명|분석|뭐야|뭐냐|뭘지|어때|봐줘|알려)/,
+        /이게\s*(뭐야|뭘지|뭐냐|뭔지|어때)/,
+        /저거\s*.{0,5}(뭐|어떻|설명|보|분석)/,
+        /저게\s*(뭐야|뭘지|뭔지)/,
+
+        // "여기" 패턴
+        /여기\s*.{0,5}(보|봐|설명|뭐|분석)/,
+        /여기서.*?(어떻|뭐|설명|분석)/,
+
+        // "지금 보이는/보는" 패턴
+        /지금\s*(보이|보는|보여).{0,10}(설명|분석|뭐|알려)/,
+        /(보이|보여)\s*주.{0,5}(는|고\s*있).{0,10}(설명|분석|뭐)/,
+
+        // 설명/분석 요청
+        /(설명|분석|해석|해명).{0,5}해\s*(줘|줄래|주세요|봐)/,
+
+        // 코드/에러 관련
+        /이?\s*(코드|함수|변수|클래스|메서드).{0,5}(는|이|가)?\s*(뭐|어떻|설명|분석)/,
+        /이?\s*(에러|오류|버그|문제|이슈).{0,10}(봐|분석|설명|해결|뭐)/,
+        /이?\s*(그래프|차트|표|데이터).{0,5}(는|을)?\s*(뭐|어떻|해석|분석|설명)/,
+        /이?\s*(문서|문단|부분|내용).{0,5}(는|을)?\s*(뭐|어떻|요약|설명)/,
+
+        // "~보고 ~해줘" 패턴
+        /.{0,5}보고.{0,10}(설명|해명|분석|알려|말해).{0,3}(줘|줄래|주세요)?/,
+
+        // 스크린/공유 관련
+        /(스크린|공유).{0,10}(봐|보고|설명|분석)/,
     ];
 
     // =====================================================
@@ -486,6 +536,15 @@ export class IntentClassifierService {
         // 12. 날씨 체크 (카테고리로 대체)
         const isWeatherIntent = category === '날씨';
 
+        // 13. Vision Intent 체크 (화면 공유 분석)
+        const isVisionIntent = this.VISION_PATTERNS.some(pattern => {
+            if (pattern.test(lowerNormalized)) {
+                matchedPatterns.push(`Vision: ${pattern.source.substring(0, 20)}...`);
+                return true;
+            }
+            return false;
+        });
+
         // 질문 의도 판단
         const isQuestionIntent = hasQuestionWord || hasCommandWord || hasQuestionPattern || hasRequestPattern;
 
@@ -507,6 +566,7 @@ export class IntentClassifierService {
             isCallIntent,
             isQuestionIntent,
             isBotRelated,
+            isVisionIntent,
             confidence,
             matchedPatterns,
             normalizedText,
@@ -522,7 +582,7 @@ export class IntentClassifierService {
             needsLlmCorrection,
         };
 
-        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
+        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
 
         return result;
     }
