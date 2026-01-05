@@ -43,6 +43,15 @@ export class LlmService {
         '.', '..', '...', '?', '!', ',',
     ];
 
+    // 인사말 (검색하지 않음)
+    private readonly GREETING_KEYWORDS = [
+        '안녕', '안녕하세요', '안녕하십니까', '반가워', '반갑습니다',
+        '하이', '헬로', '굿모닝', '굿나잇',
+        '좋은 아침', '좋은 저녁', '좋은 하루',
+        '수고', '수고해', '수고하세요', '고마워', '고맙습니다', '감사합니다',
+        '잘자', '잘가', '바이', '바이바이', '또봐', '다음에',
+    ];
+
     // 카테고리별 키워드
     private readonly CATEGORY_KEYWORDS: Record<string, { keywords: string[]; searchType: 'local' | 'news' | 'web' | 'encyc' }> = {
         '카페': {
@@ -200,7 +209,7 @@ export class LlmService {
         // 1. CATEGORY_KEYWORDS에서 매칭되는 카테고리 찾기
         let matchedCategory: string | null = null;
         let matchedKeyword: string | null = null;
-        let baseSearchType: 'local' | 'news' | null = null;
+        let baseSearchType: 'local' | 'news' | 'web' | 'encyc' | null = null;
 
         for (const [category, config] of Object.entries(this.CATEGORY_KEYWORDS)) {
             for (const keyword of config.keywords) {
@@ -225,6 +234,12 @@ export class LlmService {
 
             if (this.isMeaninglessQuery(cleanedQuery)) {
                 this.logger.log(`[검색 계획] 의미없는 쿼리 → 검색 안함`);
+                return { query: '', cacheKey: '', searchType: 'none', category: null };
+            }
+
+            // 인사말 체크
+            if (this.isGreeting(cleanedQuery)) {
+                this.logger.log(`[검색 계획] 인사말 → 검색 안함`);
                 return { query: '', cacheKey: '', searchType: 'none', category: null };
             }
 
@@ -304,6 +319,31 @@ export class LlmService {
         });
         
         return meaningfulWords.length === 0;
+    }
+
+    /**
+     * 인사말인지 체크
+     */
+    private isGreeting(query: string): boolean {
+        const trimmed = query.trim().toLowerCase();
+        
+        // 정확히 인사말만 있는 경우
+        for (const greeting of this.GREETING_KEYWORDS) {
+            if (trimmed === greeting || trimmed === greeting + '요' || trimmed === greeting + '용') {
+                return true;
+            }
+        }
+        
+        // 인사말로 시작하고 짧은 경우 (5글자 이하)
+        if (trimmed.length <= 5) {
+            for (const greeting of this.GREETING_KEYWORDS) {
+                if (trimmed.startsWith(greeting)) {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
     }
 
     // ============================================================
@@ -464,7 +504,7 @@ export class LlmService {
                 if (searchType === 'none') {
                     this.logger.log(`[검색 스킵] 카테고리/키워드 없음`);
                     return { 
-                        text: '네, 무엇을 도와드릴까요? 무엇이든 검색해드릴게요!',
+                        text: '네, 무엇을 도와드릴까요? 카페, 맛집, 날씨 등을 물어보시면 검색해드릴게요!',
                         searchResults: undefined 
                     };
                 }
@@ -605,7 +645,7 @@ export class LlmService {
                 const timeWord = userMessage.includes('내일') ? '내일' :
                     userMessage.includes('모레') ? '모레' :
                     userMessage.includes('이번주') ? '이번주' : '오늘';
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '루미'입니다.
 
 사용자가 "${location}" "${timeWord}" 날씨를 물어봤습니다.
 
@@ -635,7 +675,7 @@ ${searchResults.map(r => r.content || r.title).join('\n').slice(0, 500)}`;
                 if (!hasLocation || searchResults.length === 0) {
                     return this.buildNoResultPrompt(matchedCategory, location);
                 }
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '루미'입니다.
 
 사용자가 "${location}" 근처 ${matchedCategory}을 찾고 있습니다.
 
@@ -656,7 +696,7 @@ ${JSON.stringify(searchResults[0])}`;
             case '팝업':
             case '전시': {
                 // 하이브리드 검색 (뉴스 + 장소)
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '루미'입니다.
 
 사용자가 "${location}" 근처 ${matchedCategory} 정보를 찾고 있습니다.
 
@@ -679,7 +719,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
                 const movieTheaters = searchResults.filter(r => r.address || r.roadAddress);
                 const hasTheater = movieTheaters.length > 0;
 
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '루미'입니다.
 
 사용자가 영화 관련 정보를 찾고 있습니다.
 
@@ -708,7 +748,7 @@ ${JSON.stringify(movieTheaters.slice(0, 1), null, 2)}`;
             case '주식':
             case '스포츠': {
                 // 뉴스/정보 검색
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '루미'입니다.
 
 사용자가 ${matchedCategory} 정보를 물어봤습니다.
 
@@ -727,7 +767,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
             case '백과': {
                 // 백과사전 검색 (정의/개념)
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '루미'입니다.
 
 사용자가 특정 개념/정의에 대해 물어봤습니다.
 
@@ -746,7 +786,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
             case '일반': {
                 // 일반 웹 검색
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '루미'입니다.
 
 사용자가 일반적인 정보를 물어봤습니다.
 
@@ -766,7 +806,7 @@ ${JSON.stringify(searchResults.slice(0, 3), null, 2)}`;
             default: {
                 // 카테고리 없음 또는 검색 결과 없음
                 if (searchResults.length === 0) {
-                    return `당신은 화상회의 AI 비서 '빅스'입니다.
+                    return `당신은 화상회의 AI 비서 '루미'입니다.
 
 ## 응답 규칙
 - 사용자가 무엇을 원하는지 친절하게 물어보기
@@ -779,7 +819,7 @@ ${JSON.stringify(searchResults.slice(0, 3), null, 2)}`;
 
                 // 검색 결과는 있지만 카테고리 불명
                 if (hasLocation) {
-                    return `당신은 화상회의 AI 비서 '빅스'입니다.
+                    return `당신은 화상회의 AI 비서 '루미'입니다.
 
 ## 응답 규칙
 1. 검색 결과 중 **1개만** 추천
@@ -791,7 +831,7 @@ ${JSON.stringify(searchResults.slice(0, 3), null, 2)}`;
 ${JSON.stringify(searchResults[0])}`;
                 }
 
-                return `당신은 화상회의 AI 비서 '빅스'입니다.
+                return `당신은 화상회의 AI 비서 '루미'입니다.
 
 ## 응답 규칙
 - 검색 결과를 간단히 요약
@@ -808,7 +848,7 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
      * 검색 결과 없을 때 프롬프트
      */
     private buildNoResultPrompt(category: string, location: string): string {
-        return `당신은 화상회의 AI 비서 '빅스'입니다.
+        return `당신은 화상회의 AI 비서 '루미'입니다.
 
 사용자가 "${location}" 근처 ${category}을 찾았지만 검색 결과가 없습니다.
 
@@ -1151,14 +1191,14 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
             normalizedText: string;
             category?: string | null;
             extractedKeyword?: string | null;
-            searchType?: 'local' | 'news' | null;
+            searchType?: 'local' | 'news' | 'web' | 'encyc' | 'hybrid' | 'none' | null;
             needsLlmCorrection: boolean;
         },
     ): Promise<{
         shouldRespond: boolean;
         correctedText: string;
         searchKeyword: string | null;
-        searchType: 'local' | 'news' | null;
+        searchType: 'local' | 'news' | 'web' | 'encyc' | 'hybrid' | 'none' | null;
         category: string | null;
     }> {
         if (intentAnalysis.isCallIntent && intentAnalysis.confidence >= 0.6) {
@@ -1188,7 +1228,7 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
                 shouldRespond: true,
                 correctedText: intentAnalysis.normalizedText,
                 searchKeyword: intentAnalysis.extractedKeyword,
-                searchType: intentAnalysis.searchType || 'news',
+                searchType: intentAnalysis.searchType || 'web',
                 category: intentAnalysis.category || null,
             };
         }
@@ -1210,14 +1250,14 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
         shouldRespond: boolean;
         correctedText: string;
         searchKeyword: string | null;
-        searchType: 'local' | 'news' | null;
+        searchType: 'local' | 'news' | 'web' | 'encyc' | 'hybrid' | 'none' | null;
         category: string | null;
     }> {
         const prompt = `화상회의 음성인식 결과를 분석하세요.
 
 ## 웨이크워드
-표준: 빅스야, 빅스비, 헤이빅스
-변형: 믹스야, 익수야, 빅세야, 빅쓰, 픽스야, 비수야, 긱스야, 익쇠야, 해빅스, 에이빅스 등
+표준: 루미야, 루미, 헤이루미
+변형: 누미야, 로미야, 루비야, 르미야, 유미야, 해이루미, 에이루미 등
 
 ## 카테고리
 카페, 맛집, 술집, 분식, 치킨, 피자, 빵집, 디저트, 쇼핑, 팝업, 전시, 날씨, 뉴스, 주식, 스포츠, 영화
@@ -1261,7 +1301,7 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
                 shouldRespond: result.hasWakeWord ?? false,
                 correctedText: result.correctedText ?? rawTranscript,
                 searchKeyword: result.searchKeyword ?? null,
-                searchType: result.searchType === 'local' ? 'local' : (result.searchType === 'news' ? 'news' : null),
+                searchType: ['local', 'news', 'web', 'encyc', 'hybrid', 'none'].includes(result.searchType) ? result.searchType : null,
                 category: result.category ?? null,
             };
         } catch (error) {

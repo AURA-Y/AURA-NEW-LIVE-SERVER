@@ -13,7 +13,7 @@ export interface IntentAnalysis {
     hasRequestPattern: boolean;
     isWeatherIntent: boolean;
     searchDomain?: 'weather' | 'naver' | null;
-    searchType?: 'local' | 'news' | null;
+    searchType?: 'local' | 'news' | 'web' | 'encyc' | 'hybrid' | 'none';
     category?: string | null;
     extractedKeyword?: string | null;
     needsLlmCorrection: boolean;
