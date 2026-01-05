@@ -139,14 +139,33 @@ export class LlmService {
                 
                 if (searchType === 'none') {
                     this.logger.log(`[검색 스킵] 카테고리/키워드 없음`);
+                    // 자연스러운 응답
+                    const responses = [
+                        '네? 뭐 찾아볼까요?',
+                        '어 뭐 궁금한 거 있어요?',
+                        '네~ 뭐 도와드릴까요?',
+                    ];
                     return { 
-                        text: '네, 무엇을 도와드릴까요? 무엇이든 검색해드릴게요!',
+                        text: responses[Math.floor(Math.random() * responses.length)],
                         searchResults: undefined 
                     };
                 }
 
                 this.logger.log(`[검색] type=${searchType}, query="${query}"`);
                 searchResults = await this.searchService.search(query, searchType);
+                
+                // 검색했는데 결과가 없으면
+                if (!searchResults || searchResults.length === 0) {
+                    this.logger.log(`[검색 결과 없음]`);
+                    const noResultResponses = [
+                        '음 검색해봤는데 잘 안 나오네요, 다른 걸로 찾아볼까요?',
+                        '아 그건 검색이 잘 안 돼요, 다르게 말해줄 수 있어요?',
+                    ];
+                    return {
+                        text: noResultResponses[Math.floor(Math.random() * noResultResponses.length)],
+                        searchResults: undefined
+                    };
+                }
             }
         }
 

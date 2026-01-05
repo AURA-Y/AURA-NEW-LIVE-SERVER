@@ -177,6 +177,9 @@ export class VoiceBotService {
 
             this.logger.log(`[봇 입장 성공] 참여자: ${room.remoteParticipants.size}명`);
 
+            // 입장 인사 (캘리브레이션 동안 TTS로 시간 벌기)
+            await this.greetOnJoin(roomName);
+
             // 기존 참여자의 오디오 트랙 처리
             for (const participant of room.remoteParticipants.values()) {
                 if (!participant.identity.startsWith('ai-bot')) {
@@ -190,6 +193,39 @@ export class VoiceBotService {
         } catch (error) {
             this.logger.error(`[봇 입장 실패] ${error.message}`);
             throw error;
+        }
+    }
+
+    /**
+     * 방 입장 시 인사 (캘리브레이션 시간 확보)
+     */
+    private async greetOnJoin(roomName: string): Promise<void> {
+        const context = this.activeRooms.get(roomName);
+        if (!context) return;
+
+        // 인사 멘트 (캘리브레이션 3초 동안 TTS)
+        const greetings = [
+            '안녕하세요! 아우라예요. 회의 시작하면 불러주세요~',
+            '안녕하세요~ 아우라 들어왔어요! 필요하면 불러주세요.',
+            '안녕하세요! 아우라예요, 뭐든 물어봐 주세요~',
+        ];
+        const greeting = greetings[Math.floor(Math.random() * greetings.length)];
+
+        try {
+            this.logger.log(`[입장 인사] "${greeting}"`);
+            context.botState = BotState.SPEAKING;
+            
+            const pcmBuffer = await this.ttsService.synthesizeToBuffer(greeting);
+            if (pcmBuffer && pcmBuffer.length > 0) {
+                await this.publishAudioBuffer(context, pcmBuffer);
+            }
+            
+            context.botState = BotState.SLEEP;
+            context.lastResponseTime = Date.now();
+            this.logger.log(`[입장 인사 완료]`);
+        } catch (error) {
+            this.logger.warn(`[입장 인사 실패] ${error.message}`);
+            context.botState = BotState.SLEEP;
         }
     }
 
@@ -449,30 +485,52 @@ export class VoiceBotService {
             ? meetingCtx.discussedTopics.join(', ')
             : '없음';
 
-        return `당신은 화상회의 AI 비서 '아우라'입니다.
-회의 참여자들이 20초 이상 침묵하고 있습니다. 자연스럽게 대화를 이어가도록 도와주세요.
+        return `당신은 회의에 참여 중인 동료 '아우라'예요. 로봇이 아니라 진짜 사람처럼 말해요.
 
-## 회의 정보
+## 상황
+회의 중 20초 정도 조용해졌어요. 어색하지 않게 대화에 자연스럽게 끼어들어주세요.
+
+## 회의 맥락
 - 주제: ${topic}
-- 지금까지 논의된 키워드: ${discussedTopics}
+- 얘기 나온 것들: ${discussedTopics}
 
-## 최근 대화 내용
+## 최근 대화
 ${recentTexts}
 
-## 응답 규칙
-1. "혹시 제가 도움드릴 부분이 있을까요?" 또는 논의 내용 기반 제안
-2. 대화 흐름에 맞는 자연스러운 질문이나 의견
-3. 2-3문장 이내로 간결하게
-4. 너무 튀지 않게, 부드럽게 개입
-5. 강요하지 않고 선택지를 제시
+## 말투 규칙 (매우 중요!)
+1. **친한 동료처럼** - "~할까요?" ❌ → "~해볼까요?", "~하면 어때요?" ✅
+2. **추임새 자연스럽게** - "아", "음", "아 맞다", "근데", "어" 등 사용
+3. **짧고 캐주얼하게** - 1~2문장, 길어도 3문장
+4. **강요 ❌** - 제안만 살짝, 거절해도 괜찮은 느낌으로
+5. **이모티콘 사용 ❌** - 음성이라 이모티콘 없이
 
-## 응답 유형 (상황에 맞게 선택)
-- 요약형: "지금까지 [주제]에 대해 논의하셨는데, 다음으로 넘어갈까요?"
-- 질문형: "혹시 [관련 주제]에 대해서도 이야기해볼까요?"
-- 제안형: "제가 [관련 정보]를 찾아드릴까요?"
-- 확인형: "정리가 필요하시면 말씀해주세요!"
+## 상황별 예시 (이런 느낌으로!)
 
-## 응답 (1개만, 자연스럽게)`;
+### 대화가 끊겼을 때
+- "음... 혹시 다른 얘기로 넘어갈까요?"
+- "아 잠깐, 아까 그 얘기 더 하실 거 있으세요?"
+- "어 근데 저 하나 궁금한 게 있는데요"
+
+### 뭔가 정리가 필요해 보일 때  
+- "아 제가 정리 좀 해볼게요, 맞는지 봐주세요"
+- "잠깐만요, 제가 이해한 게 맞나 모르겠는데..."
+
+### 도움을 제안할 때
+- "아 그거 제가 잠깐 찾아볼까요?"
+- "어 그거 제가 알아볼 수 있을 것 같은데요"
+
+### 다음 주제로 넘어갈 때
+- "그럼 다음 거 얘기해볼까요?"
+- "아 그러면 이제 [주제] 얘기 해봐요"
+
+## 절대 하지 말 것
+- "도움이 필요하시면 말씀해주세요" (너무 로봇 같음)
+- "무엇을 도와드릴까요?" (콜센터 같음)  
+- "정리해드릴까요?" (비서 같음)
+- 너무 길게 말하기
+- 갑자기 뜬금없는 주제 꺼내기
+
+## 응답 (짧게, 자연스럽게, 1개만)`;
     }
 
     // =====================================================
@@ -839,8 +897,25 @@ ${recentTexts}
                 // ============================================
                 // 9. LLM 호출 (생각중 응답 포함)
                 // ============================================
-                const thinkingPhrases = ["잠깐만요, 찾아볼게요.", "음, 확인해볼게요.", "잠시만요."];
-                const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
+                // 상황별 자연스러운 대기 멘트
+                const getThinkingPhrase = (category: string | null): string => {
+                    if (category === '날씨') {
+                        return ['어 잠깐만요~', '날씨 볼게요~'][Math.floor(Math.random() * 2)];
+                    }
+                    if (['카페', '맛집', '술집', '분식', '치킨', '피자', '빵집', '디저트', '쇼핑'].includes(category || '')) {
+                        return ['어디 좋을까... 잠깐만요', '음 찾아볼게요~', '어 잠깐요~'][Math.floor(Math.random() * 3)];
+                    }
+                    if (['뉴스', '주식', '스포츠'].includes(category || '')) {
+                        return ['어 잠깐 볼게요~', '음...'][Math.floor(Math.random() * 2)];
+                    }
+                    if (category === '백과') {
+                        return ['음 그거...', '어 잠깐만요~'][Math.floor(Math.random() * 2)];
+                    }
+                    // 기본
+                    return ['음...', '어 잠깐요~', '잠깐만요~'][Math.floor(Math.random() * 3)];
+                };
+                
+                const thinkingPhrase = getThinkingPhrase(finalCategory);
                 let thinkingSpoken = false;
                 let llmResolved = false;
 
@@ -869,7 +944,13 @@ ${recentTexts}
 
                 if (context.currentRequestId !== requestId) return;
 
-                const finalResponse = thinkingSpoken ? `네, ${llmResult.text.trim()}` : llmResult.text;
+                // thinking 발화 후 연결어 자연스럽게
+                let finalResponse = llmResult.text;
+                if (thinkingSpoken) {
+                    const connectors = ['', '아 ', '어 '];  // 빈 문자열 = 그냥 바로 말함
+                    const connector = connectors[Math.floor(Math.random() * connectors.length)];
+                    finalResponse = `${connector}${llmResult.text.trim()}`;
+                }
 
                 // ============================================
                 // 10. DataChannel 전송 (검색 결과)
