@@ -24,12 +24,16 @@ export class TtsService {
                 'raw-16khz-16bit-mono-pcm'
             );
             this.logger.log(`[TTS PCM 완료] 오디오 크기: ${audioBuffer.length} bytes`);
-
             return audioBuffer;
         } catch (error) {
             this.logger.error(`[TTS PCM 에러] ${error.message}`);
             throw error;
         }
+    }
+
+    // Buffer 반환용 (voice-bot에서 사용)
+    async synthesizeToBuffer(text: string): Promise<Buffer> {
+        return this.synthesizePcm(text);
     }
 
     // 기존 MP3 출력 (HTTP 응답용)
@@ -42,7 +46,6 @@ export class TtsService {
                 'audio-24khz-48kbitrate-mono-mp3'
             );
             this.logger.log(`[TTS 완료] 오디오 크기: ${audioBuffer.length} bytes`);
-
             return audioBuffer;
         } catch (error) {
             this.logger.error(`[TTS 에러] ${error.message}`);
@@ -56,6 +59,7 @@ export class TtsService {
         }
 
         const url = `https://${this.azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
+
         const headers = {
             'Ocp-Apim-Subscription-Key': this.azureKey,
             'Content-Type': 'application/ssml+xml',
@@ -65,6 +69,7 @@ export class TtsService {
 
         const style = this.pickStyle();
         const primary = style ? this.buildSsmlWithStyle(text, style) : this.buildSsml(text);
+
         const primaryResponse = await fetch(url, {
             method: 'POST',
             headers,
@@ -83,6 +88,7 @@ export class TtsService {
         if (style) {
             this.styleMode = 'none';
         }
+
         const fallbackResponse = await fetch(url, {
             method: 'POST',
             headers,

@@ -215,9 +215,9 @@ export class VoiceBotService {
             this.logger.log(`[입장 인사] "${greeting}"`);
             context.botState = BotState.SPEAKING;
             
-            const pcmBuffer = await this.ttsService.synthesizeToBuffer(greeting);
+            const pcmBuffer = await this.ttsService.synthesizePcm(greeting);
             if (pcmBuffer && pcmBuffer.length > 0) {
-                await this.publishAudioBuffer(context, pcmBuffer);
+                await this.publishAudio(roomName, context.audioSource, pcmBuffer);
             }
             
             context.botState = BotState.SLEEP;
