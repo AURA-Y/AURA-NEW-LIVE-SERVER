@@ -59,6 +59,7 @@ export class LlmService {
         
         if (isMeetingQuery && roomId) {
             const resolvedRoomId = await this.getRoomIdByTopic(roomId);
+    
             try {
                 // RAG 연결이 없으면 시도해서 붙여본다
                 if (!this.ragClientService.isConnected(resolvedRoomId)) {
