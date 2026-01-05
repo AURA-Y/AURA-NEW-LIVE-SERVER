@@ -120,7 +120,7 @@ export class LlmService {
         },
         // 백과사전 검색 (정의/개념 질문)
         '백과': {
-            keywords: ['뭐야', '뭐지', '무엇', '무슨', '정의', '의미', '개념', '역사', '원리', '효능', '효과', '부작용', '성분'],
+            keywords: ['무엇인가', '정의', '의미', '개념', '역사', '원리', '효능', '효과', '부작용', '성분', '알려줘', '설명해'],
             searchType: 'encyc',
         },
     };
@@ -158,8 +158,14 @@ export class LlmService {
         searchDomain?: 'weather' | 'naver' | null,
         roomId?: string
     ): Promise<{ text: string; searchResults?: SearchResult[] }> {
-        // 회의 관련 질문이고 roomId가 있으면 RAG 서버에 질문
-        if (userMessage.includes('회의') && roomId) {
+        // 회의록 관련 질문이고 roomId가 있으면 RAG 서버에 질문
+        const meetingKeywords = [
+            '회의', '미팅', '액션', '액션아이템', '할 일', '할일', 'todo', 'action',
+            '결정', '논의', '안건', '발언', '누가', '언제', '요약', '정리',
+        ];
+        const isMeetingQuery = meetingKeywords.some(kw => userMessage.toLowerCase().includes(kw));
+        
+        if (isMeetingQuery && roomId) {
             try {
                 if (!this.ragClientService.isConnected(roomId)) {
                     this.logger.warn(`[RAG] 연결되지 않음: ${roomId}`);
@@ -645,7 +651,7 @@ export class LlmService {
                 const timeWord = userMessage.includes('내일') ? '내일' :
                     userMessage.includes('모레') ? '모레' :
                     userMessage.includes('이번주') ? '이번주' : '오늘';
-                return `당신은 화상회의 AI 비서 '루미'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 "${location}" "${timeWord}" 날씨를 물어봤습니다.
 
@@ -675,7 +681,7 @@ ${searchResults.map(r => r.content || r.title).join('\n').slice(0, 500)}`;
                 if (!hasLocation || searchResults.length === 0) {
                     return this.buildNoResultPrompt(matchedCategory, location);
                 }
-                return `당신은 화상회의 AI 비서 '루미'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 "${location}" 근처 ${matchedCategory}을 찾고 있습니다.
 
@@ -696,7 +702,7 @@ ${JSON.stringify(searchResults[0])}`;
             case '팝업':
             case '전시': {
                 // 하이브리드 검색 (뉴스 + 장소)
-                return `당신은 화상회의 AI 비서 '루미'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 "${location}" 근처 ${matchedCategory} 정보를 찾고 있습니다.
 
@@ -719,7 +725,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
                 const movieTheaters = searchResults.filter(r => r.address || r.roadAddress);
                 const hasTheater = movieTheaters.length > 0;
 
-                return `당신은 화상회의 AI 비서 '루미'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 영화 관련 정보를 찾고 있습니다.
 
@@ -748,7 +754,7 @@ ${JSON.stringify(movieTheaters.slice(0, 1), null, 2)}`;
             case '주식':
             case '스포츠': {
                 // 뉴스/정보 검색
-                return `당신은 화상회의 AI 비서 '루미'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 ${matchedCategory} 정보를 물어봤습니다.
 
@@ -767,7 +773,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
             case '백과': {
                 // 백과사전 검색 (정의/개념)
-                return `당신은 화상회의 AI 비서 '루미'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 특정 개념/정의에 대해 물어봤습니다.
 
@@ -786,7 +792,7 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
             case '일반': {
                 // 일반 웹 검색
-                return `당신은 화상회의 AI 비서 '루미'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 일반적인 정보를 물어봤습니다.
 
@@ -806,7 +812,7 @@ ${JSON.stringify(searchResults.slice(0, 3), null, 2)}`;
             default: {
                 // 카테고리 없음 또는 검색 결과 없음
                 if (searchResults.length === 0) {
-                    return `당신은 화상회의 AI 비서 '루미'입니다.
+                    return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 ## 응답 규칙
 - 사용자가 무엇을 원하는지 친절하게 물어보기
@@ -819,7 +825,7 @@ ${JSON.stringify(searchResults.slice(0, 3), null, 2)}`;
 
                 // 검색 결과는 있지만 카테고리 불명
                 if (hasLocation) {
-                    return `당신은 화상회의 AI 비서 '루미'입니다.
+                    return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 ## 응답 규칙
 1. 검색 결과 중 **1개만** 추천
@@ -831,7 +837,7 @@ ${JSON.stringify(searchResults.slice(0, 3), null, 2)}`;
 ${JSON.stringify(searchResults[0])}`;
                 }
 
-                return `당신은 화상회의 AI 비서 '루미'입니다.
+                return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 ## 응답 규칙
 - 검색 결과를 간단히 요약
@@ -848,7 +854,7 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
      * 검색 결과 없을 때 프롬프트
      */
     private buildNoResultPrompt(category: string, location: string): string {
-        return `당신은 화상회의 AI 비서 '루미'입니다.
+        return `당신은 화상회의 AI 비서 '빅스'입니다.
 
 사용자가 "${location}" 근처 ${category}을 찾았지만 검색 결과가 없습니다.
 
