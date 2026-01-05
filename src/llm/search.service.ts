@@ -470,6 +470,8 @@ export class SearchService {
 
     private normalizeSearchQuery(rawQuery: string): string {
         return rawQuery.trim()
+            // 웨이크워드 제거
+            .replace(/^(아우라야?|헤이\s*아우라|아울라야?|아우나야?|오우라야?)\s*/gi, '')
             .replace(/^(와|과|그리고|또|좀|아|어|야)\s+/g, '')
             .replace(/\b(추천해줘|추천해 줘|알려줘|알려 줘|찾아줘|찾아 줘|보여줘|보여 줘)\b/g, '')
             .replace(/\s+/g, ' ')

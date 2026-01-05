@@ -28,7 +28,7 @@ export class IntentClassifierService {
     // =====================================================
 
     private readonly WAKE_WORDS_EXACT = [
-        '아우라', '아우라야', '헤이 아우라', '헤이아우라',
+        '아우라', '아우라야', '헤이 아우라', '헤이아우라', '페이아우라', '페이 아우라',
     ];
 
     private readonly WAKE_WORDS_VARIANTS = [
