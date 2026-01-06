@@ -340,55 +340,45 @@ export class RagClientService implements OnModuleDestroy {
     }
 
     /**
-     * 회의 시작 요청 (HTTP POST)
-     * 프론트엔드에서 받은 embed-files 데이터를 RAG 서버로 전달
-     * @endpoint POST /meetings/{room_name}/start
+     * 회의 종료 API 호출 (HTTP POST)
+     * POST /meetings/{room_name}/end
      */
-    async startMeeting(
-        roomName: string,
-        description: string,
-        files: { bucket: string; key: string }[]
-    ): Promise<{ success: boolean; message: string }> {
-        const baseUrl = this.configService.get<string>('RAG_WEBSOCKET_URL') || 'ws://localhost:8000';
-        // WebSocket URL에서 HTTP URL로 변환 (ws:// → http://, wss:// → https://)
-        const httpBaseUrl = baseUrl.replace(/^ws/, 'http');
-        const url = `${httpBaseUrl}/meetings/${encodeURIComponent(roomName)}/start`;
+    async endMeeting(roomName: string): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomName}/end`;
 
-        this.logger.log(`\n========== [RAG 회의 시작 요청] ==========`);
-        this.logger.log(`Room Name: ${roomName}`);
-        this.logger.log(`Description: ${description}`);
-        this.logger.log(`Files: ${files.length}개`);
-        this.logger.log(`URL: ${url}`);
+        this.logger.log(`[RAG 회의 종료] POST ${endpoint}`);
 
         try {
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    description,
-                    files,
-                }),
-            });
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint);
+            this.logger.log(`[RAG 회의 종료 성공] ${roomName} - 응답: ${JSON.stringify(response.data)}`);
+            return { success: true, message: response.data };
+        } catch (error: any) {
+            this.logger.error(`[RAG 회의 종료 실패] ${roomName}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                this.logger.error(`[RAG 회의 시작 실패] HTTP ${response.status}: ${errorText}`);
-                throw new Error(`RAG server responded with ${response.status}: ${errorText}`);
-            }
+    /**
+     * 회의 시작 및 파일 임베딩 API 호출 (HTTP POST)
+     * POST /meetings/{room_name}/start
+     */
+    async startMeeting(roomName: string, payload: any): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomName}/start`;
 
-            const result = await response.json();
-            this.logger.log(`[RAG 회의 시작 성공] ${roomName}`);
-            this.logger.log(`========================================\n`);
+        this.logger.log(`[RAG 회의 시작] POST ${endpoint} - Payload: ${JSON.stringify(payload)}`);
 
-            return {
-                success: true,
-                message: result.message || '회의가 성공적으로 시작되었습니다.',
-            };
-        } catch (error) {
-            this.logger.error(`[RAG 회의 시작 에러] ${roomName}: ${error.message}`);
-            throw error;
+        try {
+            const axios = await import('axios');
+            // Payload 구조: { description: string, files: { bucket: string; key: string }[] }
+            const response = await axios.default.post(endpoint, payload);
+            this.logger.log(`[RAG 회의 시작 성공] ${roomName} - 응답: ${JSON.stringify(response.data)}`);
+            return { success: true, message: response.data };
+        } catch (error: any) {
+            this.logger.error(`[RAG 회의 시작 실패] ${roomName}: ${error.message}`);
+            return { success: false, message: error.message };
         }
     }
 }
