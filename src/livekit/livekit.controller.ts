@@ -9,6 +9,8 @@ import { TtsService } from '../tts/tts.service';
 import { RagClientService } from '../rag/rag-client.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
+import { EmbedFilesDto } from './dto/embed-files.dto';
+import { RagClientService } from '../rag/rag-client.service';
 
 @Controller('room')
 export class LivekitController {
@@ -16,10 +18,50 @@ export class LivekitController {
     private readonly livekitService: LivekitService,
     private readonly voiceBotService: VoiceBotService,
     private readonly sttService: SttService,
-    private readonly llmService: LlmService, //통합 검색 
+    private readonly llmService: LlmService, //통합 검색
     private readonly ttsService: TtsService,
     private readonly ragClientService: RagClientService,
   ) { }
+
+  /**
+   * 회의방에 파일 임베딩 요청 (RAG용)
+   * 프론트엔드에서 방 생성 성공 후 호출
+   * @endpoint POST /api/room/embed-files
+   */
+  @Post('embed-files')
+  async embedFilesToRoom(@Body() embedFilesDto: EmbedFilesDto) {
+    const { roomName, files, topic, description } = embedFilesDto;
+    
+    console.log(`[파일 임베딩 요청] 방: ${roomName}, 주제: ${topic}, 파일 수: ${files.length}`);
+    if (description) {
+      console.log(`[파일 임베딩 요청] 설명: ${description}`);
+    }
+    
+    try {
+      // RAG 서버에 회의 시작 요청 전달
+      const ragResult = await this.ragClientService.startMeeting(
+        roomName,
+        description || topic, // description이 없으면 topic 사용
+        files,
+      );
+      
+      return {
+        success: true,
+        roomName,
+        message: ragResult.message || `${files.length}개 파일 임베딩 요청이 접수되었습니다.`,
+        files: files.map(f => ({ bucket: f.bucket, key: f.key })),
+      };
+    } catch (error) {
+      // RAG 서버 연결 실패해도 기본 응답 반환 (회의 생성은 계속 진행)
+      console.error(`[RAG 서버 연결 실패] ${error.message}`);
+      return {
+        success: false,
+        roomName,
+        message: `RAG 서버 연결 실패: ${error.message}. 임베딩 없이 진행됩니다.`,
+        files: files.map(f => ({ bucket: f.bucket, key: f.key })),
+      };
+    }
+  }
 
   // AI 음성 봇 시작
   @Post('voice-bot/:roomName')
@@ -66,6 +108,40 @@ export class LivekitController {
     const normalizedRoomName = roomName.trim();
     const isActive = this.voiceBotService.isActive(normalizedRoomName);
     return { roomName: normalizedRoomName, active: isActive };
+  }
+
+  // Vision 캡처 응답 수신 (DataChannel 64KB 제한 우회용)
+  @Post('voice-bot/:roomName/vision-capture')
+  async receiveVisionCapture(
+    @Param('roomName') roomName: string,
+    @Body() body: {
+      requestId: number;
+      imageBase64: string;
+      cursorPosition?: { x: number; y: number };
+      highlightedText?: string;
+      screenWidth: number;
+      screenHeight: number;
+    }
+  ) {
+    const normalizedRoomName = roomName.trim();
+    console.log(`[Vision HTTP] 캡처 수신 - room: ${normalizedRoomName}, requestId: ${body.requestId}, 크기: ${(body.imageBase64?.length / 1024).toFixed(1)}KB`);
+
+    try {
+      await this.voiceBotService.handleVisionCaptureFromHttp(normalizedRoomName, {
+        type: 'vision_capture_response',
+        requestId: body.requestId,
+        imageBase64: body.imageBase64,
+        cursorPosition: body.cursorPosition,
+        highlightedText: body.highlightedText,
+        screenWidth: body.screenWidth,
+        screenHeight: body.screenHeight,
+      });
+
+      return { success: true, message: 'Vision 캡처 처리 시작' };
+    } catch (error) {
+      console.error(`[Vision HTTP] 에러: ${error.message}`);
+      throw new HttpException(`Vision 캡처 처리 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
 
@@ -327,7 +403,7 @@ export class ApiController {
   @Post('token')
   async generateToken(@Body() joinRoomDto: JoinRoomDto) {
     return this.livekitService.joinRoom(joinRoomDto);
-  }
+  } 
 
   @Get('map/static')
   async getStaticMap(

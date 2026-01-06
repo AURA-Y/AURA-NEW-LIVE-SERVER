@@ -1,4 +1,3 @@
-
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -6,42 +5,39 @@ import {
     InvokeModelCommand,
 } from '@aws-sdk/client-bedrock-runtime';
 import { RagClientService } from '../rag/rag-client.service';
-
-type SearchResult = {
-    title: string;
-    url: string;
-    content: string;
-    address?: string;
-    roadAddress?: string;
-    mapx?: string;
-    mapy?: string;
-    placeId?: string;
-    mapUrl?: string;
-    directionUrl?: string;
-};
+import { SearchService, SearchResult, SearchType } from './search.service';
+import { MapService } from './map.service';
 
 @Injectable()
 export class LlmService {
     private readonly logger = new Logger(LlmService.name);
     private bedrockClient: BedrockRuntimeClient;
     private readonly modelId = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
+    private readonly restApiUrl: string;
+    private readonly topicCache = new Map<string, string>();
 
-    // Rate limiting
     private lastRequestTime = 0;
-    private isProcessing = false; // 동시 요청 방지
-    private readonly MIN_REQUEST_INTERVAL = 1500; // 최소 1.5초 간격 (응답 속도 개선)
-    private readonly MAX_RETRIES = 3; // 재시도 횟수 증가
-    private readonly SEARCH_TIMEOUT_MS = 4000; // 검색 타임아웃 (ms)
-    private readonly SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5분 캐시
-    private searchCache = new Map<string, { expiresAt: number; results: SearchResult[] }>();
-    private lastSearchCategory: string | null = null;
-    private readonly naverMapKeyId: string;
-    private readonly naverMapKey: string;
+    private isProcessing = false;
+    private readonly MIN_REQUEST_INTERVAL = 1500;
+    private readonly MAX_RETRIES = 3;
+
+    // sendMessagePure용 rate limiting (DDD 분석 등)
+    private lastPureRequestTime = 0;
+    private isPureProcessing = false;
+    private readonly PURE_MIN_INTERVAL = 1000; // 1초
+    private readonly PURE_MAX_RETRIES = 2;
 
     constructor(
         private configService: ConfigService,
         private ragClientService: RagClientService,
+        private searchService: SearchService,
+        private mapService: MapService,
     ) {
+        this.restApiUrl =
+            (this.configService.get<string>('REST_API_URL') ||
+                this.configService.get<string>('BACKEND_API_URL') ||
+                'http://localhost:3002').replace(/\/+$/, '');
+
         this.bedrockClient = new BedrockRuntimeClient({
             region: this.configService.get<string>('AWS_REGION') || 'ap-northeast-2',
             credentials: {
@@ -49,87 +45,205 @@ export class LlmService {
                 secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY'),
             },
         });
-        this.naverMapKeyId = this.configService.get<string>('NAVER_MAP_API_KEY_ID') || '';
-        this.naverMapKey = this.configService.get<string>('NAVER_MAP_API_KEY') || '';
-        if (this.naverMapKeyId && this.naverMapKey) {
-            const maskedId = this.naverMapKeyId.slice(-4);
-            this.logger.log(`[MapKey] NAVER_MAP_API_KEY_ID=****${maskedId} keyLen=${this.naverMapKey.length}`);
-        } else {
-            this.logger.warn('[MapKey] NAVER_MAP_API_KEY_ID/API_KEY is missing');
-        }
     }
 
-    async sendMessage(userMessage: string, searchDomain?: 'weather' | 'naver' | null, roomId?: string): Promise<{
-        text: string;
-        searchResults?: SearchResult[];
-    }> {
-        // 회의 관련 질문이고 roomId가 있으면 RAG 서버에 질문
-        if (userMessage.includes('회의') && roomId) {
+    // ============================================================
+    // Public API
+    // ============================================================
+
+    async sendMessage(
+        userMessage: string,
+        searchDomain?: 'weather' | 'naver' | null,
+        roomId?: string
+    ): Promise<{ text: string; searchResults?: SearchResult[] }> {
+        // 회의록 관련 질문이고 roomId가 있으면 RAG 서버에 질문
+        const meetingKeywords = [
+            '회의', '미팅', '액션', '액션아이템', '할 일', '할일', 'todo', 'action',
+            '결정', '논의', '안건', '발언', '누가', '언제', '요약', '정리',
+        ];
+        const isMeetingQuery = meetingKeywords.some(kw => userMessage.toLowerCase().includes(kw));
+        
+        if (isMeetingQuery && roomId) {
+            const resolvedRoomId = await this.getRoomIdByTopic(roomId);
+    
             try {
-                // RAG 서버 연결 확인
-                if (!this.ragClientService.isConnected(roomId)) {
-                    this.logger.warn(`[RAG] 연결되지 않음: ${roomId} - 일반 응답으로 대체`);
-                    return {
-                        text: '회의록 기능을 사용할 수 없습니다. RAG 서버에 연결되지 않았습니다.',
-                    };
+                // RAG 연결이 없으면 시도해서 붙여본다
+                if (!this.ragClientService.isConnected(resolvedRoomId)) {
+                    try {
+                        await this.ragClientService.connect(resolvedRoomId);
+                    } catch (err) {
+                        this.logger.warn(`[RAG] 연결 시도 실패: ${resolvedRoomId} (${(err as Error).message})`);
+                    }
                 }
 
-                this.logger.log(`[RAG 질문] Room: ${roomId}, 질문: "${userMessage}"`);
-                const ragAnswer = await this.ragClientService.sendQuestion(roomId, userMessage);
-                this.logger.log(`[RAG 응답] "${ragAnswer.substring(0, 100)}..."`);
-
-                return {
-                    text: ragAnswer,
-                };
+                if (!this.ragClientService.isConnected(resolvedRoomId)) {
+                    this.logger.warn(`[RAG] 연결되지 않음: ${resolvedRoomId}`);
+                    return { text: '회의록 기능을 사용할 수 없습니다.' };
+                }
+                this.logger.log(`[RAG 질문] Room: ${resolvedRoomId}, 질문: "${userMessage}"`);
+                const ragAnswer = await this.ragClientService.sendQuestion(resolvedRoomId, userMessage);
+                return { text: ragAnswer };
             } catch (error) {
                 this.logger.error(`[RAG 에러] ${error.message}`);
-                return {
-                    text: '회의록을 조회하는 중 오류가 발생했습니다.',
-                };
+                return { text: '회의록을 조회하는 중 오류가 발생했습니다.' };
             }
         }
 
-        // 동시 요청 방지: 이미 처리 중이면 대기
+        // 동시 요청 방지
         while (this.isProcessing) {
-            this.logger.log(`[LLM 대기] 다른 요청 처리 중...`);
             await this.sleep(100);
         }
 
-        // 쿨다운 체크 (rate limiting)
+        // 쿨다운 체크
         const now = Date.now();
         const timeSinceLastRequest = now - this.lastRequestTime;
         if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
-            const waitTime = this.MIN_REQUEST_INTERVAL - timeSinceLastRequest;
-            this.logger.log(`[LLM 대기] ${waitTime}ms 쿨다운`);
-            await this.sleep(waitTime);
+            await this.sleep(this.MIN_REQUEST_INTERVAL - timeSinceLastRequest);
         }
 
         this.isProcessing = true;
         this.lastRequestTime = Date.now();
 
         try {
-            return await this.sendWithRetry(userMessage, 0, searchDomain ?? 'naver');
+            const messages = [{ role: "user", content: userMessage }];
+            return await this.processWithTools(messages, 0, undefined, searchDomain, true);
         } finally {
             this.isProcessing = false;
         }
     }
 
-    private async sendWithRetry(userMessage: string, retryCount = 0, searchDomain?: 'weather' | 'naver' | null): Promise<{
-        text: string;
-        searchResults?: SearchResult[];
-    }> {
-        this.logger.log(`[LLM 요청] 메시지: ${userMessage.substring(0, 50)}... (도메인: ${searchDomain || 'auto'})`);
+    /**
+     * 순수 LLM 호출 (검색 없이)
+     * DDD 분석 등 검색이 필요 없는 LLM 작업에 사용
+     */
+    async sendMessagePure(prompt: string, maxTokens = 500): Promise<string> {
+        // 동시 요청 방지
+        while (this.isPureProcessing) {
+            await this.sleep(100);
+        }
 
-        const messages = [
-            {
-                role: "user",
-                content: userMessage,
-            },
-        ];
+        // 쿨다운 체크
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.lastPureRequestTime;
+        if (timeSinceLastRequest < this.PURE_MIN_INTERVAL) {
+            await this.sleep(this.PURE_MIN_INTERVAL - timeSinceLastRequest);
+        }
 
-        // Tool use로 검색 결과 통합
-        const finalResponse = await this.processWithTools(messages, retryCount, undefined, searchDomain, true);
-        return finalResponse;
+        this.isPureProcessing = true;
+        this.lastPureRequestTime = Date.now();
+
+        try {
+            return await this.sendMessagePureWithRetry(prompt, maxTokens, 0);
+        } finally {
+            this.isPureProcessing = false;
+        }
+    }
+
+    /**
+     * sendMessagePure 내부 재시도 로직
+     */
+    private async sendMessagePureWithRetry(prompt: string, maxTokens: number, retryCount: number): Promise<string> {
+        try {
+            const payload = {
+                anthropic_version: "bedrock-2023-05-31",
+                max_tokens: maxTokens,
+                messages: [{ role: "user", content: prompt }],
+            };
+
+            const command = new InvokeModelCommand({
+                modelId: this.modelId,
+                contentType: 'application/json',
+                accept: 'application/json',
+                body: JSON.stringify(payload),
+            });
+
+            const response = await this.bedrockClient.send(command);
+            const body = JSON.parse(new TextDecoder().decode(response.body));
+            const text = body.content?.[0]?.text || '';
+
+            return text.trim();
+        } catch (error) {
+            const isThrottled = error.name === 'ThrottlingException' ||
+                error.message?.includes('Too many requests');
+
+            if (isThrottled && retryCount < this.PURE_MAX_RETRIES) {
+                const backoffTime = Math.pow(2, retryCount + 1) * 1000; // 2초, 4초
+                this.logger.warn(`[LLM Pure 재시도] ${backoffTime}ms 후 재시도 (${retryCount + 1}/${this.PURE_MAX_RETRIES})`);
+                await this.sleep(backoffTime);
+                return this.sendMessagePureWithRetry(prompt, maxTokens, retryCount + 1);
+            }
+
+            this.logger.error(`[LLM Pure 호출 에러] ${error.message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * 검색 계획 수립 (SearchService 위임)
+     */
+    async buildSearchPlan(rawQuery: string) {
+        return this.searchService.buildSearchPlan(rawQuery);
+    }
+
+    /**
+     * 경로 정보 조회 (MapService 위임)
+     */
+    async getRouteInfo(result: SearchResult) {
+        return this.mapService.getRouteInfo(result);
+    }
+
+    /**
+     * 정적 지도 이미지 (MapService 위임)
+     */
+    async getStaticMapImage(params: {
+        origin: { lng: string; lat: string };
+        destination: { lng: string; lat: string };
+        width: number;
+        height: number;
+        path?: { lng: string; lat: string }[];
+        distanceMeters?: number;
+    }) {
+        return this.mapService.getStaticMapImage(params);
+    }
+
+    // ============================================================
+    // Core Processing
+    // ============================================================
+
+    /**
+     * topic → roomId 조회 (1) 캐시 확인 (2) REST API 호출
+     */
+    private async getRoomIdByTopic(topicOrId: string): Promise<string> {
+        if (!topicOrId) return topicOrId;
+        // 이미 id처럼 보이면 그대로 사용
+        const hasDash = topicOrId.includes('-');
+        if (topicOrId.length >= 30 && hasDash) return topicOrId;
+
+        // 캐시
+        const cached = this.topicCache.get(topicOrId);
+        if (cached) return cached;
+
+        if (!this.restApiUrl) return topicOrId;
+
+        try {
+            const resp = await fetch(
+                `${this.restApiUrl}/restapi/rooms/topic/${encodeURIComponent(topicOrId)}`,
+                { method: 'GET' }
+            );
+            if (!resp.ok) {
+                this.logger.warn(`[RAG] topic→roomId 조회 실패: ${topicOrId} (${resp.status})`);
+                return topicOrId;
+            }
+            const data = await resp.json();
+            if (data?.roomId) {
+                this.logger.log(`[RAG] topic "${topicOrId}" → roomId ${data.roomId}`);
+                this.topicCache.set(topicOrId, data.roomId);
+                return data.roomId;
+            }
+        } catch (err) {
+            this.logger.warn(`[RAG] topic→roomId 조회 에러: ${(err as Error).message}`);
+        }
+        return topicOrId;
     }
 
     private async processWithTools(
@@ -138,156 +252,66 @@ export class LlmService {
         searchResults?: SearchResult[],
         searchDomain?: 'weather' | 'naver' | null,
         forceSearch = false
-    ): Promise<{
-        text: string;
-        searchResults?: SearchResult[];
-    }> {
+    ): Promise<{ text: string; searchResults?: SearchResult[] }> {
+
+        // 검색 실행
         if (forceSearch && !searchResults) {
-            const latestUser = [...messages].reverse().find((msg) => msg.role === 'user');
+            const latestUser = [...messages].reverse().find(m => m.role === 'user');
             const rawQuery = typeof latestUser?.content === 'string' ? latestUser.content : '';
             const trimmedQuery = rawQuery.trim();
-            if (trimmedQuery.length <= 5) {
-                this.logger.log('[검색 스킵] 짧은 쿼리');
-            } else {
-                const { query, cacheKey, searchType, category } = await this.buildSearchPlan(trimmedQuery);
-                this.logger.log(`[검색 계획] type=${searchType} category=${category || '기타'} query="${query}"`);
-                let tavilyResults: any = null;
-                const cached = this.getCachedSearch(cacheKey);
-                if (cached) {
-                    tavilyResults = { answer: null, results: cached };
-                    searchResults = cached;
-                } else {
-                    const searchOptions = {
-                        display: 2,
-                        sort: searchType === 'local' ? 'comment' as const : 'date' as const,
+
+            if (trimmedQuery.length > 5) {
+                const { query, searchType } = await this.searchService.buildSearchPlan(trimmedQuery);
+                
+                if (searchType === 'none') {
+                    this.logger.log(`[검색 스킵] 카테고리/키워드 없음`);
+                    // 자연스러운 응답
+                    const responses = [
+                        '네? 뭐 찾아볼까요?',
+                        '어 뭐 궁금한 거 있어요?',
+                        '네~ 뭐 도와드릴까요?',
+                    ];
+                    return { 
+                        text: responses[Math.floor(Math.random() * responses.length)],
+                        searchResults: undefined 
                     };
-                    const timeoutMs = this.SEARCH_TIMEOUT_MS;
-                    const startTime = Date.now();
-                    try {
-                        tavilyResults = await Promise.race([
-                            this.searchWithNaver(query, searchType, searchOptions.display, searchOptions.sort),
-                            new Promise((_, reject) =>
-                                setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
-                            )
-                        ]);
-                    } catch (error) {
-                        const elapsed = Date.now() - startTime;
-                        const isTimeout = error?.message?.includes('Search timeout');
-                        if (isTimeout) {
-                            const retryTimeoutMs = 6000;
-                            this.logger.warn(`[검색 타임아웃] timeout=${timeoutMs}ms elapsed=${elapsed}ms - 1회 재시도 (${retryTimeoutMs}ms)`);
-                            let retryStart = 0;
-                            try {
-                                retryStart = Date.now();
-                                tavilyResults = await Promise.race([
-                                    this.searchWithNaver(query, searchType, searchOptions.display, searchOptions.sort),
-                                    new Promise((_, reject) =>
-                                        setTimeout(() => reject(new Error('Search timeout')), retryTimeoutMs)
-                                    )
-                                ]);
-                                const retryElapsed = Date.now() - retryStart;
-                                this.logger.log(`[검색 재시도 완료] ${retryElapsed}ms`);
-                            } catch (retryError) {
-                                const retryElapsed = retryStart ? Date.now() - retryStart : 0;
-                                this.logger.warn(`[검색 재시도 실패] timeout=${retryTimeoutMs}ms elapsed=${retryElapsed}ms - ${retryError.message}`);
-                                tavilyResults = { answer: null, results: [] };
-                            }
-                        } else {
-                            this.logger.warn(`[검색 실패] ${error.message}`);
-                            tavilyResults = { answer: null, results: [] };
-                        }
-                    }
+                }
 
-                    if (Array.isArray(tavilyResults)) {
-                        tavilyResults = { answer: null, results: tavilyResults };
-                    }
-                    this.logger.log(`[검색 완료] ${tavilyResults.results?.length || 0}개 결과`);
-
-                    const filtered = this.filterSearchResults(query, tavilyResults.results || []);
-                    searchResults = filtered.slice(0, 2).map((r: any) => ({
-                        title: r.title,
-                        url: r.url,
-                        content: r.content?.substring(0, 200),
-                        address: r.address,
-                        roadAddress: r.roadAddress,
-                        mapx: r.mapx,
-                        mapy: r.mapy,
-                        mapUrl: r.mapUrl,
-                        directionUrl: r.directionUrl,
-                    }));
-                    this.setCachedSearch(cacheKey, searchResults);
+                this.logger.log(`[검색] type=${searchType}, query="${query}"`);
+                searchResults = await this.searchService.search(query, searchType);
+                
+                // 검색했는데 결과가 없으면
+                if (!searchResults || searchResults.length === 0) {
+                    this.logger.log(`[검색 결과 없음]`);
+                    const noResultResponses = [
+                        '음 검색해봤는데 잘 안 나오네요, 다른 걸로 찾아볼까요?',
+                        '아 그건 검색이 잘 안 돼요, 다르게 말해줄 수 있어요?',
+                    ];
+                    return {
+                        text: noResultResponses[Math.floor(Math.random() * noResultResponses.length)],
+                        searchResults: undefined
+                    };
                 }
             }
         }
 
-        const messagesWithSearch = searchResults
-            ? [
-                ...messages,
-                {
-                    role: "user",
-                    content: `[검색 결과 - 최신순]\n${searchResults.map((r) => `- ${r.title}\n${r.url}\n${r.content}`).join('\n')}`
-                }
-            ]
+        // 프롬프트 생성
+        const latestUser = [...messages].reverse().find(m => m.role === 'user');
+        const userMessage = typeof latestUser?.content === 'string' ? latestUser.content : '';
+        const systemPrompt = this.buildSystemPrompt(userMessage, searchResults || []);
+
+        const messagesWithSearch = searchResults && searchResults.length > 0
+            ? [...messages, {
+                role: "user",
+                content: `[검색 결과]\n${searchResults.map(r => `- ${r.title}: ${r.content}`).join('\n')}`
+            }]
             : messages;
 
         const payload = {
             anthropic_version: "bedrock-2023-05-31",
             max_tokens: 400,
-            system: `You are a friendly Korean voice assistant. Talk like a real person having a casual conversation.
-
-DEFAULT LOCATION: 서울
-- 위치 없으면 무조건 서울 기준: "날씨 어때?" → "서울은 지금..."
-
-SPEAKING STYLE (음성 출력):
-- 친구처럼 편하게 대화하세요 (반말 금지, 존댓말 but 친근하게)
-- 1~2문장, 30~80자 내외
-- 핵심만 말하기: "네, ~해요" ❌ → 바로 답변 ✅
-- 자연스러운 추임새: ~네요, ~요, ~죠, ~잖아요
-
-RECOMMENDATION FORMAT:
-- 검색 결과가 1개 이상이면 1개만 추천 (가장 관련도 높은 1개)
-- 반드시 상호명/지점명을 그대로 언급
-- 마지막에 "해당 지점까지 경로를 채팅창으로 공유드릴게요" 포함
-- 과장 금지, 검색 결과에 없는 내용 추가 금지
-
-NUMBERS (기호 절대 금지):
-- 온도: "영하 3도" / "영상 5도"
-- 퍼센트: "20퍼센트"
-- 돈: "1만원" / "150달러"
-- 시간: "3시 반" / "오전 9시"
-- 거리: "5킬로"
-
-BAD EXAMPLES ❌:
-"서울 날씨는 -3°C이고 습도는 60%입니다. 외출 시 따뜻하게 입으세요."
-"네, 알려드리겠습니다. 애플 주가는 $150.50입니다."
-
-GOOD EXAMPLES ✅:
-"영하 3도, 습도 60퍼센트예요. 따뜻하게 입으세요!"
-"애플 주가 150달러네요"
-"서울은 지금 맑고 영상 5도예요"
-
-SEARCH: Use provided search results when available. If search results are missing, use tavily_search.
-SEARCH RULES:
-- Only use information contained in the provided search results.
-- Do NOT invent names, places, or entities not present in the search results.
-- If search results are provided, paraphrase naturally but never add new proper nouns or places.`,
+            system: systemPrompt,
             messages: messagesWithSearch,
-            tools: searchResults ? [] : [
-                {
-                    name: "tavily_search",
-                    description: "Search the web for current information. Use this when you need up-to-date facts, news, or information you don't have.",
-                    input_schema: {
-                        type: "object",
-                        properties: {
-                            query: {
-                                type: "string",
-                                description: "The search query"
-                            }
-                        },
-                        required: ["query"]
-                    }
-                }
-            ]
         };
 
         const command = new InvokeModelCommand({
@@ -300,797 +324,334 @@ SEARCH RULES:
         try {
             const response = await this.bedrockClient.send(command);
             const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+            const textBlock = responseBody.content?.find((b: any) => b.type === 'text');
+            let finalMessage = textBlock?.text || "죄송합니다, 응답을 생성할 수 없습니다.";
 
-            // Tool use 체크
-            if (responseBody.stop_reason === 'tool_use') {
-                const toolUseBlock = responseBody.content.find((block: any) => block.type === 'tool_use');
-
-                if (toolUseBlock && toolUseBlock.name === 'tavily_search') {
-                    const { query, cacheKey, searchType, category } = await this.buildSearchPlan(toolUseBlock.input.query);
-                    this.logger.log(`[검색 계획] type=${searchType} category=${category || '기타'} query="${query}"`);
-                    this.logger.log(`[Naver 검색] "${query}"`);
-
-                    // 검색 도메인 설정
-                    const searchOptions = {
-                        display: 2,
-                        sort: searchType === 'local' ? 'comment' as const : 'date' as const,
-                    };
-
-                    // Tavily 검색 실행
-                    let tavilyResults: any = null;
-                    const timeoutMs = this.SEARCH_TIMEOUT_MS;
-                    const startTime = Date.now();
-                    try {
-                        const cached = this.getCachedSearch(cacheKey);
-                        if (cached) {
-                            tavilyResults = { answer: null, results: cached };
-                        } else {
-                            tavilyResults = await Promise.race([
-                                this.searchWithNaver(query, searchType, searchOptions.display, searchOptions.sort),
-                                new Promise((_, reject) =>
-                                    setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
-                                )
-                            ]);
-                        }
-                    } catch (error) {
-                        const elapsed = Date.now() - startTime;
-                        const isTimeout = error?.message?.includes('Search timeout');
-                        if (isTimeout) {
-                            const retryTimeoutMs = 6000;
-                            this.logger.warn(`[검색 타임아웃] timeout=${timeoutMs}ms elapsed=${elapsed}ms - 1회 재시도 (${retryTimeoutMs}ms)`);
-                            let retryStart = 0;
-                            try {
-                                retryStart = Date.now();
-                                tavilyResults = await Promise.race([
-                                    this.searchWithNaver(query, searchType, searchOptions.display, searchOptions.sort),
-                                    new Promise((_, reject) =>
-                                        setTimeout(() => reject(new Error('Search timeout')), retryTimeoutMs)
-                                    )
-                                ]);
-                                const retryElapsed = Date.now() - retryStart;
-                                this.logger.log(`[검색 재시도 완료] ${retryElapsed}ms`);
-                            } catch (retryError) {
-                                const retryElapsed = retryStart ? Date.now() - retryStart : 0;
-                                this.logger.warn(`[검색 재시도 실패] timeout=${retryTimeoutMs}ms elapsed=${retryElapsed}ms - ${retryError.message}`);
-                                tavilyResults = { answer: null, results: [] };
-                            }
-                        } else {
-                            this.logger.warn(`[검색 실패] ${error.message}`);
-                            tavilyResults = { answer: null, results: [] };
-                        }
+            // 검색 결과가 있는 경우 응답 형식 결정
+            if (searchResults && searchResults.length > 0) {
+                const hasLocation = searchResults.some(r => r.address || r.roadAddress);
+                
+                if (hasLocation) {
+                    const placeResult = searchResults.find(r => r.address || r.roadAddress);
+                    if (placeResult) {
+                        finalMessage = this.buildPlaceRecommendation(placeResult);
                     }
-
-                    if (Array.isArray(tavilyResults)) {
-                        tavilyResults = { answer: null, results: tavilyResults };
-                    }
-                    this.logger.log(`[검색 완료] ${tavilyResults.results?.length || 0}개 결과`);
-
-                    // 검색 결과를 프론트엔드로 전송할 형식으로 저장
-                    const filteredResults = this.filterSearchResults(query, tavilyResults.results || []);
-                    const formattedSearchResults = filteredResults.slice(0, 2).map((r: any) => ({
-                        title: r.title,
-                        url: r.url,
-                        content: r.content?.substring(0, 200),
-                        address: r.address,
-                        roadAddress: r.roadAddress,
-                        mapx: r.mapx,
-                        mapy: r.mapy,
-                        mapUrl: r.mapUrl,
-                        directionUrl: r.directionUrl,
-                    }));
-                    this.setCachedSearch(cacheKey, formattedSearchResults);
-
-                    // Tool 결과를 Claude에게 전달
-                    messages.push({
-                        role: "assistant",
-                        content: responseBody.content
-                    });
-                    messages.push({
-                        role: "user",
-                        content: [
-                            {
-                                type: "tool_result",
-                                tool_use_id: toolUseBlock.id,
-                                content: JSON.stringify({
-                                    answer: tavilyResults.answer || '검색 결과를 가져오지 못했습니다.',
-                                    results: formattedSearchResults
-                                })
-                            }
-                        ]
-                    });
-
-                    // 재귀 호출로 최종 답변 받기 (검색 결과 전달)
-                    return this.processWithTools(messages, retryCount, formattedSearchResults, searchDomain);
+                } else {
+                    finalMessage = this.validateAndBuildNewsResponse(finalMessage, searchResults);
                 }
             }
 
-            // 최종 텍스트 응답
-            const textBlock = responseBody.content.find((block: any) => block.type === 'text');
-            const assistantMessage = textBlock?.text || responseBody.content[0]?.text || "죄송합니다, 응답을 생성할 수 없습니다.";
-            const validatedMessage = searchResults
-                ? this.validateSearchAnswer(assistantMessage, searchResults)
-                : assistantMessage;
-            let finalMessage = searchResults && this.shouldUseTitleOnlyFallback(searchResults)
-                ? this.buildTitleOnlyRecommendation(searchResults, this.getCategoryHint(messages, searchResults))
-                : validatedMessage;
-            if (searchResults && searchResults.length > 0 && searchDomain === 'naver') {
-                finalMessage = this.buildSingleRecommendation(searchResults[0]);
-            }
-
-            this.logger.log(`[LLM 응답] ${finalMessage.substring(0, 100)}...`);
-            return {
-                text: finalMessage,
-                searchResults: searchResults
-            };
+            this.logger.log(`[LLM 응답] ${finalMessage.substring(0, 80)}...`);
+            return { text: finalMessage, searchResults };
 
         } catch (error) {
-            // Rate limit/Throttling 에러 시 재시도
             const isThrottled = error.name === 'ThrottlingException' ||
-                                error.message?.includes('Too many requests') ||
-                                error.message?.includes('throttl');
+                error.message?.includes('Too many requests');
 
             if (isThrottled && retryCount < this.MAX_RETRIES) {
-                const backoffTime = Math.pow(2, retryCount + 1) * 2000; // 4초, 8초 (지수 백오프)
-                this.logger.warn(`[LLM 재시도] ${backoffTime}ms 후 재시도 (${retryCount + 1}/${this.MAX_RETRIES})`);
+                const backoffTime = Math.pow(2, retryCount + 1) * 2000;
+                this.logger.warn(`[LLM 재시도] ${backoffTime}ms`);
                 await this.sleep(backoffTime);
                 return this.processWithTools(messages, retryCount + 1, searchResults, searchDomain);
             }
 
-            this.logger.error(`[LLM 에러] ${error.name}: ${error.message}`);
+            this.logger.error(`[LLM 에러] ${error.message}`);
             throw error;
         }
     }
 
-    private sleep(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
+    // ============================================================
+    // System Prompt Builder
+    // ============================================================
 
-    private async searchWithNaver(query: string, type: 'local' | 'news', display: number, sort: 'sim' | 'date' | 'comment' | 'random'): Promise<SearchResult[]> {
-        const clientId = this.configService.get<string>('NAVER_CLIENT_ID');
-        const clientSecret = this.configService.get<string>('NAVER_CLIENT_SECRET');
-        if (!clientId || !clientSecret) {
-            this.logger.warn('[Naver 검색] NAVER_CLIENT_ID 또는 NAVER_CLIENT_SECRET이 설정되지 않았습니다.');
-            return [];
-        }
-
-        const endpoint = type === 'local'
-            ? 'https://openapi.naver.com/v1/search/local.json'
-            : 'https://openapi.naver.com/v1/search/news.json';
-        const url = new URL(endpoint);
-        url.searchParams.set('query', query);
-        url.searchParams.set('display', String(display));
-        url.searchParams.set('sort', sort);
-
-        const response = await fetch(url.toString(), {
-            headers: {
-                'X-Naver-Client-Id': clientId,
-                'X-Naver-Client-Secret': clientSecret,
-            },
-        });
-
-        if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`Naver search failed: ${response.status} ${text}`);
-        }
-
-        const body = await response.json();
-        const items = Array.isArray(body.items) ? body.items : [];
-
-        const mapped = items.map((item: any) => {
-            const title = this.stripHtml(item.title || '');
-            const url = item.link || item.originallink || '';
-            const description = this.stripHtml(item.description || '');
-            const roadAddress = typeof item.roadAddress === 'string' ? item.roadAddress : '';
-            const address = typeof item.address === 'string' ? item.address : '';
-            const mapx = typeof item.mapx === 'string' ? item.mapx : '';
-            const mapy = typeof item.mapy === 'string' ? item.mapy : '';
-            const placeId = typeof item.id === 'string' || typeof item.id === 'number' ? String(item.id) : '';
-            const content = type === 'local'
-                ? (roadAddress || address || description || '')
-                : description;
-            const mapUrl = type === 'local' && title
-                ? `https://map.naver.com/v5/search/${encodeURIComponent(title)}`
-                : '';
-            const directionUrl = this.buildNaverDirectionUrl(mapx, mapy, title, placeId);
-            return {
-                title,
-                url,
-                content,
-                address: address || undefined,
-                roadAddress: roadAddress || undefined,
-                mapx: mapx || undefined,
-                mapy: mapy || undefined,
-                placeId: placeId || undefined,
-                mapUrl: mapUrl || undefined,
-                directionUrl: directionUrl || undefined,
-            };
-        });
-        this.logger.log(`[Naver 검색 결과] ${JSON.stringify(mapped).substring(0, 800)}`);
-        return mapped;
-    }
-
-    private pickSearchType(query: string): 'local' | 'news' {
-        const keywords = ['카페', '맛집', '식당', '레스토랑', '커피', '술집', '바', '빵집', '디저트', '분식', '치킨', '피자', '백화점', '가게', '매장'];
-        const normalized = query.toLowerCase();
-        if (keywords.some((word) => normalized.includes(word))) {
-            return 'local';
-        }
-        return 'news';
-    }
-
-    private stripHtml(text: string): string {
-        return text.replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
-    }
-
-    private filterSearchResults(query: string, results: SearchResult[]): SearchResult[] {
-        const normalized = this.normalizeSearchQuery(query);
-        const keywords = this.extractKoreanPhrases(normalized);
-        if (keywords.length === 0) {
-            return results;
-        }
-        const filtered = results.filter((r) => {
-            const haystack = `${r.title} ${r.content}`.toLowerCase();
-            return keywords.some((kw) => haystack.includes(kw));
-        });
-        return filtered.length > 0 ? filtered : results;
-    }
-
-    private validateSearchAnswer(answer: string, results: SearchResult[]): string {
-        const sourceText = results.map((r) => `${r.title} ${r.content}`).join(' ');
-        const extracted = this.extractKoreanPhrases(answer);
-        const sourceSet = new Set(this.extractKoreanPhrases(sourceText));
-        const hasNewProperNoun = extracted.some((token) => token.length >= 2 && !sourceSet.has(token));
-
-        if (hasNewProperNoun) {
-            const fallback = results
-                .map((r) => `${r.title}: ${r.content}`)
-                .join(' ');
-            return fallback || '검색 결과를 요약할 수 없습니다.';
-        }
-
-        return answer;
-    }
-
-    private shouldUseTitleOnlyFallback(results: SearchResult[]): boolean {
-        if (!results.length) {
-            return false;
-        }
-        return results.every((r) => !r.content || r.content.trim().length === 0);
-    }
-
-    private buildTitleOnlyRecommendation(results: SearchResult[], category: string | null): string {
-        const names = results
-            .map((r) => r.title)
-            .filter(Boolean)
-            .slice(0, 2);
-        if (!names.length) {
-            return '검색 결과를 요약할 수 없습니다.';
-        }
-        const joined = names.join(', ');
-        const label = category && category !== '기타' ? category : '추천';
-        return `${label}로는 ${joined}를 추천드려요.`;
-    }
-
-    private getCategoryHint(messages: any[], results: SearchResult[]): string | null {
-        if (this.lastSearchCategory) {
-            return this.lastSearchCategory;
-        }
-        const userText = [...messages].reverse().find((msg) => msg.role === 'user')?.content;
-        const base = typeof userText === 'string' ? userText : '';
-        return this.pickCategoryLabel(base, results);
-    }
-
-    private extractKoreanPhrases(text: string): string[] {
-        const matches = text.match(/[가-힣]{2,}/g);
-        return matches ? matches : [];
-    }
-
-    public async buildSearchPlan(rawQuery: string): Promise<{ 
-        query: string; 
-        cacheKey: string; 
-        searchType: 'local' | 'news'; 
-        category: string | null 
-    }> {
-        const base = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
+    private buildSystemPrompt(userMessage: string, searchResults: SearchResult[]): string {
+        const lowerMessage = userMessage.toLowerCase();
         
-        // 1. 날씨 관련 - LLM 없이 바로 처리
-        const weatherKeywords = ['날씨', '기온', '온도', '비', '눈', '미세먼지', '우산', '더워', '추워'];
-        const isWeather = weatherKeywords.some(kw => base.includes(kw));
-        
-        if (isWeather) {
-            const location = this.extractLocation(base) || '서울';
-            const timeWord = base.includes('내일') ? '내일' : 
-                            base.includes('모레') ? '모레' : 
-                            base.includes('이번주') ? '이번주' : '오늘';
-            const query = `${location} ${timeWord} 날씨`;
-            
-            this.logger.log(`[검색 계획] 날씨 감지 → query="${query}"`);
-            return {
-                query,
-                cacheKey: `weather|${query}`,
-                searchType: 'news',
-                category: '날씨',
-            };
-        }
-    
-        // 2. 장소 관련 - 간단 키워드
-        const localKeywords = ['카페', '맛집', '식당', '술집', '빵집', '디저트', '치킨', '피자', '팝업', '전시'];
-        const isLocal = localKeywords.some(kw => base.includes(kw));
-        
-        if (isLocal) {
-            const location = this.extractLocation(base);
-            const category = localKeywords.find(kw => base.includes(kw));
-            const query = location ? `${location} ${category}` : category!;
-            
-            this.logger.log(`[검색 계획] 장소 감지 → query="${query}"`);
-            return {
-                query,
-                cacheKey: `local|${query}`,
-                searchType: 'local',
-                category: category || '기타',
-            };
-        }
-    
-        // 3. 그 외 - LLM으로 키워드 추출
-        const fallbackCategory = this.pickCategoryLabel(rawQuery, []);
-        
-        const system = [
-            'You are a search query planner for Korean user requests.',
-            'Return only a JSON object with keys: searchType, category, and query.',
-            'searchType must be "local" for places/food/shops, otherwise "news".',
-            'category must be one of: 카페, 맛집, 팝업, 전시, 쇼핑, 날씨, 뉴스, 주식, 스포츠, 기타.',
-            'query must be short Korean nouns only (2-4 words max).',
-            'Remove verbs, particles, filler words, and DO NOT add site: or date filters.',
-            'Examples: "성수동 카페", "서울 날씨", "삼성전자 주가"',
-            'No extra text, no markdown.',
-        ].join(' ');
-    
-        const payload = {
-            anthropic_version: "bedrock-2023-05-31",
-            max_tokens: 120,
-            system,
-            messages: [{ role: "user", content: rawQuery }],
+        // 카테고리 매칭
+        const categoryKeywords: Record<string, string[]> = {
+            '날씨': ['날씨', '기온', '온도', '비', '눈', '바람'],
+            '카페': ['카페', '커피'],
+            '맛집': ['맛집', '식당', '레스토랑', '밥집', '저녁', '점심'],
+            '술집': ['술집', '바', '포차', '호프'],
+            '팝업': ['팝업', '팝업스토어'],
+            '전시': ['전시', '전시회', '갤러리'],
+            '영화': ['영화', '개봉', '영화관'],
+            '뉴스': ['뉴스', '소식', '기사'],
+            '주식': ['주식', '주가', '코스피'],
+            '스포츠': ['스포츠', '축구', '야구'],
+            '백과': ['정의', '의미', '개념', '효능'],
         };
-    
-        try {
-            const command = new InvokeModelCommand({
-                modelId: this.modelId,
-                contentType: 'application/json',
-                accept: 'application/json',
-                body: JSON.stringify(payload),
-            });
-            
-            const response = await this.bedrockClient.send(command);
-            const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-            const textBlock = responseBody.content.find((block: any) => block.type === 'text');
-            const rawText = (textBlock?.text || '').trim();
-            const jsonText = rawText.match(/\{[\s\S]*\}/)?.[0];
-            
-            if (!jsonText) {
-                throw new Error('JSON not found');
-            }
-            
-            const parsed = JSON.parse(jsonText);
-            const searchType = parsed.searchType === 'local' ? 'local' : 'news';
-            let query = typeof parsed.query === 'string' ? parsed.query.trim() : '';
-            
-            if (!query) {
-                throw new Error('Empty query');
-            }
-    
-            // site: 필터 제거 (LLM이 실수로 넣었을 경우)
-            query = query.replace(/site:\S+/gi, '').trim();
-            // 날짜 제거
-            query = query.replace(/\d{4}-\d{2}-\d{2}/g, '').trim();
-            // "최신" 제거
-            query = query.replace(/최신/g, '').trim();
-    
-            const category = typeof parsed.category === 'string' ? parsed.category.trim() : fallbackCategory;
-            const cacheKey = `${searchType}|${query}`;
-            
-            this.lastSearchCategory = category || fallbackCategory;
-            this.logger.log(`[검색 계획] LLM → type=${searchType}, cat=${category}, query="${query}"`);
-            
-            return { query, cacheKey, searchType, category };
-        } catch (error) {
-            this.logger.warn(`[검색 계획 실패] ${error.message} - 폴백 사용`);
-            
-            // 폴백: 단순 키워드 추출
-            const query = base
-                .replace(/[을를이가은는에서의으로]/g, ' ')
-                .replace(/알려줘|추천해줘|찾아줘|검색해줘/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-                
-            return {
-                query: query || base,
-                cacheKey: `news|${query}`,
-                searchType: 'news',
-                category: fallbackCategory,
-            };
-        }
-    }
-    
-    private extractLocation(text: string): string | null {
-        const locations = [
-            // 광역시/도
-            '서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종',
-            '경기', '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주',
-            // 서울 주요 지역
-            '강남', '홍대', '신촌', '잠실', '여의도', '판교', '성수', '이태원',
-            '명동', '종로', '압구정', '청담', '삼성', '역삼', '선릉', '건대',
-            '합정', '망원', '연남', '을지로', '성북', '혜화', '대학로',
-            // 경기 주요 지역
-            '분당', '일산', '수원', '용인', '화성', '평택', '안양', '부천',
-        ];
-    
-        for (const loc of locations) {
-            if (text.includes(loc)) {
-                return loc;
+
+        let matchedCategory: string | null = null;
+        for (const [category, keywords] of Object.entries(categoryKeywords)) {
+            if (keywords.some(kw => lowerMessage.includes(kw))) {
+                matchedCategory = category;
+                break;
             }
         }
-        return null;
-    }
 
-    private formatNewsQuery(rawQuery: string): string {
-        // 네이버 API는 site: 연산자 지원 안 함 - 단순 키워드만
-        const normalized = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
-        return normalized;
-    }
+        const location = this.searchService.extractLocation(userMessage) || '서울';
+        const hasLocation = searchResults.some(r => r.address || r.roadAddress);
 
-    private buildNaverDirectionUrl(mapx: string, mapy: string, title: string, placeId?: string): string | null {
-        const origin = this.configService.get<string>('NAVER_MAP_ORIGIN');
-        if (!origin || !mapx || !mapy) {
-            return null;
-        }
-        const name = title ? encodeURIComponent(title) : '목적지';
-        const [originX, originY] = origin.split(',').map((v) => v.trim());
-        if (!originX || !originY) {
-            return null;
-        }
-        const parsedMapx = Number(mapx);
-        const parsedMapy = Number(mapy);
-        if (Number.isNaN(parsedMapx) || Number.isNaN(parsedMapy)) {
-            return `https://map.naver.com/v5/directions/${originY},${originX},${encodeURIComponent('현재 위치')}/${mapy},${mapx},${name}`;
-        }
-        const destLng = (parsedMapx / 10000000).toString();
-        const destLat = (parsedMapy / 10000000).toString();
-        const googleOrigin = `${originY},${originX}`;
-        const googleDest = `${destLat},${destLng}`;
-        return `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(googleOrigin)}&destination=${encodeURIComponent(googleDest)}&travelmode=transit`;
-    }
+        switch (matchedCategory) {
+            case '날씨': {
+                const timeWord = userMessage.includes('내일') ? '내일' :
+                    userMessage.includes('모레') ? '모레' :
+                    userMessage.includes('이번주') ? '이번주' : '오늘';
+                return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 자연스럽게 말해요.
 
-    async getRouteInfo(result: SearchResult): Promise<{
-        origin: { lng: string; lat: string };
-        destination: { lng: string; lat: string; name: string };
-        distance: number;
-        durationMs: number;
-        directionUrl?: string;
-        path?: { lng: string; lat: string }[];
-    } | null> {
-        const origin = this.configService.get<string>('NAVER_MAP_ORIGIN') || '';
-        if (!origin) {
-            this.logger.warn('[길찾기] NAVER_MAP_ORIGIN이 설정되지 않았습니다.');
-            return null;
-        }
-        const [originLng, originLat] = origin.split(',').map((v) => v.trim());
-        if (!originLng || !originLat) {
-            this.logger.warn('[길찾기] NAVER_MAP_ORIGIN 형식이 잘못되었습니다.');
-            return null;
-        }
+"${location}" "${timeWord}" 날씨 물어봤어요.
 
-        // mapx, mapy가 있으면 바로 사용 (Geocoding API 불필요)
-        let destLng: string;
-        let destLat: string;
+## 중요! 정보는 반드시 포함
+- 기온(숫자), 날씨 상태, 강수 확률 등 **구체적인 수치는 꼭 말하기**
+- 기호 금지: ° → "도", % → "퍼센트"
 
-        if (result.mapx && result.mapy) {
-            // Naver Local Search에서 받은 좌표 직접 사용
-            // Katech 좌표계 -> WGS84 변환 (Naver Map 좌표는 이미 변환된 상태)
-            destLng = String(Number(result.mapx) / 10000000);
-            destLat = String(Number(result.mapy) / 10000000);
-            this.logger.log(`[길찾기] Local Search 좌표 사용: ${destLng}, ${destLat}`);
-        } else {
-            this.logger.warn('[길찾기] 좌표 정보 없음 - Directions API 호출 불가');
-            // directionUrl만 반환 (거리/시간 없이)
-            return {
-                origin: { lng: originLng, lat: originLat },
-                destination: { lng: '0', lat: '0', name: result.title || '' },
-                distance: 0,
-                durationMs: 0,
-                directionUrl: result.directionUrl,
-            };
-        }
+## 말투
+- 친근하게, 짧게 (1~2문장)
+- "~입니다" ❌ → "~요", "~예요" ✅
 
-        const directionUrl = this.buildDirectionUrlFromCoords(
-            originLat,
-            originLng,
-            destLat,
-            destLng,
-            result.title || result.roadAddress || result.address || '목적지',
-            result.placeId,
-        );
+## 좋은 예시
+- "${location} ${timeWord} 맑고 15도예요, 좀 쌀쌀하니까 겉옷 챙기세요~"
+- "${timeWord} ${location}은 흐리고 8도래요, 비 올 확률 60퍼센트예요"
 
-        try {
-            // Directions API 호출 (API 키가 있을 때만)
-            if (this.naverMapKeyId && this.naverMapKey) {
-                const maskedId = this.naverMapKeyId.slice(-4);
-                this.logger.log(`[길찾기] Using Map Key ID=****${maskedId} keyLen=${this.naverMapKey.length}`);
-                const directionApiUrl = new URL('https://maps.apigw.ntruss.com/map-direction/v1/driving');
-                directionApiUrl.searchParams.set('start', `${originLng},${originLat}`);
-                directionApiUrl.searchParams.set('goal', `${destLng},${destLat}`);
-                directionApiUrl.searchParams.set('option', 'trafast');
+## 나쁜 예시 (정보 누락 ❌)
+- "좀 추워요" ← 몇 도인지 없음!
+- "비 올 것 같아요" ← 확률 없음!
 
-                const dirResp = await fetch(directionApiUrl.toString(), {
-                    headers: {
-                        'X-NCP-APIGW-API-KEY-ID': this.naverMapKeyId,
-                        'X-NCP-APIGW-API-KEY': this.naverMapKey,
-                    },
-                });
+## 검색 결과
+${searchResults.map(r => r.content || r.title).join('\n').slice(0, 500)}`;
+            }
 
-                if (!dirResp.ok) {
-                    const dirText = await dirResp.text();
-                    this.logger.warn(`[길찾기] Directions API 실패: ${dirResp.status} ${dirText}`);
-                    this.logger.warn(`[길찾기] API 키 없이 계속 진행 (directionUrl만 사용)`);
-                } else {
-                    const dirBody = await dirResp.json();
-                    const summary = dirBody?.route?.trafast?.[0]?.summary;
-                    const path = dirBody?.route?.trafast?.[0]?.path;
-                    if (summary) {
-                        this.logger.log(`[길찾기] 성공: ${summary.distance}m, ${summary.duration}ms`);
-                        const parsedPath = Array.isArray(path)
-                            ? path.map((point) => ({
-                                lng: String(point[0]),
-                                lat: String(point[1]),
-                            }))
-                            : undefined;
-                        return {
-                            origin: { lng: originLng, lat: originLat },
-                            destination: { lng: destLng, lat: destLat, name: result.title || '' },
-                            distance: Number(summary.distance || 0),
-                            durationMs: Number(summary.duration || 0),
-                            directionUrl,
-                            path: parsedPath,
-                        };
-                    }
+            case '카페':
+            case '맛집':
+            case '술집':
+            case '분식':
+            case '치킨':
+            case '피자':
+            case '빵집':
+            case '디저트':
+            case '쇼핑': {
+                if (!hasLocation || searchResults.length === 0) {
+                    return this.buildNoResultPrompt(matchedCategory, location);
                 }
-            } else {
-                this.logger.warn('[길찾기] Directions API 키 없음 - 기본 정보만 반환');
+                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
+
+"${location}" 근처 ${matchedCategory} 추천해달래요.
+
+## 중요! 정보는 반드시 포함
+- **가게 이름** 정확히
+- **주소** (도로명 또는 지번)
+- 마지막에 "경로 보내줄게요~" 추가
+
+## 말투
+- 친근하게, 짧게 (1~2문장)
+- "~입니다" ❌ → "~요", "~예요", "~있어요" ✅
+
+## 좋은 예시
+- "아 거기면 스타벅스 강남점 괜찮아요! 테헤란로 152에 있어요. 경로 보내줄게요~"
+- "블루보틀 성수점 추천해요, 서울숲로 14길이에요. 경로 보내줄게요~"
+
+## 나쁜 예시 (정보 누락 ❌)
+- "거기 괜찮아요" ← 이름 없음!
+- "스타벅스 추천해요" ← 어느 지점? 주소는?
+
+## 검색 결과 (첫 번째만 사용)
+${JSON.stringify(searchResults[0])}`;
             }
 
-            // Directions API 실패 또는 키 없음 -> 추정치 반환
-            // 직선 거리 기반 추정 (실제로는 도로 거리가 더 김)
-            const R = 6371000; // 지구 반지름 (m)
-            const lat1 = Number(originLat) * Math.PI / 180;
-            const lat2 = Number(destLat) * Math.PI / 180;
-            const deltaLat = (Number(destLat) - Number(originLat)) * Math.PI / 180;
-            const deltaLng = (Number(destLng) - Number(originLng)) * Math.PI / 180;
+            case '팝업':
+            case '전시': {
+                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
 
-            const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
-                     Math.cos(lat1) * Math.cos(lat2) *
-                     Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            const straightDistance = R * c;
+"${location}" 근처 ${matchedCategory} 정보 물어봤어요.
 
-            // 도로 거리는 직선 거리의 약 1.3배로 추정
-            const estimatedDistance = Math.round(straightDistance * 1.3);
-            // 평균 속도 30km/h로 추정
-            const estimatedDuration = Math.round(estimatedDistance / 30 * 3.6 * 1000);
+## 말투
+- 친근하게, 짧게 (2~3문장)
+- "~입니다" ❌ → "~요", "~해요", "~하고 있어요" ✅
+${hasLocation ? '- 마지막에 "경로 보내줄게요~" 추가' : ''}
 
-            this.logger.log(`[길찾기] 추정: ${estimatedDistance}m, ${estimatedDuration}ms (직선거리 기반)`);
+## 예시
+- "아 [이름] ${matchedCategory} 하고 있어요! [장소]에서요. 경로 보내줄게요~"
+- "[이름] ${matchedCategory} 괜찮대요, [기간]까지래요"
 
-            return {
-                origin: { lng: originLng, lat: originLat },
-                destination: { lng: destLng, lat: destLat, name: result.title || '' },
-                distance: estimatedDistance,
-                durationMs: estimatedDuration,
-                directionUrl,
-                path: undefined,
-            };
-        } catch (error) {
-            this.logger.warn(`[길찾기] 실패: ${error.message}`);
-            return null;
+## 검색 결과
+${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
+            }
+
+            case '영화': {
+                const movieNews = searchResults.filter(r => !r.address && !r.roadAddress);
+                const movieTheaters = searchResults.filter(r => r.address || r.roadAddress);
+                const hasTheater = movieTheaters.length > 0;
+
+                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
+
+영화 관련 정보 물어봤어요.
+
+## 말투
+- 친근하게, 짧게 (2~3문장)
+- 영화 제목만 언급 (줄거리 ❌)
+${hasTheater ? '- 영화관 있으면 "근처 영화관도 알려줄게요~" 추가' : ''}
+
+## 예시
+- "요즘 [영화] 재밌대요! 근처 영화관도 알려줄게요~"
+- "[영화] 개봉했어요, [영화관]에서 하고 있어요"
+
+## 검색 결과 - 영화 뉴스
+${JSON.stringify(movieNews.slice(0, 2), null, 2)}
+
+## 검색 결과 - 근처 영화관
+${JSON.stringify(movieTheaters.slice(0, 1), null, 2)}`;
+            }
+
+            case '뉴스':
+            case '주식':
+            case '스포츠': {
+                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
+
+${matchedCategory} 정보 물어봤어요.
+
+## 중요! 정보는 반드시 포함
+- **구체적인 수치/이름/날짜** 등 핵심 정보 꼭 포함
+- 추상적으로 요약하지 말고 실제 데이터 전달
+
+## 말투
+- 친근하게, 짧게 (2~3문장)
+- "~입니다" ❌ → "~요", "~래요", "~했대요" ✅
+
+## 좋은 예시
+- "삼성전자 오늘 2.3퍼센트 올라서 7만 2천원이래요"
+- "토트넘이 맨시티 2대1로 이겼대요, 손흥민이 1골 넣었어요"
+
+## 나쁜 예시 (정보 누락 ❌)
+- "주가가 올랐대요" ← 얼마나?
+- "경기 이겼대요" ← 스코어는?
+
+## 검색 결과
+${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
+            }
+
+            case '백과': {
+                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 설명해주듯이 말해요.
+
+뭔가에 대해 물어봤어요.
+
+## 중요! 정보는 반드시 포함
+- **핵심 정의/설명** 정확히 전달
+- 어려운 용어는 쉽게 풀어서, 하지만 내용은 생략하지 않기
+
+## 말투
+- 친근하게, 쉽게 (2~3문장)
+- "~입니다" ❌ → "~요", "~예요", "~거예요" ✅
+
+## 좋은 예시
+- "타이레놀은 아세트아미노펜 성분 진통제예요, 두통이나 열 날 때 먹어요"
+- "GDP는 국내총생산이에요, 나라에서 1년간 만든 물건이랑 서비스 총합이요"
+
+## 나쁜 예시 (정보 누락 ❌)
+- "진통제예요" ← 성분은? 용도는?
+- "경제 용어예요" ← 뭔지 설명 안 함
+
+## 검색 결과
+${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
+            }
+
+            default: {
+                if (searchResults.length === 0) {
+                    return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 말해요.
+
+## 말투
+- 친근하게, 짧게 (1~2문장)
+- "뭐 찾아드릴까요?" ❌ → "뭐 찾아볼까요?", "뭐 궁금해요?" ✅
+
+## 예시
+- "네? 뭐 찾아볼까요?"
+- "어 뭐 궁금한 거 있어요?"`;
+                }
+
+                if (hasLocation) {
+                    return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
+
+## 말투  
+- 친근하게, 짧게 (1~2문장)
+- 마지막에 "경로 보내줄게요~" 추가
+
+## 검색 결과
+${JSON.stringify(searchResults[0])}`;
+                }
+
+                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
+
+## 말투
+- 친근하게, 짧게 (1~2문장)
+
+## 검색 결과
+${JSON.stringify(searchResults.slice(0, 2))}`;
+            }
         }
     }
 
-    private buildDirectionUrlFromCoords(
-        originLat: string,
-        originLng: string,
-        destLat: string,
-        destLng: string,
-        name: string,
-        placeId?: string,
-    ): string {
-        const googleOrigin = `${originLat},${originLng}`;
-        const googleDest = `${destLat},${destLng}`;
-        return `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(googleOrigin)}&destination=${encodeURIComponent(googleDest)}&travelmode=transit`;
+    private buildNoResultPrompt(category: string, location: string): string {
+        return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 말해요.
+
+"${location}" 근처 ${category} 찾아봤는데 결과가 없어요.
+
+## 말투
+- 친근하게, 짧게 (1~2문장)
+
+## 예시
+- "음 거기는 ${category} 검색이 잘 안 되네요, 다른 데 찾아볼까요?"
+- "아 ${location} ${category}은 안 나오네요... 다른 지역은요?"`;
     }
 
-    async getStaticMapImage(params: {
-        origin: { lng: string; lat: string };
-        destination: { lng: string; lat: string };
-        width: number;
-        height: number;
-        path?: { lng: string; lat: string }[];
-        distanceMeters?: number;
-    }): Promise<{ buffer: Buffer; contentType: string } | null> {
-        if (!this.naverMapKeyId || !this.naverMapKey) {
-            this.logger.warn('[StaticMap] NAVER_MAP_API_KEY_ID/API_KEY가 없습니다.');
-            return null;
+    // ============================================================
+    // Response Builders
+    // ============================================================
+
+    private buildPlaceRecommendation(result: SearchResult): string {
+        const title = result.title || '그 장소';
+        const address = result.roadAddress || result.address || '';
+        const newsHighlight = (result as any).newsHighlight;
+
+        let response = `아 ${title} 괜찮아요!`;
+        if (newsHighlight) {
+            response += ` ${newsHighlight}까지래요.`;
+        }
+        if (address) {
+            response += ` ${address} 쪽이에요.`;
+        }
+        response += ' 경로 보내줄게요~';
+
+        return response.replace(/\s+/g, ' ').trim();
+    }
+
+    private validateAndBuildNewsResponse(llmResponse: string, results: SearchResult[]): string {
+        const placePatterns = [
+            /을?\s*추천해요\.?/g,
+            /해당\s*지점까지\s*경로를\s*채팅창으로\s*공유드릴게요\.?/g,
+            /경로를\s*공유드릴게요\.?/g,
+            /위치까지\s*경로를.*?공유.*?\.?/g,
+        ];
+
+        let cleaned = llmResponse;
+        for (const pattern of placePatterns) {
+            cleaned = cleaned.replace(pattern, '');
+        }
+        cleaned = cleaned.replace(/\s+/g, ' ').trim();
+
+        if (!cleaned || cleaned.length < 10) {
+            if (results.length > 0) {
+                const firstResult = results[0];
+                return `${firstResult.title}에 대한 소식이에요. ${firstResult.content.slice(0, 80)}`;
+            }
+            return '관련 정보를 찾았어요. 검색 결과를 확인해주세요.';
         }
 
-        const maskedId = this.naverMapKeyId.slice(-4);
-        this.logger.log(`[StaticMap] Using Map Key ID=****${maskedId} keyLen=${this.naverMapKey.length}`);
-
-        const { origin, destination, width, height, path, distanceMeters } = params;
-        const rawPath = Array.isArray(path) && path.length > 1
-            ? path
-            : [origin, destination];
-        const bounds = this.computeBounds(rawPath);
-        const centerLng = (bounds.minLng + bounds.maxLng) / 2;
-        const centerLat = (bounds.minLat + bounds.maxLat) / 2;
-
-        const distance = distanceMeters ?? this.computeDistanceMeters(origin, destination);
-        const level = this.pickStaticMapLevel(distance);
-
-        const url = new URL('https://maps.apigw.ntruss.com/map-static/v2/raster');
-        url.searchParams.set('w', String(width));
-        url.searchParams.set('h', String(height));
-        url.searchParams.set('format', 'png');
-        url.searchParams.set('scale', '2');
-        url.searchParams.set('center', `${centerLng},${centerLat}`);
-        url.searchParams.set('level', String(level));
-        url.searchParams.set('maptype', 'basic');
-
-        url.searchParams.append(
-            'markers',
-            `type:d|size:mid|color:0x1d4ed8|pos:${origin.lng} ${origin.lat}|label:출발`,
-        );
-        url.searchParams.append(
-            'markers',
-            `type:d|size:mid|color:0xf97316|pos:${destination.lng} ${destination.lat}|label:도착`,
-        );
-
-        if (rawPath.length > 1) {
-            const pathParts = rawPath
-                .map((point) => `pos:${point.lng} ${point.lat}`)
-                .join('|');
-            url.searchParams.append(
-                'path',
-                `weight:5|color:0x2563eb|${pathParts}`,
-            );
-        }
-
-        const response = await fetch(url.toString(), {
-            headers: {
-                'X-NCP-APIGW-API-KEY-ID': this.naverMapKeyId,
-                'X-NCP-APIGW-API-KEY': this.naverMapKey,
-            },
-        });
-
-        if (!response.ok) {
-            const text = await response.text();
-            this.logger.warn(`[StaticMap] 실패: ${response.status} ${text}`);
-            return null;
-        }
-
-        const arrayBuffer = await response.arrayBuffer();
-        return {
-            buffer: Buffer.from(arrayBuffer),
-            contentType: response.headers.get('content-type') || 'image/png',
-        };
+        return cleaned;
     }
 
-    private computeBounds(points: { lng: string; lat: string }[]) {
-        let minLng = Number.POSITIVE_INFINITY;
-        let maxLng = Number.NEGATIVE_INFINITY;
-        let minLat = Number.POSITIVE_INFINITY;
-        let maxLat = Number.NEGATIVE_INFINITY;
-        points.forEach((point) => {
-            const lng = Number(point.lng);
-            const lat = Number(point.lat);
-            if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
-            minLng = Math.min(minLng, lng);
-            maxLng = Math.max(maxLng, lng);
-            minLat = Math.min(minLat, lat);
-            maxLat = Math.max(maxLat, lat);
-        });
-        return { minLng, maxLng, minLat, maxLat };
-    }
-
-    private pickStaticMapLevel(distanceMeters: number): number {
-        if (distanceMeters > 15000) return 11;
-        if (distanceMeters > 8000) return 12;
-        if (distanceMeters > 4000) return 13;
-        if (distanceMeters > 2000) return 14;
-        return 15;
-    }
-
-    private computeDistanceMeters(
-        origin: { lng: string; lat: string },
-        destination: { lng: string; lat: string },
-    ): number {
-        const R = 6371000;
-        const lat1 = Number(origin.lat) * Math.PI / 180;
-        const lat2 = Number(destination.lat) * Math.PI / 180;
-        const deltaLat = (Number(destination.lat) - Number(origin.lat)) * Math.PI / 180;
-        const deltaLng = (Number(destination.lng) - Number(origin.lng)) * Math.PI / 180;
-        const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
-            Math.cos(lat1) * Math.cos(lat2) *
-            Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return R * c;
-    }
-
-    private buildSingleRecommendation(result: SearchResult): string {
-        const title = result.title || '해당 장소';
-        const address = result.roadAddress || result.address || result.content || '';
-        const addressText = address ? `${address}에 있어요. ` : '';
-        return `${title}을 추천해요. ${addressText}해당 지점까지 경로를 채팅창으로 공유드릴게요.`.replace(/\s+/g, ' ').trim();
-    }
-
-    private buildSearchQuery(rawQuery: string): { query: string; cacheKey: string; searchType: 'local' | 'news' } {
-        const trimmed = this.normalizeSearchQuery(rawQuery);
-        const searchType = this.pickSearchType(trimmed);
-        if (searchType === 'local') {
-            const query = this.normalizeLocalQuery(rawQuery);
-            const cacheKey = `${trimmed}|${searchType}|${query}`;
-            return { query, cacheKey, searchType };
-        }
-        const query = this.formatNewsQuery(trimmed);
-        const cacheKey = `${trimmed}|${searchType}|${query}`;
-        return { query, cacheKey, searchType };
-    }
-
-    private pickCategoryLabel(query: string, results: SearchResult[]): string | null {
-        const text = `${query} ${results.map((r) => r.title).join(' ')}`.toLowerCase();
-        if (text.includes('카페') || text.includes('커피')) return '카페';
-        if (text.includes('맛집') || text.includes('식당') || text.includes('레스토랑') || text.includes('술집') || text.includes('바') || text.includes('분식') || text.includes('치킨') || text.includes('피자')) return '맛집';
-        if (text.includes('팝업')) return '팝업';
-        if (text.includes('전시') || text.includes('갤러리') || text.includes('미술관')) return '전시';
-        if (text.includes('쇼핑') || text.includes('백화점') || text.includes('매장') || text.includes('가게')) return '쇼핑';
-        return null;
-    }
-
-    private normalizeSearchQuery(rawQuery: string): string {
-        const trimmed = rawQuery.trim();
-        const cleaned = trimmed
-            .replace(/^(와|과|그리고|또|좀|아|어|야)\s+/g, '')
-            .replace(/\b(추천해줘|추천해 줘|알려줘|알려 줘|찾아줘|찾아 줘|보여줘|보여 줘)\b/g, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-        return cleaned || trimmed;
-    }
-
-    private normalizeLocalQuery(rawQuery: string): string {
-        const trimmed = rawQuery.trim();
-        const cleaned = trimmed
-            .replace(/^(와|과|그리고|또|좀|아|어|야)\s+/g, '')
-            .replace(/\b(추천해줘|추천해 줘|알려줘|알려 줘|찾아줘|찾아 줘|보여줘|보여 줘)\b/g, '')
-            .replace(/\b(카페\s*거래|카페거래)\b/g, '카페')
-            .replace(/\b(카페거리|거리)\b/g, '')
-            .replace(/거래(에서|에)?/g, '')
-            .replace(/\b(에서|에는|에서의|에서만|에서도|에|의|으로|로)\b/g, '')
-            .replace(/\b(카페)\s+\1\b/g, '$1')
-            .replace(/\s+/g, ' ')
-            .trim();
-        return cleaned || trimmed;
-    }
-
-    private getCachedSearch(cacheKey: string): SearchResult[] | null {
-        const cached = this.searchCache.get(cacheKey);
-        if (!cached) {
-            return null;
-        }
-        if (Date.now() > cached.expiresAt) {
-            this.searchCache.delete(cacheKey);
-            return null;
-        }
-        return cached.results;
-    }
-
-    private setCachedSearch(cacheKey: string, results: SearchResult[]): void {
-        this.searchCache.set(cacheKey, { expiresAt: Date.now() + this.SEARCH_CACHE_TTL_MS, results });
-    }
+    // ============================================================
+    // Voice Intent Processing
+    // ============================================================
 
     async processVoiceIntent(
         rawTranscript: string,
@@ -1100,45 +661,51 @@ SEARCH RULES:
             normalizedText: string;
             category?: string | null;
             extractedKeyword?: string | null;
-            searchType?: 'local' | 'news' | null;
+            searchType?: SearchType | null;
             needsLlmCorrection: boolean;
         },
     ): Promise<{
         shouldRespond: boolean;
         correctedText: string;
         searchKeyword: string | null;
-        searchType: 'local' | 'news' | null;
+        searchType: SearchType | null;
         category: string | null;
     }> {
-        // 이미 웨이크워드가 확실하면 IntentClassifier 결과 사용
         if (intentAnalysis.isCallIntent && intentAnalysis.confidence >= 0.6) {
-            // 키워드가 없으면 LLM으로 추출
             if (!intentAnalysis.extractedKeyword) {
-                const { query, searchType } = await this.buildSearchPlan(intentAnalysis.normalizedText);
+                const { query, searchType, category } = await this.searchService.buildSearchPlan(intentAnalysis.normalizedText);
+                
+                if (searchType === 'none') {
+                    return {
+                        shouldRespond: true,
+                        correctedText: intentAnalysis.normalizedText,
+                        searchKeyword: null,
+                        searchType: null,
+                        category: null,
+                    };
+                }
+                
                 return {
                     shouldRespond: true,
                     correctedText: intentAnalysis.normalizedText,
                     searchKeyword: query,
-                    searchType,
-                    category: intentAnalysis.category || null,
+                    searchType: searchType,
+                    category: category || null,
                 };
             }
-
             return {
                 shouldRespond: true,
                 correctedText: intentAnalysis.normalizedText,
                 searchKeyword: intentAnalysis.extractedKeyword,
-                searchType: intentAnalysis.searchType || 'news',
+                searchType: intentAnalysis.searchType || 'web',
                 category: intentAnalysis.category || null,
             };
         }
 
-        // LLM 보정 필요한 경우
         if (intentAnalysis.needsLlmCorrection) {
             return this.correctAndExtract(rawTranscript);
         }
 
-        // 웨이크워드 없음
         return {
             shouldRespond: false,
             correctedText: intentAnalysis.normalizedText,
@@ -1152,14 +719,14 @@ SEARCH RULES:
         shouldRespond: boolean;
         correctedText: string;
         searchKeyword: string | null;
-        searchType: 'local' | 'news' | null;
+        searchType: SearchType | null;
         category: string | null;
     }> {
         const prompt = `화상회의 음성인식 결과를 분석하세요.
 
 ## 웨이크워드
-표준: 빅스야, 빅스비, 헤이빅스
-변형: 믹스야, 익수야, 빅세야, 빅쓰, 픽스야, 비수야, 긱스야, 익쇠야, 해빅스, 에이빅스 등
+표준: 아우라야, 헤이아우라, 헤이 아우라
+변형: 아울라야, 아우나야, 오우라야, 아오라야 등
 
 ## 카테고리
 카페, 맛집, 술집, 분식, 치킨, 피자, 빵집, 디저트, 쇼핑, 팝업, 전시, 날씨, 뉴스, 주식, 스포츠, 영화
@@ -1197,17 +764,17 @@ SEARCH RULES:
 
             const result = JSON.parse(jsonMatch[0]);
 
-            this.logger.log(`[LLM 통합] "${rawTranscript.substring(0, 30)}..." → wake=${result.hasWakeWord}, cat=${result.category}, kw="${result.searchKeyword}"`);
+            this.logger.log(`[LLM 교정] "${rawTranscript.substring(0, 30)}..." → wake=${result.hasWakeWord}`);
 
             return {
                 shouldRespond: result.hasWakeWord ?? false,
                 correctedText: result.correctedText ?? rawTranscript,
                 searchKeyword: result.searchKeyword ?? null,
-                searchType: result.searchType === 'local' ? 'local' : (result.searchType === 'news' ? 'news' : null),
+                searchType: ['local', 'news', 'web', 'encyc', 'hybrid', 'none'].includes(result.searchType) ? result.searchType : null,
                 category: result.category ?? null,
             };
         } catch (error) {
-            this.logger.warn(`[LLM 통합 실패] ${error.message}`);
+            this.logger.warn(`[LLM 교정 실패] ${error.message}`);
             return {
                 shouldRespond: false,
                 correctedText: rawTranscript,
@@ -1216,5 +783,13 @@ SEARCH RULES:
                 category: null,
             };
         }
+    }
+
+    // ============================================================
+    // Helpers
+    // ============================================================
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }

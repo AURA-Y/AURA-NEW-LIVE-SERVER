@@ -4,6 +4,9 @@ export interface IntentAnalysis {
     isCallIntent: boolean;
     isQuestionIntent: boolean;
     isBotRelated: boolean;
+    isVisionIntent: boolean;  // 화면 공유 Vision 관련 의도
+    isIdeaBoardIntent: boolean;  // 아이디어 보드 열기 의도
+    isDddBoardIntent: boolean;   // DDD 이벤트 스토밍 보드 열기 의도
     confidence: number;
     matchedPatterns: string[];
     normalizedText: string;
@@ -13,7 +16,7 @@ export interface IntentAnalysis {
     hasRequestPattern: boolean;
     isWeatherIntent: boolean;
     searchDomain?: 'weather' | 'naver' | null;
-    searchType?: 'local' | 'news' | null;
+    searchType?: 'local' | 'news' | 'web' | 'encyc' | 'hybrid' | 'none' | null;
     category?: string | null;
     extractedKeyword?: string | null;
     needsLlmCorrection: boolean;
@@ -24,80 +27,68 @@ export class IntentClassifierService {
     private readonly logger = new Logger(IntentClassifierService.name);
 
     // =====================================================
-    // 웨이크워드 관련
+    // 웨이크워드 관련 (아우라)
     // =====================================================
 
     private readonly WAKE_WORDS_EXACT = [
-        '빅스야', '빅스비', '빅스비야', '헤이 빅스', '헤이빅스',
+        '아우라', '아우라야', '헤이 아우라', '헤이아우라', '페이아우라', '페이 아우라',
     ];
 
     private readonly WAKE_WORDS_VARIANTS = [
-        // ㅂ↔ㅁ↔ㅍ↔ㄱ 혼동
-        '믹스야', '픽스야', '빅사야', '믹사야', '핔스야', '밐스야', '긱스야', '긱쓰야',
-        // ㅅ↔ㅆ↔ㅈ↔ㅊ 혼동
-        '빅쓰야', '빅쓰', '빅쯔야', '빅즈야', '빅츠야', '빅쓰요',
-        // 모음 혼동
-        '빅수야', '비수야', '빅소야', '벅스야', '벅수야', '빅서야', '빅시야',
-        // 받침 탈락/변형
-        '빅세야', '빅세오', '빅세', '빅새야', '빅쎄야', '빅쎄',
-        '익수야', '익사', '익쇠야', '익스야', '이수야', '잌스야', '익수', '익스',
+        // ㅜ↔ㅗ 혼동
+        '아오라', '아오라야', '오우라', '오우라야',
+        // ㅏ↔ㅓ 혼동
+        '어우라', '어우라야', '아어라', '아어라야',
+        // ㄹ↔ㄴ 혼동
+        '아우나', '아우나야', '아우라나',
+        // 받침 추가
+        '아울라', '아울라야', '아운라', '아운라야',
+        // ㄹ↔ㄷ 혼동  
+        '아우다', '아우다야',
         // 띄어쓰기 변형
-        '빅스 야', '빅 스야', '빅스아', '빅스 아', '빅 스 야',
-        // 헤이빅스 변형
-        '헤이 빅쓰', '해이빅스', '해빅스', '헤빅스', '헤이빅쓰',
-        '에이빅스', '에이 빅스', '헤이 빅사', '헤이 믹스', '해이 빅스',
-        '혜이빅스', '혜빅스', '헤이 빅세', '해 빅스', '헤이빅사',
-        // 기타
-        '페이비스', '헤이픽스', '페이빅스', '픽스야', '픽스',
-        '빅스요', '빅스 요', '빅쓰요',
+        '아 우라', '아우 라', '아우라 야', '아 우 라',
+        // 헤이아우라 변형
+        '헤이 아우라야', '해이아우라', '해이 아우라', '해 아우라',
+        '헤이 아오라', '헤이 오우라', '헤이 아울라',
+        '에이아우라', '에이 아우라', '혜이아우라', '혜이 아우라',
+        // 어미 변형
+        '아우라요', '아우라 요', '아우라여',
+        // 기타 발음 변형
+        '아우러', '아우러야', '아우리', '아우리야',
+        '아위라', '아위라야', '아웨라', '아웨라야',
     ];
 
     private readonly WAKE_WORDS = [...this.WAKE_WORDS_EXACT, ...this.WAKE_WORDS_VARIANTS];
-    private readonly WAKE_WORD_MAX_TOKENS = 3;
+    private readonly WAKE_WORD_MAX_TOKENS = 4;
 
     // =====================================================
-    // STT 보정 패턴 (대폭 확장)
+    // STT 보정 패턴 (아우라용)
     // =====================================================
 
     private readonly STT_CORRECTIONS: Array<{ pattern: RegExp; replacement: string; label: string }> = [
         // === 영어 혼입 ===
-        { pattern: /\b(hay|hey|hae|he)\s*(box|bix|bics|bicks|vix)\b/gi, replacement: '헤이 빅스', label: 'en_heybix' },
-        { pattern: /\b(k|ka)\s*(bix|bics)\b/gi, replacement: '헤이 빅스', label: 'en_kabix' },
-        { pattern: /\b(pay|pae|pai)\s*(bix|bics)\b/gi, replacement: '페이비스', label: 'en_paybix' },
-        { pattern: /\bbix\b|\bvix\b|\bbicks\b/gi, replacement: '빅스', label: 'en_bix' },
-        { pattern: /\bmix\s*(ya|ah)?\b/gi, replacement: '빅스야', label: 'en_mix' },
+        { pattern: /\b(hey|hay|hae)\s*(aura|oura|awra)\b/gi, replacement: '헤이 아우라', label: 'en_heyaura' },
+        { pattern: /\baura\b|\boura\b|\bawra\b/gi, replacement: '아우라', label: 'en_aura' },
 
-        // === 헤이빅스 변형 ===
-        { pattern: /^(헤이|해이|해|헤|에이|혜이|혜)\s*(빅스|빅쓰|믹스|빅사|빅세|픽스|빅수|비수)/gi, replacement: '헤이 빅스', label: 'heybix' },
-        { pattern: /헤이\s*빅스비온/gi, replacement: '헤이 빅스 오늘', label: 'heybix_on' },
+        // === 헤이아우라 변형 ===
+        { pattern: /^(헤이|해이|해|헤|에이|혜이|혜)\s*(아우라|아오라|오우라|아울라|어우라)/gi, replacement: '헤이 아우라', label: 'heyaura' },
 
-        // === 초성 혼동 ===
-        { pattern: /^(믹스|픽스|밐스|핔스|긱스|긱쓰)(야|아)?(\s|$)/gi, replacement: '빅스야 ', label: 'cho_mix' },
+        // === 모음 혼동 ===
+        { pattern: /^(아오라|오우라|어우라)(야|아)?(\s|$)/gi, replacement: '아우라야 ', label: 'vowel_aora' },
 
-        // === 중성 혼동 ===
-        { pattern: /^(빅수|비수|빅소|벅스|벅수|빅서|비스|빅시)(야|아)?(\s|$)/gi, replacement: '빅스야 ', label: 'jung_bisu' },
-
-        // === 종성 혼동/탈락 ===
-        { pattern: /^(빅세|빅쎄|빅새|빅쩨)(야|오|아)?(\s|$)/gi, replacement: '빅스야 ', label: 'jong_se' },
-        { pattern: /^(익수|익사|익쇠|익스|이수|잌스)(야|아)?(\s|$)/gi, replacement: '빅스야 ', label: 'jong_ik' },
-        { pattern: /^(빅쓰|빅쯔|빅즈|빅츠)(야|아)?(\s|$)/gi, replacement: '빅스야 ', label: 'jong_ss' },
+        // === 자음 혼동 ===
+        { pattern: /^(아울라|아우나|아운라)(야|아)?(\s|$)/gi, replacement: '아우라야 ', label: 'cons_aula' },
 
         // === 띄어쓰기 ===
-        { pattern: /빅\s+스\s*(야|아)/gi, replacement: '빅스야', label: 'space1' },
-        { pattern: /빅\s*스\s*비\s*(야|아)?/gi, replacement: '빅스비야', label: 'space2' },
+        { pattern: /아\s+우\s*라\s*(야|아)?/gi, replacement: '아우라야', label: 'space_aura' },
+        { pattern: /아우\s+라\s*(야|아)?/gi, replacement: '아우라야', label: 'space_aura2' },
 
-        // === 특수 변형 ===
-        { pattern: /에이\s*빅스(야|아)?/gi, replacement: '빅스야', label: 'ay_bix' },
-        { pattern: /에이\s*비수(야|아)?/gi, replacement: '빅스야', label: 'ay_bisu' },
-        { pattern: /빅스(아|여)(\s|$)/gi, replacement: '빅스야 ', label: 'bixa' },
-        { pattern: /빅스\s*요/gi, replacement: '빅스야', label: 'bixyo' },
-        { pattern: /(페이|패이)\s*(비스|빅스)/gi, replacement: '페이비스', label: 'paybis' },
-        { pattern: /헤이\s*픽스/gi, replacement: '헤이픽스', label: 'heypix' },
-        { pattern: /^픽스(야|아)?(\s|$)/gi, replacement: '빅스야 ', label: 'pix' },
+        // === 어미 변형 ===
+        { pattern: /아우라(아|여)(\s|$)/gi, replacement: '아우라야 ', label: 'auraa' },
+        { pattern: /아우라\s*요/gi, replacement: '아우라야', label: 'aurayo' },
 
         // === 일반 오타 ===
         { pattern: /달씨/gi, replacement: '날씨', label: 'weather' },
-        { pattern: /카페\s*거래/gi, replacement: '카페', label: 'cafe' },
     ];
 
     // =====================================================
@@ -190,7 +181,7 @@ export class IntentClassifierService {
 
     private readonly BOT_REFERENCES = [
         '너', '니가', '당신', '네가', '넌',
-        '빅스', '빅스야', '빅스비', '빅스비야',
+        '아우라', '아우라야',
     ];
 
     private readonly QUESTION_PATTERNS = [
@@ -201,6 +192,77 @@ export class IntentClassifierService {
     private readonly REQUEST_PATTERNS = [
         /해\s?줄래(요)?$/, /해\s?줘(요)?$/, /해\s?주세요$/,
         /줄래(요)?$/, /될까요?$/, /되나요?$/,
+    ];
+
+    // =====================================================
+    // Vision Intent 패턴 (화면 공유 분석)
+    // =====================================================
+
+    private readonly VISION_KEYWORDS: string[] = [
+        // 동작 키워드
+        '봐', '보고', '보면서', '봐줘', '봐봐', '보여',
+        '설명', '해명', '분석', '해석', '읽어', '알려',
+        '뭐야', '뭔지', '뭘지', '뭐냐', '어때', '어떻게',
+        // 대상 키워드
+        '화면', '스크린', '공유', '이거', '이게', '저거', '저게', '여기',
+        '코드', '에러', '오류', '버그', '문제', '이슈',
+    ];
+
+    private readonly VISION_PATTERNS: RegExp[] = [
+        // "화면" + 동사 (유연하게)
+        /화면.{0,10}(봐|보고|보면|설명|해명|분석|해석|읽|알려|뭐)/,
+        /화면\s*을?\s*(봐|보고|보면서|설명|해명|분석)/,
+
+        // "이거/이게/저거" + 동사 패턴
+        /이거\s*.{0,5}(봐|보|설명|해명|분석|뭐야|뭐냐|뭘지|어때|봐줘|알려)/,
+        /이게\s*(뭐야|뭘지|뭐냐|뭔지|어때)/,
+        /저거\s*.{0,5}(뭐|어떻|설명|보|분석)/,
+        /저게\s*(뭐야|뭘지|뭔지)/,
+
+        // "여기" 패턴
+        /여기\s*.{0,5}(보|봐|설명|뭐|분석)/,
+        /여기서.*?(어떻|뭐|설명|분석)/,
+
+        // "지금 보이는/보는" 패턴
+        /지금\s*(보이|보는|보여).{0,10}(설명|분석|뭐|알려)/,
+        /(보이|보여)\s*주.{0,5}(는|고\s*있).{0,10}(설명|분석|뭐)/,
+
+        // 설명/분석 요청
+        /(설명|분석|해석|해명).{0,5}해\s*(줘|줄래|주세요|봐)/,
+
+        // 코드/에러 관련
+        /이?\s*(코드|함수|변수|클래스|메서드).{0,5}(는|이|가)?\s*(뭐|어떻|설명|분석)/,
+        /이?\s*(에러|오류|버그|문제|이슈).{0,10}(봐|분석|설명|해결|뭐)/,
+        /이?\s*(그래프|차트|표|데이터).{0,5}(는|을)?\s*(뭐|어떻|해석|분석|설명)/,
+        /이?\s*(문서|문단|부분|내용).{0,5}(는|을)?\s*(뭐|어떻|요약|설명)/,
+
+        // "~보고 ~해줘" 패턴
+        /.{0,5}보고.{0,10}(설명|해명|분석|알려|말해).{0,3}(줘|줄래|주세요)?/,
+
+        // 스크린/공유 관련
+        /(스크린|공유).{0,10}(봐|보고|설명|분석)/,
+    ];
+
+    // =====================================================
+    // 아이디어 보드 열기 패턴
+    // =====================================================
+    private readonly IDEA_BOARD_PATTERNS: RegExp[] = [
+        /아이디어\s*(모드|보드)?\s*(열어|시작|켜|오픈|해|해줘|하자)/,
+        /아이디어\s*(회의|브레인스토밍)?\s*(시작|해|하자|할까)/,
+        /브레인\s*스토밍\s*(시작|열어|하자|해)/,
+        /아이디어\s*(정리|모으|수집).{0,5}(시작|하자|해)/,
+        /(아이디어|브레인스토밍)\s*(좀)?\s*(해볼까|할까|하자)/,
+    ];
+
+    // =====================================================
+    // DDD 이벤트 스토밍 보드 열기 패턴
+    // =====================================================
+    private readonly DDD_BOARD_PATTERNS: RegExp[] = [
+        /(ddd|디디디)\s*(모드|보드)?\s*(열어|시작|켜|오픈|해|해줘|하자)/i,
+        /이벤트\s*스토밍\s*(열어|시작|켜|오픈|해|해줘|하자)/,
+        /도메인\s*(분석|설계|모델링)?\s*(시작|하자|해)/,
+        /(이벤트|도메인)\s*(분석|정리)?\s*(시작|하자|해)/,
+        /디디디\s*(해볼까|할까|하자|시작)/,
     ];
 
     // =====================================================
@@ -228,8 +290,10 @@ export class IntentClassifierService {
     }
 
     private readonly SIMILAR_JAMO: Record<string, string[]> = {
-        'ㅂ': ['ㅁ', 'ㅍ', 'ㅃ'],
+        'ㄹ': ['ㄴ', 'ㄷ'],
+        'ㄴ': ['ㄹ', 'ㅁ'],
         'ㅁ': ['ㅂ', 'ㄴ'],
+        'ㅂ': ['ㅁ', 'ㅍ', 'ㅃ'],
         'ㄱ': ['ㅋ', 'ㄲ'],
         'ㅅ': ['ㅆ', 'ㅈ', 'ㅊ'],
         'ㅈ': ['ㅅ', 'ㅆ', 'ㅊ', 'ㅉ'],
@@ -270,8 +334,8 @@ export class IntentClassifierService {
 
     private fuzzyMatchWakeWord(text: string): { matched: boolean; word: string; similarity: number } {
         const tokens = text.toLowerCase().split(/\s+/).slice(0, 4);
-        const targets = ['빅스야', '빅스비', '헤이빅스'];
-        const threshold = 0.6;
+        const targets = ['아우라', '아우라야', '헤이아우라'];
+        const threshold = 0.65;
 
         for (const token of tokens) {
             if (token.length < 2) continue;
@@ -283,13 +347,13 @@ export class IntentClassifierService {
                 }
             }
 
-            // "헤이 빅스" 분리된 경우
+            // "헤이 아우라" 분리된 경우
             if (['헤이', '해이', '에이', '혜이', '해', '헤'].includes(token)) {
                 const nextIdx = tokens.indexOf(token) + 1;
                 if (nextIdx < tokens.length) {
-                    const nextSim = this.jamoSimilarity(tokens[nextIdx], '빅스');
+                    const nextSim = this.jamoSimilarity(tokens[nextIdx], '아우라');
                     if (nextSim >= 0.5) {
-                        return { matched: true, word: '헤이 빅스', similarity: nextSim };
+                        return { matched: true, word: '헤이 아우라', similarity: nextSim };
                     }
                 }
             }
@@ -302,19 +366,18 @@ export class IntentClassifierService {
         const first40 = text.slice(0, 40).toLowerCase();
 
         const patterns = [
-            /[빅믹픽긱비벅익밐핔잌][스쓰수세사쇠즈츠서소시]/,
+            /아[우오어][라나다]/,
             /헤이|해이|에이|혜이|해\s|헤\s/,
-            /페이비|픽스|bix|vix|mix/i,
+            /aura|oura|awra/i,
         ];
 
         return patterns.some(p => p.test(first40));
     }
 
     private readonly WAKE_WORD_PATTERNS: RegExp[] = [
-        /^[빅믹픽긱비벅밐핔][스쓰수세사쇠즈츠서소시][야아요]?/,
-        /^[익이잌][스쓰수쇠사][야아]?/,
-        /^헤이?\s*[빅믹픽][스쓰세사수]/,
-        /^[해헤에혜][이]?\s*[빅믹]/,
+        /^아[우오어][라나다][야아요]?/,
+        /^헤이?\s*아[우오][라나]/,
+        /^[해헤에혜][이]?\s*아[우오]/,
     ];
 
     private regexMatchWakeWord(text: string): boolean {
@@ -497,6 +560,33 @@ export class IntentClassifierService {
         // 12. 날씨 체크 (카테고리로 대체)
         const isWeatherIntent = category === '날씨';
 
+        // 13. Vision Intent 체크 (화면 공유 분석)
+        const isVisionIntent = this.VISION_PATTERNS.some(pattern => {
+            if (pattern.test(lowerNormalized)) {
+                matchedPatterns.push(`Vision: ${pattern.source.substring(0, 20)}...`);
+                return true;
+            }
+            return false;
+        });
+
+        // 14. 아이디어 보드 열기 Intent 체크
+        const isIdeaBoardIntent = this.IDEA_BOARD_PATTERNS.some(pattern => {
+            if (pattern.test(lowerNormalized)) {
+                matchedPatterns.push(`IdeaBoard: ${pattern.source.substring(0, 20)}...`);
+                return true;
+            }
+            return false;
+        });
+
+        // 15. DDD 보드 열기 Intent 체크
+        const isDddBoardIntent = this.DDD_BOARD_PATTERNS.some(pattern => {
+            if (pattern.test(lowerNormalized)) {
+                matchedPatterns.push(`DddBoard: ${pattern.source.substring(0, 20)}...`);
+                return true;
+            }
+            return false;
+        });
+
         // 질문 의도 판단
         const isQuestionIntent = hasQuestionWord || hasCommandWord || hasQuestionPattern || hasRequestPattern;
 
@@ -518,6 +608,9 @@ export class IntentClassifierService {
             isCallIntent,
             isQuestionIntent,
             isBotRelated,
+            isVisionIntent,
+            isIdeaBoardIntent,
+            isDddBoardIntent,
             confidence,
             matchedPatterns,
             normalizedText,
@@ -533,7 +626,7 @@ export class IntentClassifierService {
             needsLlmCorrection,
         };
 
-        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
+        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, idea=${isIdeaBoardIntent}, ddd=${isDddBoardIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
 
         return result;
     }

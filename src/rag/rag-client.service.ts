@@ -13,6 +13,7 @@ interface ConnectionContext {
     ws: WebSocket;
     pendingRequests: Map<string, PendingRequest>;
     reconnectTimer: NodeJS.Timeout | null;
+    reconnectAttempts: number;
 }
 
 @Injectable()
@@ -23,7 +24,8 @@ export class RagClientService implements OnModuleDestroy {
     private connections: Map<string, ConnectionContext> = new Map();
 
     private readonly REQUEST_TIMEOUT = 30000; // 30초
-    private readonly RECONNECT_DELAY = 3000; // 3초
+    private readonly RECONNECT_DELAY = 10000; // 10초 (3초→10초로 증가)
+    private readonly MAX_RECONNECT_ATTEMPTS = 3; // 최대 3회 재시도
 
     constructor(private configService: ConfigService) { }
 
@@ -66,8 +68,12 @@ export class RagClientService implements OnModuleDestroy {
                         ws,
                         pendingRequests: new Map(),
                         reconnectTimer: null,
+                        reconnectAttempts: 0,
                     };
                     this.connections.set(roomId, context);
+
+                    // 연결 성공 시 재시도 횟수 초기화
+                    this.reconnectAttemptCounts.delete(roomId);
 
                     this.logger.log(`[RAG 연결 성공] ${roomId}`);
                     this.logger.log(`현재 활성 연결 수: ${this.connections.size}`);
@@ -149,30 +155,44 @@ export class RagClientService implements OnModuleDestroy {
         }
     }
 
+    // 재연결 시도 횟수 추적 (context 없어도 유지)
+    private reconnectAttemptCounts: Map<string, number> = new Map();
+    private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
+
     /**
      * 재연결 스케줄링 (특정 roomId용)
      */
     private scheduleReconnect(roomId: string) {
-        const context = this.connections.get(roomId);
-        if (context?.reconnectTimer) {
-            return; // 이미 재연결 대기 중
+        // 이미 재연결 대기 중이면 스킵
+        if (this.reconnectTimers.has(roomId)) {
+            return;
         }
 
-        this.logger.log(`[RAG 재연결] ${roomId} - ${this.RECONNECT_DELAY / 1000}초 후 재시도...`);
+        // 현재 재시도 횟수 가져오기
+        const currentAttempts = this.reconnectAttemptCounts.get(roomId) || 0;
+
+        // 최대 재시도 횟수 초과 시 포기
+        if (currentAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+            this.logger.warn(`[RAG 재연결 포기] ${roomId} - 최대 재시도 횟수(${this.MAX_RECONNECT_ATTEMPTS}회) 초과, 연결 정보 삭제`);
+            this.connections.delete(roomId);
+            this.reconnectAttemptCounts.delete(roomId);
+            return;
+        }
+
+        // 재시도 횟수 증가
+        const newAttempts = currentAttempts + 1;
+        this.reconnectAttemptCounts.set(roomId, newAttempts);
+
+        this.logger.log(`[RAG 재연결] ${roomId} - ${this.RECONNECT_DELAY / 1000}초 후 재시도... (${newAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`);
 
         const timer = setTimeout(() => {
-            const ctx = this.connections.get(roomId);
-            if (ctx) {
-                ctx.reconnectTimer = null;
-            }
+            this.reconnectTimers.delete(roomId);
             this.connect(roomId).catch(err => {
                 this.logger.error(`[RAG 재연결 실패] ${roomId}: ${err.message}`);
             });
         }, this.RECONNECT_DELAY);
 
-        if (context) {
-            context.reconnectTimer = timer;
-        }
+        this.reconnectTimers.set(roomId, timer);
     }
 
     /**
@@ -246,15 +266,20 @@ export class RagClientService implements OnModuleDestroy {
      * 연결 해제 (특정 roomId)
      */
     async disconnect(roomId: string): Promise<void> {
-        const context = this.connections.get(roomId);
-        if (!context) {
-            this.logger.warn(`[RAG 연결 해제 스킵] 연결 없음: ${roomId}`);
-            return;
+        // 재연결 타이머 취소
+        const reconnectTimer = this.reconnectTimers.get(roomId);
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            this.reconnectTimers.delete(roomId);
         }
 
-        // 재연결 타이머 취소
-        if (context.reconnectTimer) {
-            clearTimeout(context.reconnectTimer);
+        // 재연결 카운터 정리
+        this.reconnectAttemptCounts.delete(roomId);
+
+        const context = this.connections.get(roomId);
+        if (!context) {
+            this.logger.log(`[RAG 연결 해제] ${roomId} - 재연결 대기 취소됨`);
+            return;
         }
 
         // 대기 중인 모든 요청 거부
@@ -276,8 +301,16 @@ export class RagClientService implements OnModuleDestroy {
      * 모듈 종료 시 모든 연결 정리
      */
     async onModuleDestroy() {
-        this.logger.log(`[RAG 모듈 종료] 모든 연결 해제 중... (${this.connections.size}개)`);
+        this.logger.log(`[RAG 모듈 종료] 모든 연결 해제 중... (연결: ${this.connections.size}개, 재연결 대기: ${this.reconnectTimers.size}개)`);
 
+        // 모든 재연결 타이머 취소
+        for (const timer of this.reconnectTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.reconnectTimers.clear();
+        this.reconnectAttemptCounts.clear();
+
+        // 모든 연결 해제
         const disconnectPromises = Array.from(this.connections.keys()).map(roomId =>
             this.disconnect(roomId)
         );
