@@ -5,6 +5,8 @@ export interface IntentAnalysis {
     isQuestionIntent: boolean;
     isBotRelated: boolean;
     isVisionIntent: boolean;  // 화면 공유 Vision 관련 의도
+    isIdeaBoardIntent: boolean;  // 아이디어 보드 열기 의도
+    isDddBoardIntent: boolean;   // DDD 이벤트 스토밍 보드 열기 의도
     confidence: number;
     matchedPatterns: string[];
     normalizedText: string;
@@ -239,6 +241,28 @@ export class IntentClassifierService {
 
         // 스크린/공유 관련
         /(스크린|공유).{0,10}(봐|보고|설명|분석)/,
+    ];
+
+    // =====================================================
+    // 아이디어 보드 열기 패턴
+    // =====================================================
+    private readonly IDEA_BOARD_PATTERNS: RegExp[] = [
+        /아이디어\s*(모드|보드)?\s*(열어|시작|켜|오픈|해|해줘|하자)/,
+        /아이디어\s*(회의|브레인스토밍)?\s*(시작|해|하자|할까)/,
+        /브레인\s*스토밍\s*(시작|열어|하자|해)/,
+        /아이디어\s*(정리|모으|수집).{0,5}(시작|하자|해)/,
+        /(아이디어|브레인스토밍)\s*(좀)?\s*(해볼까|할까|하자)/,
+    ];
+
+    // =====================================================
+    // DDD 이벤트 스토밍 보드 열기 패턴
+    // =====================================================
+    private readonly DDD_BOARD_PATTERNS: RegExp[] = [
+        /(ddd|디디디)\s*(모드|보드)?\s*(열어|시작|켜|오픈|해|해줘|하자)/i,
+        /이벤트\s*스토밍\s*(열어|시작|켜|오픈|해|해줘|하자)/,
+        /도메인\s*(분석|설계|모델링)?\s*(시작|하자|해)/,
+        /(이벤트|도메인)\s*(분석|정리)?\s*(시작|하자|해)/,
+        /디디디\s*(해볼까|할까|하자|시작)/,
     ];
 
     // =====================================================
@@ -545,6 +569,24 @@ export class IntentClassifierService {
             return false;
         });
 
+        // 14. 아이디어 보드 열기 Intent 체크
+        const isIdeaBoardIntent = this.IDEA_BOARD_PATTERNS.some(pattern => {
+            if (pattern.test(lowerNormalized)) {
+                matchedPatterns.push(`IdeaBoard: ${pattern.source.substring(0, 20)}...`);
+                return true;
+            }
+            return false;
+        });
+
+        // 15. DDD 보드 열기 Intent 체크
+        const isDddBoardIntent = this.DDD_BOARD_PATTERNS.some(pattern => {
+            if (pattern.test(lowerNormalized)) {
+                matchedPatterns.push(`DddBoard: ${pattern.source.substring(0, 20)}...`);
+                return true;
+            }
+            return false;
+        });
+
         // 질문 의도 판단
         const isQuestionIntent = hasQuestionWord || hasCommandWord || hasQuestionPattern || hasRequestPattern;
 
@@ -567,6 +609,8 @@ export class IntentClassifierService {
             isQuestionIntent,
             isBotRelated,
             isVisionIntent,
+            isIdeaBoardIntent,
+            isDddBoardIntent,
             confidence,
             matchedPatterns,
             normalizedText,
@@ -582,7 +626,7 @@ export class IntentClassifierService {
             needsLlmCorrection,
         };
 
-        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
+        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, idea=${isIdeaBoardIntent}, ddd=${isDddBoardIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
 
         return result;
     }
