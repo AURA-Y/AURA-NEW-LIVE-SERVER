@@ -101,3 +101,28 @@ Room 목록 조회
   "rooms": [...]
 }
 ```
+
+### POST /room/voice-bot/:roomName/vision-capture
+화면 공유 캡처 수신 (Vision 분석용)
+
+**Request:**
+```json
+{
+  "requestId": 1767627475194,
+  "imageBase64": "data:image/jpeg;base64,...",
+  "cursorPosition": { "x": 960, "y": 540 },
+  "screenWidth": 1920,
+  "screenHeight": 1080
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Vision 캡처 처리 시작"
+}
+```
+
+> **Note:** 이 엔드포인트는 DataChannel 64KB 제한을 우회하기 위해 HTTP POST를 사용합니다.
+> 캡처 요청은 여전히 DataChannel로 전송되고, 응답(이미지)만 HTTP로 전송됩니다.

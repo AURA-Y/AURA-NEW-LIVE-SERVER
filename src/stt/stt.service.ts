@@ -3,9 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import * as speechsdk from 'microsoft-cognitiveservices-speech-sdk';
 import { Readable } from 'stream';
-import * as grpc from '@grpc/grpc-js';
-import * as protoLoader from '@grpc/proto-loader';
-import path from 'path';
 import {
     BedrockRuntimeClient,
     InvokeModelCommand,
@@ -17,27 +14,123 @@ export class SttService {
     private deepgramClient: any;
     private azureSpeechConfig: speechsdk.SpeechConfig | null = null;
     private readonly provider: string;
-    private readonly clovaSpeechEndpoint: string;
-    private readonly clovaSpeechSecret: string;
-    private readonly clovaSpeechLang: string;
-    private clovaClient: any;
 
     // LLM 교정용
     private bedrockClient: BedrockRuntimeClient;
-    private readonly llmModelId = 'anthropic.claude-3-haiku-20240307-v1:0';
+    private readonly llmModelId = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
+
+    // =====================================================
+    // 키워드 힌트 (STT 인식률 향상용)
+    // =====================================================
+    
+    // 웨이크워드 힌트 (아우라)
+    private readonly WAKE_WORD_HINTS = [
+        '아우라', '아우라야', '헤이 아우라', '헤이아우라',
+        '아우라 야', '아우라요', '아 우라',
+    ];
+
+    // 지역명 힌트
+    private readonly LOCATION_HINTS = [
+        '서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종',
+        '강남', '홍대', '신촌', '잠실', '여의도', '판교', '성수', '이태원',
+        '명동', '종로', '압구정', '청담', '삼성', '역삼', '선릉', '건대',
+        '합정', '망원', '연남', '을지로', '성북', '혜화', '대학로',
+        '분당', '일산', '수원', '용인', '화성', '평택', '안양', '부천',
+        '강서', '마포', '서초', '송파', '영등포', '용산', '동대문', '중구',
+    ];
+
+    // 카테고리 키워드 힌트
+    private readonly CATEGORY_HINTS = [
+        // 카페
+        '카페', '커피', '커피숍', '스타벅스', '투썸', '이디야', '블루보틀', '카공',
+        // 맛집
+        '맛집', '식당', '레스토랑', '밥집', '음식점', '저녁', '점심', '브런치',
+        // 술집
+        '술집', '바', '포차', '호프', '이자카야', '와인바', '회식',
+        // 분식/치킨/피자
+        '분식', '떡볶이', '김밥', '라면', '치킨', '피자',
+        // 빵/디저트
+        '빵집', '베이커리', '디저트', '케이크', '마카롱', '아이스크림',
+        // 팝업/전시
+        '팝업', '팝업스토어', '전시', '전시회', '갤러리',
+        // 날씨
+        '날씨', '기온', '온도', '미세먼지', '우산',
+        // 기타
+        '추천', '알려줘', '찾아줘', '검색',
+    ];
+
+    // 모든 힌트 합치기
+    private readonly ALL_HINTS = [
+        ...this.WAKE_WORD_HINTS,
+        ...this.LOCATION_HINTS,
+        ...this.CATEGORY_HINTS,
+    ];
+
+    // 발음 유사 단어 매핑 (STT 오인식 교정용)
+    private readonly PHONETIC_CORRECTIONS: Record<string, string> = {
+        // 지역명 오인식
+        '성숙': '성수',
+        '성수기': '성수',
+        '성숙하게': '성수 카페',
+        '성숙해': '성수',
+        '강남역': '강남',
+        '홍대입구': '홍대',
+        '신촌역': '신촌',
+        '합정역': '합정',
+        '건대입구': '건대',
+        '선릉역': '선릉',
+        '역삼역': '역삼',
+        '삼성역': '삼성',
+        '잠실역': '잠실',
+        '여의도역': '여의도',
+        '판교역': '판교',
+        
+        // 카테고리 오인식
+        '카패': '카페',
+        '커피숍': '카페',
+        '캬페': '카페',
+        '맛있집': '맛집',
+        '마집': '맛집',
+        '술 집': '술집',
+        '분 식': '분식',
+        '떡복이': '떡볶이',
+        '팝 업': '팝업',
+        '전 시': '전시',
+        '날 씨': '날씨',
+        
+        // 웨이크워드 오인식 (아우라)
+        '아 우라': '아우라',
+        '아우 라': '아우라',
+        '아우라 야': '아우라야',
+        '아울라': '아우라',
+        '아울라야': '아우라야',
+        '아우나': '아우라',
+        '아우나야': '아우라야',
+        '아우러': '아우라',
+        '아우러야': '아우라야',
+        '아오라': '아우라',
+        '아오라야': '아우라야',
+        '오우라': '아우라',
+        '오우라야': '아우라야',
+        '어우라': '아우라',
+        '어우라야': '아우라야',
+        '헤이 아울라': '헤이 아우라',
+        '헤이 아우나': '헤이 아우라',
+        '헤이 오우라': '헤이 아우라',
+        '해이아우라': '헤이 아우라',
+        '에이아우라': '헤이 아우라',
+    };
 
     constructor(private configService: ConfigService) {
-        this.provider = (this.configService.get<string>('STT_PROVIDER') || 'clova').toLowerCase();
-        this.clovaSpeechEndpoint = this.configService.get<string>('CLOVA_SPEECH_GRPC_ENDPOINT') || 'clovaspeech-gw.ncloud.com:50051';
-        this.clovaSpeechSecret = this.configService.get<string>('CLOVA_SPEECH_SECRET') || '';
-        this.clovaSpeechLang = this.configService.get<string>('CLOVA_SPEECH_LANG') || 'ko';
+        const requestedProvider = (this.configService.get<string>('STT_PROVIDER') || 'deepgram').toLowerCase();
+        this.provider = requestedProvider === 'azure' || requestedProvider === 'deepgram'
+            ? requestedProvider
+            : 'deepgram';
+        if (this.provider !== requestedProvider) {
+            this.logger.warn(`[STT] Unsupported provider "${requestedProvider}", defaulting to "${this.provider}"`);
+        }
 
-        if (this.provider === 'clova') {
-            if (!this.clovaSpeechSecret) {
-                this.logger.error('[Clova STT] CLOVA_SPEECH_SECRET이 설정되지 않았습니다!');
-            }
-            this.initClovaClient();
-        } else if (this.provider === 'azure') {
+        if (this.provider === 'azure') {
             const azureKey = this.configService.get<string>('AZURE_SPEECH_KEY');
             const azureRegion = this.configService.get<string>('AZURE_SPEECH_REGION') || 'koreacentral';
             if (!azureKey) {
@@ -45,6 +138,9 @@ export class SttService {
             } else {
                 this.azureSpeechConfig = speechsdk.SpeechConfig.fromSubscription(azureKey, azureRegion);
                 this.azureSpeechConfig.speechRecognitionLanguage = 'ko-KR';
+                
+                // Azure 구문 목록에 힌트 추가
+                // Note: Azure에서는 PhraseListGrammar로 런타임에 추가
             }
         } else {
             const apiKey = this.configService.get<string>('DEEPGRAM_API_KEY');
@@ -55,133 +151,212 @@ export class SttService {
         }
 
         // Bedrock 클라이언트 초기화
+        const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
+        const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
+        const region = this.configService.get<string>('AWS_REGION') || 'ap-northeast-2';
+        if (accessKeyId && secretAccessKey) {
+            const maskedKey = accessKeyId.slice(-4);
+            this.logger.log(`[AWS] STT Bedrock static credentials (****${maskedKey})`);
+        } else {
+            this.logger.warn('[AWS] STT Bedrock static credentials missing; using default credential chain');
+        }
         this.bedrockClient = new BedrockRuntimeClient({
-            region: this.configService.get<string>('AWS_REGION') || 'ap-northeast-2',
-            credentials: {
-                accessKeyId: this.configService.get<string>('AWS_ACCESS_KEY_ID') || '',
-                secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY') || '',
-            },
+            region,
+            ...(accessKeyId && secretAccessKey
+                ? {
+                      credentials: {
+                          accessKeyId,
+                          secretAccessKey,
+                      },
+                  }
+                : {}),
         });
+
+        this.logger.log(`[STT] Provider: ${this.provider}, Hints: ${this.ALL_HINTS.length}개`);
     }
 
     // =====================================================
-    // LLM 교정 메서드
+    // 공개 API (교정 포함)
     // =====================================================
 
-    async correctWithLlm(rawTranscript: string): Promise<{
-        hasWakeWord: boolean;
-        correctedText: string;
-        searchKeyword: string | null;
-        searchType: 'local' | 'news' | null;
-        category: string | null;
-        confidence: number;
-    }> {
-        if (!rawTranscript || rawTranscript.trim().length < 3) {
-            return {
-                hasWakeWord: false,
-                correctedText: rawTranscript,
-                searchKeyword: null,
-                searchType: null,
-                category: null,
-                confidence: 0,
-            };
-        }
-
-        const prompt = `음성인식 결과를 분석하세요.
-
-## 웨이크워드 (봇 호출)
-표준: 빅스야, 빅스비, 헤이빅스
-변형: 믹스야, 익수야, 빅세야, 빅쓰, 픽스야, 비수야, 긱스야, 익쇠야, 해빅스, 에이빅스 등
-
-## 카테고리
-- 카페: 카페, 커피, 커피숍
-- 맛집: 맛집, 식당, 레스토랑, 밥집
-- 술집: 술집, 바, 포차, 호프
-- 분식: 분식, 떡볶이, 김밥
-- 치킨: 치킨
-- 피자: 피자
-- 빵집: 빵집, 베이커리
-- 디저트: 디저트, 케이크, 마카롱
-- 쇼핑: 쇼핑, 백화점, 마트
-- 팝업: 팝업, 팝업스토어
-- 전시: 전시, 갤러리, 미술관
-- 날씨: 날씨, 기온, 비, 눈
-- 뉴스: 뉴스, 소식, 기사
-- 주식: 주식, 주가, 증시
-- 스포츠: 스포츠, 축구, 야구
-- 영화: 영화, 개봉
-
-## 검색타입
-- local: 장소/맛집/카페/가게
-- news: 뉴스/날씨/정보/주식
-
-## 작업
-1. 웨이크워드 감지: 있으면 표준형으로 교정
-2. 카테고리 분류
-3. 검색 키워드 추출 (명사만, 간결하게)
-
-## 입력
-"${rawTranscript}"
-
-## 출력 (JSON만)
-{"hasWakeWord":true,"correctedText":"빅스야 성수동 카페 추천해줘","searchKeyword":"성수동 카페","searchType":"local","category":"카페","confidence":0.95}`;
-
-        try {
-            const payload = {
-                anthropic_version: "bedrock-2023-05-31",
-                max_tokens: 200,
-                messages: [{ role: "user", content: prompt }],
-            };
-
-            const command = new InvokeModelCommand({
-                modelId: this.llmModelId,
-                contentType: 'application/json',
-                accept: 'application/json',
-                body: JSON.stringify(payload),
-            });
-
-            const response = await this.bedrockClient.send(command);
-            const body = JSON.parse(new TextDecoder().decode(response.body));
-            const text = body.content?.[0]?.text || '{}';
-
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                throw new Error('JSON not found');
-            }
-
-            const result = JSON.parse(jsonMatch[0]);
-
-            this.logger.log(`[LLM 교정] "${rawTranscript}" → wake=${result.hasWakeWord}, cat=${result.category}, keyword="${result.searchKeyword}"`);
-
-            return {
-                hasWakeWord: result.hasWakeWord ?? false,
-                correctedText: result.correctedText ?? rawTranscript,
-                searchKeyword: result.searchKeyword ?? null,
-                searchType: result.searchType === 'local' ? 'local' : (result.searchType === 'news' ? 'news' : null),
-                category: result.category ?? null,
-                confidence: result.confidence ?? 0,
-            };
-        } catch (error) {
-            this.logger.warn(`[LLM 교정 실패] ${error.message}`);
-            return {
-                hasWakeWord: false,
-                correctedText: rawTranscript,
-                searchKeyword: null,
-                searchType: null,
-                category: null,
-                confidence: 0,
-            };
-        }
-    }
-
-    // =====================================================
-    // 기존 STT 메서드들
-    // =====================================================
-
+    /**
+     * 버퍼에서 음성 인식 + 후처리 교정
+     */
     async transcribeFromBuffer(audioBuffer: Buffer, fileName: string): Promise<string> {
-        if (this.provider === 'clova') {
-            return this.transcribeFromBufferClova(audioBuffer, fileName);
+        const rawTranscript = await this.rawTranscribeFromBuffer(audioBuffer, fileName);
+        return this.postProcess(rawTranscript);
+    }
+
+    /**
+     * 스트림에서 음성 인식 + 후처리 교정
+     */
+    async transcribeStream(audioStream: Readable): Promise<string> {
+        const rawTranscript = await this.rawTranscribeStream(audioStream);
+        return this.postProcess(rawTranscript);
+    }
+
+    /**
+     * 버퍼 스트림에서 음성 인식 + 후처리 교정
+     */
+    async transcribeFromBufferStream(audioBuffer: Buffer, fileName: string): Promise<string> {
+        const rawTranscript = await this.rawTranscribeFromBufferStream(audioBuffer, fileName);
+        return this.postProcess(rawTranscript);
+    }
+
+    // =====================================================
+    // 후처리 (발음 교정 + LLM 교정)
+    // =====================================================
+
+    /**
+     * STT 결과 후처리
+     * 1. 발음 유사 단어 교정 (빠름)
+     * 2. LLM 문맥 교정 (정확)
+     */
+    private async postProcess(rawTranscript: string): Promise<string> {
+        if (!rawTranscript || rawTranscript.trim().length === 0) {
+            return rawTranscript;
         }
+
+        // 1단계: 빠른 발음 교정
+        let corrected = this.applyPhoneticCorrections(rawTranscript);
+        
+        // 2단계: 웨이크워드가 있거나 의미가 불분명한 경우 LLM 교정
+        const needsLlmCorrection = this.shouldUseLlmCorrection(corrected);
+        
+        if (needsLlmCorrection) {
+            try {
+                const llmCorrected = await this.correctWithLlm(corrected);
+                if (llmCorrected && llmCorrected.length > 0) {
+                    this.logger.log(`[STT 교정] "${rawTranscript}" → "${llmCorrected}"`);
+                    return llmCorrected;
+                }
+            } catch (error) {
+                this.logger.warn(`[LLM 교정 실패] ${error.message}`);
+            }
+        }
+
+        if (corrected !== rawTranscript) {
+            this.logger.log(`[발음 교정] "${rawTranscript}" → "${corrected}"`);
+        }
+
+        return corrected;
+    }
+
+    /**
+     * 발음 유사 단어 교정 (빠른 룰 기반)
+     */
+    private applyPhoneticCorrections(text: string): string {
+        let result = text;
+
+        // 정확히 매칭되는 단어 교정
+        for (const [wrong, correct] of Object.entries(this.PHONETIC_CORRECTIONS)) {
+            const regex = new RegExp(wrong, 'gi');
+            result = result.replace(regex, correct);
+        }
+
+        // 띄어쓰기 정규화
+        result = result.replace(/\s+/g, ' ').trim();
+
+        return result;
+    }
+
+    /**
+     * LLM 교정이 필요한지 판단
+     */
+    private shouldUseLlmCorrection(text: string): boolean {
+        const lowerText = text.toLowerCase();
+
+        // 고유명사 패턴이 있으면 교정 안 함 (오교정 방지)
+        const properNounPatterns = [
+            /대학교/, /대학/, /고등학교/, /중학교/, /초등학교/,
+            /회사/, /기업/, /그룹/, /주식회사/,
+        ];
+        if (properNounPatterns.some(p => p.test(text))) {
+            this.logger.debug(`[LLM 교정 스킵] 고유명사 패턴 발견`);
+            return false;
+        }
+
+        // 웨이크워드 패턴이 있으면 교정 (아우라)
+        const wakePatterns = [
+            /아울라/, /아우나/, /아우러/, /아오라/, /오우라/, /어우라/,  // 아우라는 제외 (정확하면 교정 불필요)
+        ];
+        if (wakePatterns.some(p => p.test(lowerText))) {
+            return true;
+        }
+
+        // 명백한 오타 패턴이 있으면 교정
+        const hasWeirdWord = /성숙|캬페|마집|떡복/.test(lowerText);
+        if (hasWeirdWord) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * LLM으로 문맥 기반 교정
+     */
+    private async correctWithLlm(rawText: string): Promise<string> {
+        const prompt = `음성인식(STT) 결과를 교정해주세요.
+
+## 배경
+- 화상회의에서 AI 비서 "아우라"를 호출하는 음성입니다
+- 웨이크워드: "아우라야", "헤이 아우라" 등
+- 주로 장소 검색(카페, 맛집 등)이나 날씨를 물어봅니다
+
+## 교정 규칙 (중요!)
+1. 웨이크워드 오인식만 교정 (아울라야→아우라야)
+2. 고유명사(학교명, 회사명, 사람이름)는 절대 변경 금지!
+3. "성숙"→"성수"처럼 명백한 오타만 교정
+4. 확실하지 않으면 원본 유지
+
+## 절대 변경하지 말 것
+- 대학교 이름 (상명대, 성균관대, 한양대 등)
+- 회사 이름 (크래프톤, 삼성, 네이버 등)
+- 사람 이름
+
+## 자주 오인식되는 패턴
+- "아울라야/아우나야/오우라야" → "아우라야"
+- "성숙" → "성수" (지역명인 경우만)
+- "캬페/카패" → "카페"
+
+## 입력 (STT 원본)
+"${rawText}"
+
+## 출력 규칙
+1. 오인식된 단어만 교정
+2. 문맥상 자연스러운 문장으로
+3. 교정된 문장만 출력 (설명 없이)
+4. 교정할 내용이 없으면 원본 그대로 출력
+
+## 출력 (교정된 문장만)`;
+
+        const payload = {
+            anthropic_version: "bedrock-2023-05-31",
+            max_tokens: 100,
+            messages: [{ role: "user", content: prompt }],
+        };
+
+        const command = new InvokeModelCommand({
+            modelId: this.llmModelId,
+            contentType: 'application/json',
+            accept: 'application/json',
+            body: JSON.stringify(payload),
+        });
+
+        const response = await this.bedrockClient.send(command);
+        const body = JSON.parse(new TextDecoder().decode(response.body));
+        const corrected = body.content?.[0]?.text?.trim() || rawText;
+
+        // 따옴표 제거
+        return corrected.replace(/^["']|["']$/g, '').trim();
+    }
+
+    // =====================================================
+    // Raw STT (교정 없이 원본 반환)
+    // =====================================================
+
+    private async rawTranscribeFromBuffer(audioBuffer: Buffer, fileName: string): Promise<string> {
         if (this.provider === 'azure') {
             return this.transcribeFromBufferAzure(audioBuffer, fileName);
         }
@@ -199,6 +374,10 @@ export class SttService {
                     encoding: 'linear16',
                     sample_rate: 16000,
                     channels: 1,
+                    // Deepgram 키워드 힌트
+                    keywords: this.ALL_HINTS.slice(0, 100), // Deepgram은 최대 100개
+                    // 키워드 부스트 (1.0 ~ 10.0)
+                    keyword_boost: 'high',
                 }
             );
 
@@ -217,10 +396,7 @@ export class SttService {
         }
     }
 
-    async transcribeStream(audioStream: Readable): Promise<string> {
-        if (this.provider === 'clova') {
-            return this.transcribeStreamClova(audioStream);
-        }
+    private async rawTranscribeStream(audioStream: Readable): Promise<string> {
         if (this.provider === 'azure') {
             return this.transcribeStreamAzure(audioStream);
         }
@@ -237,6 +413,9 @@ export class SttService {
                 encoding: 'linear16',
                 sample_rate: 16000,
                 channels: 1,
+                // Deepgram 키워드 힌트
+                keywords: this.ALL_HINTS.slice(0, 100),
+                keyword_boost: 'high',
             });
 
             connection.on(LiveTranscriptionEvents.Open, () => {
@@ -272,10 +451,7 @@ export class SttService {
         });
     }
 
-    async transcribeFromBufferStream(audioBuffer: Buffer, fileName: string): Promise<string> {
-        if (this.provider === 'clova') {
-            return this.transcribeFromBufferStreamClova(audioBuffer, fileName);
-        }
+    private async rawTranscribeFromBufferStream(audioBuffer: Buffer, fileName: string): Promise<string> {
         if (this.provider === 'azure') {
             return this.transcribeFromBufferStreamAzure(audioBuffer, fileName);
         }
@@ -283,7 +459,7 @@ export class SttService {
         this.logger.log(`[스트림 STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
         const audioStream = Readable.from([audioBuffer]);
         try {
-            const transcript = await this.transcribeStream(audioStream);
+            const transcript = await this.rawTranscribeStream(audioStream);
             this.logger.log(`[STT 완료] 전체 결과: ${transcript}`);
             return transcript || '';
         } catch (error) {
@@ -292,98 +468,15 @@ export class SttService {
         }
     }
 
+    // =====================================================
+    // Azure 전용 메서드
+    // =====================================================
+
     private getAzureSpeechConfig(): speechsdk.SpeechConfig {
         if (!this.azureSpeechConfig) {
             throw new Error('AZURE_SPEECH_KEY is not set');
         }
         return this.azureSpeechConfig;
-    }
-
-    private async transcribeFromBufferClova(audioBuffer: Buffer, fileName: string): Promise<string> {
-        this.logger.log(`[Clova 파일 STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
-        return this.recognizeOnceClova(audioBuffer);
-    }
-
-    private async transcribeStreamClova(audioStream: Readable): Promise<string> {
-        if (!this.clovaSpeechSecret) {
-            throw new Error('CLOVA_SPEECH_SECRET is not set');
-        }
-        if (!this.clovaClient) {
-            this.initClovaClient();
-        }
-
-        return new Promise((resolve, reject) => {
-            const metadata = new grpc.Metadata();
-            metadata.add('authorization', `Bearer ${this.clovaSpeechSecret}`);
-            const call = this.clovaClient.recognize(metadata);
-
-            const transcripts: string[] = [];
-            call.on('data', (response: any) => {
-                const contents = response?.contents || '';
-                if (contents) {
-                    transcripts.push(contents);
-                }
-            });
-            call.on('error', (error: any) => {
-                reject(error);
-            });
-            call.on('end', () => {
-                resolve(transcripts.join(' ').trim());
-            });
-
-            const config = JSON.stringify({
-                transcription: { language: this.clovaSpeechLang },
-                semanticEpd: {
-                    skipEmptyText: false,
-                    useWordEpd: false,
-                    usePeriodEpd: true,
-                    gapThreshold: 2000,
-                    durationThreshold: 20000,
-                    syllableThreshold: 0,
-                },
-            });
-
-            call.write({ type: 'CONFIG', config: { config } });
-
-            let seqId = 0;
-            audioStream.on('data', (chunk: Buffer) => {
-                call.write({
-                    type: 'DATA',
-                    data: {
-                        chunk,
-                        extra_contents: JSON.stringify({ seqId, epFlag: false }),
-                    },
-                });
-                seqId += 1;
-            });
-            audioStream.on('end', () => {
-                call.write({
-                    type: 'DATA',
-                    data: {
-                        chunk: Buffer.alloc(0),
-                        extra_contents: JSON.stringify({ seqId, epFlag: true }),
-                    },
-                });
-                call.end();
-            });
-            audioStream.on('error', (error) => {
-                this.logger.error(`[Clova STT 스트림 에러] ${error.message}`);
-                reject(error);
-            });
-        });
-    }
-
-    private async transcribeFromBufferStreamClova(audioBuffer: Buffer, fileName: string): Promise<string> {
-        this.logger.log(`[Clova 스트림 STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
-        const audioStream = Readable.from([audioBuffer]);
-        try {
-            const transcript = await this.transcribeStreamClova(audioStream);
-            this.logger.log(`[Clova STT 완료] 전체 결과: ${transcript}`);
-            return transcript || '';
-        } catch (error) {
-            this.logger.error(`[Clova STT 에러] ${error.message}`);
-            throw error;
-        }
     }
 
     private async transcribeFromBufferAzure(audioBuffer: Buffer, fileName: string): Promise<string> {
@@ -438,10 +531,34 @@ export class SttService {
         const audioConfig = speechsdk.AudioConfig.fromStreamInput(pushStream);
         const recognizer = new speechsdk.SpeechRecognizer(speechConfig, audioConfig);
 
+        // Azure PhraseListGrammar로 키워드 힌트 추가
+        const phraseList = speechsdk.PhraseListGrammar.fromRecognizer(recognizer);
+        for (const hint of this.ALL_HINTS) {
+            phraseList.addPhrase(hint);
+        }
+
+        const STT_TIMEOUT_MS = 10000;  // 10초 타임아웃
+
         return new Promise((resolve, reject) => {
+            let resolved = false;
+            
+            // 타임아웃 설정
+            const timeoutId = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    this.logger.warn(`[Azure STT] 타임아웃 (${STT_TIMEOUT_MS}ms)`);
+                    recognizer.close();
+                    resolve('');
+                }
+            }, STT_TIMEOUT_MS);
+
             recognizer.recognizeOnceAsync(
                 (result) => {
+                    if (resolved) return;
+                    resolved = true;
+                    clearTimeout(timeoutId);
                     recognizer.close();
+                    
                     if (result.reason === speechsdk.ResultReason.RecognizedSpeech) {
                         resolve(result.text || '');
                         return;
@@ -466,6 +583,9 @@ export class SttService {
                     resolve('');
                 },
                 (error) => {
+                    if (resolved) return;
+                    resolved = true;
+                    clearTimeout(timeoutId);
                     recognizer.close();
                     reject(error);
                 }
@@ -474,87 +594,6 @@ export class SttService {
             const arrayBuffer = Uint8Array.from(audioBuffer).buffer as ArrayBuffer;
             pushStream.write(arrayBuffer);
             pushStream.close();
-        });
-    }
-
-    private initClovaClient(): void {
-        const protoPath = path.join(__dirname, 'nest.proto');
-        const packageDef = protoLoader.loadSync(protoPath, {
-            longs: String,
-            enums: String,
-            defaults: true,
-            oneofs: true,
-        });
-        const proto = grpc.loadPackageDefinition(packageDef) as any;
-        const service = proto?.com?.nbp?.cdncp?.nest?.grpc?.proto?.v1?.NestService;
-        if (!service) {
-            throw new Error('Failed to load Clova gRPC proto');
-        }
-        this.clovaClient = new service(
-            this.clovaSpeechEndpoint,
-            grpc.credentials.createSsl()
-        );
-    }
-
-    private async recognizeOnceClova(audioBuffer: Buffer): Promise<string> {
-        if (!this.clovaSpeechSecret) {
-            throw new Error('CLOVA_SPEECH_SECRET is not set');
-        }
-        if (!this.clovaClient) {
-            this.initClovaClient();
-        }
-
-        return new Promise((resolve, reject) => {
-            const metadata = new grpc.Metadata();
-            metadata.add('authorization', `Bearer ${this.clovaSpeechSecret}`);
-            const call = this.clovaClient.recognize(metadata);
-
-            const transcripts: string[] = [];
-            call.on('data', (response: any) => {
-                const contents = response?.contents || '';
-                if (contents) {
-                    transcripts.push(contents);
-                }
-            });
-            call.on('error', (error: any) => {
-                reject(error);
-            });
-            call.on('end', () => {
-                resolve(transcripts.join(' ').trim());
-            });
-
-            const config = JSON.stringify({
-                transcription: { language: this.clovaSpeechLang },
-                semanticEpd: {
-                    skipEmptyText: false,
-                    useWordEpd: false,
-                    usePeriodEpd: true,
-                    gapThreshold: 2000,
-                    durationThreshold: 20000,
-                    syllableThreshold: 0,
-                },
-            });
-
-            call.write({ type: 'CONFIG', config: { config } });
-
-            const chunkSize = 32000;
-            let offset = 0;
-            let seqId = 0;
-            while (offset < audioBuffer.length) {
-                const end = Math.min(offset + chunkSize, audioBuffer.length);
-                const chunk = audioBuffer.subarray(offset, end);
-                const epFlag = end >= audioBuffer.length;
-                call.write({
-                    type: 'DATA',
-                    data: {
-                        chunk,
-                        extra_contents: JSON.stringify({ seqId, epFlag }),
-                    },
-                });
-                offset = end;
-                seqId += 1;
-            }
-            call.end();
         });
     }
 }
