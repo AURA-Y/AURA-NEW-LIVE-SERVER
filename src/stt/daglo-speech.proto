@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package daglo.speech.v1;
+
+option java_multiple_files = true;
+option java_package = "ai.daglo.speech.v1";
+
+// Daglo Speech-to-Text 서비스
+service SpeechToText {
+  // 양방향 스트리밍 음성 인식
+  rpc StreamingRecognize(stream StreamingRecognizeRequest) returns (stream StreamingRecognizeResponse);
+}
+
+// 스트리밍 인식 요청
+message StreamingRecognizeRequest {
+  // 첫 번째 메시지는 config만, 이후 메시지는 audio_content만 포함
+  oneof streaming_request {
+    // 인식 설정 (첫 번째 메시지에만)
+    RecognitionConfig config = 1;
+    // 오디오 데이터 (이후 메시지에)
+    bytes audio_content = 2;
+  }
+}
+
+// 인식 설정
+message RecognitionConfig {
+  // 오디오 인코딩 타입
+  AudioEncoding encoding = 1;
+  // 샘플 레이트 (Hz)
+  int32 sample_rate_hertz = 2;
+  // 언어 코드 (ko-KR, en-US, mixed)
+  string language_code = 3;
+  // 중간 결과 반환 여부
+  bool interim_results = 4;
+  // 채널 수
+  int32 audio_channel_count = 5;
+  // 자동 언어 감지 사용 여부
+  bool enable_automatic_language_detection = 6;
+}
+
+// 오디오 인코딩 타입
+enum AudioEncoding {
+  ENCODING_UNSPECIFIED = 0;
+  LINEAR16 = 1;
+  FLAC = 2;
+  MULAW = 3;
+  AMR = 4;
+  AMR_WB = 5;
+  OGG_OPUS = 6;
+  WEBM_OPUS = 7;
+}
+
+// 스트리밍 인식 응답
+message StreamingRecognizeResponse {
+  // 인식 결과 목록
+  repeated StreamingRecognitionResult results = 1;
+  // 총 오디오 지속 시간 (초)
+  float total_billed_duration = 2;
+}
+
+// 스트리밍 인식 결과
+message StreamingRecognitionResult {
+  // 인식된 텍스트
+  string transcript = 1;
+  // 최종 결과 여부 (false면 중간 결과)
+  bool is_final = 2;
+  // 신뢰도 점수 (0.0 ~ 1.0)
+  float confidence = 3;
+  // 감지된 언어 코드
+  string detected_language_code = 4;
+  // 단어별 정보 (선택적)
+  repeated WordInfo words = 5;
+}
+
+// 단어 정보
+message WordInfo {
+  // 단어
+  string word = 1;
+  // 시작 시간 (초)
+  float start_time = 2;
+  // 종료 시간 (초)
+  float end_time = 3;
+  // 신뢰도
+  float confidence = 4;
+}

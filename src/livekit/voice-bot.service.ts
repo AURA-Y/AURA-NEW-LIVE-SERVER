@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
     Room,
@@ -17,7 +17,7 @@ import {
 import { SttService } from '../stt/stt.service';
 import { LlmService } from '../llm/llm.service';
 import { TtsService } from '../tts/tts.service';
-import { RagClientService } from '../rag/rag-client.service';
+import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { IntentClassifierService } from '../intent/intent-classifier.service';
 import { VisionService, VisionContext } from '../vision/vision.service';
 
@@ -86,7 +86,7 @@ export class VoiceBotService {
         private sttService: SttService,
         private llmService: LlmService,
         private ttsService: TtsService,
-        private ragClientService: RagClientService,
+        @Inject(RAG_CLIENT) private ragClient: IRagClient,
         private intentClassifier: IntentClassifierService,
         private visionService: VisionService,
     ) { }
@@ -310,7 +310,7 @@ export class VoiceBotService {
             await room.connect(livekitUrl, botToken);
 
             try {
-                await this.ragClientService.connect(roomName);
+                await this.ragClient.connect(roomName);
                 this.logger.log(`[RAG 연결 완료]`);
             } catch (error) {
                 this.logger.error(`[RAG 연결 실패] ${error.message}`);
@@ -1346,7 +1346,7 @@ JSON 배열만 출력:`;
         const context = this.activeRooms.get(roomName);
         if (context) {
             try {
-                await this.ragClientService.disconnect(roomName);
+                await this.ragClient.disconnect(roomName);
             } catch (error) {
                 this.logger.error(`[RAG 해제 실패] ${error.message}`);
             }

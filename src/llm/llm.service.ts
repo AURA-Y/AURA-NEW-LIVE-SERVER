@@ -1,10 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
     BedrockRuntimeClient,
     InvokeModelCommand,
 } from '@aws-sdk/client-bedrock-runtime';
-import { RagClientService } from '../rag/rag-client.service';
+import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { SearchService, SearchResult, SearchType } from './search.service';
 import { MapService } from './map.service';
 
@@ -29,7 +29,7 @@ export class LlmService {
 
     constructor(
         private configService: ConfigService,
-        private ragClientService: RagClientService,
+        @Inject(RAG_CLIENT) private ragClient: IRagClient,
         private searchService: SearchService,
         private mapService: MapService,
     ) {
@@ -68,20 +68,20 @@ export class LlmService {
     
             try {
                 // RAG 연결이 없으면 시도해서 붙여본다
-                if (!this.ragClientService.isConnected(resolvedRoomId)) {
+                if (!this.ragClient.isConnected(resolvedRoomId)) {
                     try {
-                        await this.ragClientService.connect(resolvedRoomId);
+                        await this.ragClient.connect(resolvedRoomId);
                     } catch (err) {
                         this.logger.warn(`[RAG] 연결 시도 실패: ${resolvedRoomId} (${(err as Error).message})`);
                     }
                 }
 
-                if (!this.ragClientService.isConnected(resolvedRoomId)) {
+                if (!this.ragClient.isConnected(resolvedRoomId)) {
                     this.logger.warn(`[RAG] 연결되지 않음: ${resolvedRoomId}`);
                     return { text: '회의록 기능을 사용할 수 없습니다.' };
                 }
                 this.logger.log(`[RAG 질문] Room: ${resolvedRoomId}, 질문: "${userMessage}"`);
-                const ragAnswer = await this.ragClientService.sendQuestion(resolvedRoomId, userMessage);
+                const ragAnswer = await this.ragClient.sendQuestion(resolvedRoomId, userMessage);
                 return { text: ragAnswer };
             } catch (error) {
                 this.logger.error(`[RAG 에러] ${error.message}`);

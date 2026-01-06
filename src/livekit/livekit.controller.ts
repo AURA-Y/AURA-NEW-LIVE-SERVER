@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query, Inject } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { LivekitService } from './livekit.service';
@@ -6,6 +6,7 @@ import { VoiceBotService } from './voice-bot.service';
 import { SttService } from '../stt/stt.service';
 import { LlmService } from '../llm/llm.service'; //통합 검색
 import { TtsService } from '../tts/tts.service';
+import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { EmbedFilesDto } from './dto/embed-files.dto';
@@ -18,7 +19,7 @@ export class LivekitController {
     private readonly sttService: SttService,
     private readonly llmService: LlmService, //통합 검색
     private readonly ttsService: TtsService,
-    private readonly ragClientService: RagClientService,
+    @Inject(RAG_CLIENT) private readonly ragClient: IRagClient,
   ) { }
 
   // AI 음성 봇 시작

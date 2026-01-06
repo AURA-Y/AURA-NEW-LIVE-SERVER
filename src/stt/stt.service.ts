@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import * as speechsdk from 'microsoft-cognitiveservices-speech-sdk';
@@ -7,13 +7,20 @@ import {
     BedrockRuntimeClient,
     InvokeModelCommand,
 } from '@aws-sdk/client-bedrock-runtime';
+import { ClovaSttAdapter } from './clova-stt.adapter';
+import { DagloSttAdapter } from './daglo-stt.adapter';
+
+// 지원하는 STT 프로바이더 타입
+type SttProvider = 'deepgram' | 'azure' | 'clova' | 'daglo';
 
 @Injectable()
-export class SttService {
+export class SttService implements OnModuleDestroy {
     private readonly logger = new Logger(SttService.name);
     private deepgramClient: any;
     private azureSpeechConfig: speechsdk.SpeechConfig | null = null;
-    private readonly provider: string;
+    private clovaAdapter: ClovaSttAdapter | null = null;
+    private dagloAdapter: DagloSttAdapter | null = null;
+    private readonly provider: SttProvider;
 
     // LLM 교정용
     private bedrockClient: BedrockRuntimeClient;
@@ -123,14 +130,38 @@ export class SttService {
 
     constructor(private configService: ConfigService) {
         const requestedProvider = (this.configService.get<string>('STT_PROVIDER') || 'deepgram').toLowerCase();
-        this.provider = requestedProvider === 'azure' || requestedProvider === 'deepgram'
-            ? requestedProvider
+
+        // 지원하는 프로바이더 확인
+        const supportedProviders: SttProvider[] = ['deepgram', 'azure', 'clova', 'daglo'];
+        this.provider = supportedProviders.includes(requestedProvider as SttProvider)
+            ? (requestedProvider as SttProvider)
             : 'deepgram';
+
         if (this.provider !== requestedProvider) {
             this.logger.warn(`[STT] Unsupported provider "${requestedProvider}", defaulting to "${this.provider}"`);
         }
 
-        if (this.provider === 'azure') {
+        // 프로바이더별 초기화
+        if (this.provider === 'daglo') {
+            const apiToken = this.configService.get<string>('DAGLO_API_KEY');
+            if (!apiToken) {
+                this.logger.error('[Daglo STT] DAGLO_API_KEY가 설정되지 않았습니다!');
+            } else {
+                this.dagloAdapter = new DagloSttAdapter(apiToken);
+                // 초기화는 첫 요청 시 lazy로 수행
+                this.logger.log('[Daglo STT] 어댑터 생성 완료 (lazy 초기화)');
+            }
+        } else if (this.provider === 'clova') {
+            const clientId = this.configService.get<string>('CLOVA_CLIENT_ID');
+            const clientSecret = this.configService.get<string>('CLOVA_CLIENT_SECRET');
+            if (!clientSecret) {
+                this.logger.error('[Clova STT] CLOVA_CLIENT_SECRET이 설정되지 않았습니다!');
+            } else {
+                this.clovaAdapter = new ClovaSttAdapter(clientId || '', clientSecret);
+                // 초기화는 첫 요청 시 lazy로 수행
+                this.logger.log('[Clova STT] 어댑터 생성 완료 (lazy 초기화)');
+            }
+        } else if (this.provider === 'azure') {
             const azureKey = this.configService.get<string>('AZURE_SPEECH_KEY');
             const azureRegion = this.configService.get<string>('AZURE_SPEECH_REGION') || 'koreacentral';
             if (!azureKey) {
@@ -138,11 +169,12 @@ export class SttService {
             } else {
                 this.azureSpeechConfig = speechsdk.SpeechConfig.fromSubscription(azureKey, azureRegion);
                 this.azureSpeechConfig.speechRecognitionLanguage = 'ko-KR';
-                
+
                 // Azure 구문 목록에 힌트 추가
                 // Note: Azure에서는 PhraseListGrammar로 런타임에 추가
             }
         } else {
+            // Deepgram (기본값)
             const apiKey = this.configService.get<string>('DEEPGRAM_API_KEY');
             if (!apiKey) {
                 this.logger.error('[Deepgram] API 키가 설정되지 않았습니다!');
@@ -357,10 +389,22 @@ export class SttService {
     // =====================================================
 
     private async rawTranscribeFromBuffer(audioBuffer: Buffer, fileName: string): Promise<string> {
+        // Daglo 프로바이더
+        if (this.provider === 'daglo') {
+            return this.transcribeFromBufferDaglo(audioBuffer, fileName);
+        }
+
+        // Clova 프로바이더
+        if (this.provider === 'clova') {
+            return this.transcribeFromBufferClova(audioBuffer, fileName);
+        }
+
+        // Azure 프로바이더
         if (this.provider === 'azure') {
             return this.transcribeFromBufferAzure(audioBuffer, fileName);
         }
 
+        // Deepgram 프로바이더 (기본값)
         this.logger.log(`[파일 STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
 
         try {
@@ -397,10 +441,22 @@ export class SttService {
     }
 
     private async rawTranscribeStream(audioStream: Readable): Promise<string> {
+        // Daglo 프로바이더
+        if (this.provider === 'daglo') {
+            return this.transcribeStreamDaglo(audioStream);
+        }
+
+        // Clova 프로바이더
+        if (this.provider === 'clova') {
+            return this.transcribeStreamClova(audioStream);
+        }
+
+        // Azure 프로바이더
         if (this.provider === 'azure') {
             return this.transcribeStreamAzure(audioStream);
         }
 
+        // Deepgram 프로바이더 (기본값)
         return new Promise((resolve, reject) => {
             const transcripts: string[] = [];
 
@@ -452,6 +508,17 @@ export class SttService {
     }
 
     private async rawTranscribeFromBufferStream(audioBuffer: Buffer, fileName: string): Promise<string> {
+        // Daglo 프로바이더
+        if (this.provider === 'daglo') {
+            return this.transcribeFromBufferDaglo(audioBuffer, fileName);
+        }
+
+        // Clova 프로바이더
+        if (this.provider === 'clova') {
+            return this.transcribeFromBufferClova(audioBuffer, fileName);
+        }
+
+        // Azure 프로바이더
         if (this.provider === 'azure') {
             return this.transcribeFromBufferStreamAzure(audioBuffer, fileName);
         }
@@ -595,5 +662,152 @@ export class SttService {
             pushStream.write(arrayBuffer);
             pushStream.close();
         });
+    }
+
+    // =====================================================
+    // Clova 전용 메서드
+    // =====================================================
+
+    private async transcribeFromBufferClova(audioBuffer: Buffer, fileName: string): Promise<string> {
+        if (!this.clovaAdapter) {
+            throw new Error('Clova STT adapter is not initialized');
+        }
+
+        this.logger.log(`[Clova STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
+
+        try {
+            const transcript = await this.clovaAdapter.transcribe(audioBuffer, {
+                language: 'ko-KR',
+                encoding: 'LINEAR16',
+                sampleRate: 16000,
+                keywordBoosting: this.ALL_HINTS.slice(0, 50), // 상위 50개 키워드
+            });
+
+            this.logger.log(`[Clova STT 완료] 결과: ${transcript}`);
+            return transcript || '';
+        } catch (error) {
+            this.logger.error(`[Clova STT 에러] ${error.message}`);
+            throw error;
+        }
+    }
+
+    private async transcribeStreamClova(audioStream: Readable): Promise<string> {
+        if (!this.clovaAdapter) {
+            throw new Error('Clova STT adapter is not initialized');
+        }
+
+        this.logger.log(`[Clova STT 스트림 시작]`);
+
+        // Readable을 AsyncGenerator로 변환
+        const audioGenerator = async function* (stream: Readable): AsyncGenerator<Buffer> {
+            for await (const chunk of stream) {
+                yield chunk as Buffer;
+            }
+        };
+
+        try {
+            const transcripts: string[] = [];
+
+            for await (const result of this.clovaAdapter.transcribeStream(audioGenerator(audioStream), {
+                language: 'ko-KR',
+                encoding: 'LINEAR16',
+                sampleRate: 16000,
+                keywordBoosting: this.ALL_HINTS.slice(0, 50),
+            })) {
+                if (result.isFinal && result.text) {
+                    this.logger.log(`[Clova STT 결과] ${result.text}`);
+                    transcripts.push(result.text);
+                }
+            }
+
+            const fullTranscript = transcripts.join(' ').trim();
+            this.logger.log(`[Clova STT 스트림 완료] 결과: ${fullTranscript}`);
+            return fullTranscript;
+        } catch (error) {
+            this.logger.error(`[Clova STT 스트림 에러] ${error.message}`);
+            throw error;
+        }
+    }
+
+    // =====================================================
+    // Daglo 전용 메서드
+    // =====================================================
+
+    private async transcribeFromBufferDaglo(audioBuffer: Buffer, fileName: string): Promise<string> {
+        if (!this.dagloAdapter) {
+            throw new Error('Daglo STT adapter is not initialized');
+        }
+
+        this.logger.log(`[Daglo STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
+
+        try {
+            const transcript = await this.dagloAdapter.transcribe(audioBuffer, {
+                language: 'ko-KR',
+                encoding: 'LINEAR16',
+                sampleRate: 16000,
+                interimResults: true,
+            });
+
+            this.logger.log(`[Daglo STT 완료] 결과: ${transcript}`);
+            return transcript || '';
+        } catch (error) {
+            this.logger.error(`[Daglo STT 에러] ${error.message}`);
+            throw error;
+        }
+    }
+
+    private async transcribeStreamDaglo(audioStream: Readable): Promise<string> {
+        if (!this.dagloAdapter) {
+            throw new Error('Daglo STT adapter is not initialized');
+        }
+
+        this.logger.log(`[Daglo STT 스트림 시작]`);
+
+        // Readable을 AsyncGenerator로 변환
+        const audioGenerator = async function* (stream: Readable): AsyncGenerator<Buffer> {
+            for await (const chunk of stream) {
+                yield chunk as Buffer;
+            }
+        };
+
+        try {
+            const transcripts: string[] = [];
+
+            for await (const result of this.dagloAdapter.transcribeStream(audioGenerator(audioStream), {
+                language: 'ko-KR',
+                encoding: 'LINEAR16',
+                sampleRate: 16000,
+                interimResults: true,
+            })) {
+                if (result.isFinal && result.text) {
+                    this.logger.log(`[Daglo STT 결과] ${result.text}`);
+                    transcripts.push(result.text);
+                }
+            }
+
+            const fullTranscript = transcripts.join(' ').trim();
+            this.logger.log(`[Daglo STT 스트림 완료] 결과: ${fullTranscript}`);
+            return fullTranscript;
+        } catch (error) {
+            this.logger.error(`[Daglo STT 스트림 에러] ${error.message}`);
+            throw error;
+        }
+    }
+
+    // =====================================================
+    // 모듈 종료 시 정리
+    // =====================================================
+
+    onModuleDestroy() {
+        if (this.clovaAdapter) {
+            this.clovaAdapter.close();
+            this.clovaAdapter = null;
+            this.logger.log('[Clova STT] 어댑터 종료');
+        }
+        if (this.dagloAdapter) {
+            this.dagloAdapter.close();
+            this.dagloAdapter = null;
+            this.logger.log('[Daglo STT] 어댑터 종료');
+        }
     }
 }
