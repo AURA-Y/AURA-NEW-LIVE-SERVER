@@ -19,6 +19,7 @@ import { LlmService } from '../llm/llm.service';
 import { TtsService } from '../tts/tts.service';
 import { RagClientService } from '../rag/rag-client.service';
 import { IntentClassifierService } from '../intent/intent-classifier.service';
+import { VisionService, VisionContext } from '../vision/vision.service';
 
 enum BotState {
     SLEEP = 'SLEEP',
@@ -58,6 +59,14 @@ interface RoomContext {
     meetingContext: MeetingContext;
     lastSpeechTime: number;                  // 마지막 발화 시간 (누구든)
     proactiveTimer: NodeJS.Timeout | null;   // 능동적 개입 타이머
+    // Vision (화면 공유 분석) 관련
+    hasActiveScreenShare: boolean;           // 화면 공유 활성 여부
+    isVisionMode: boolean;                   // Vision 모드 활성 여부
+    pendingVisionRequest?: {                 // 대기 중인 Vision 요청
+        requestId: number;
+        userQuestion: string;
+        userId: string;
+    };
     // 아이디어 모드
     ideaModeActive: boolean;                 // 아이디어 보드 활성화 여부
 }
@@ -87,6 +96,7 @@ export class VoiceBotService {
         private ttsService: TtsService,
         private ragClientService: RagClientService,
         private intentClassifier: IntentClassifierService,
+        private visionService: VisionService,
     ) { }
 
     async startBot(roomName: string, botToken: string): Promise<void> {
@@ -106,6 +116,41 @@ export class VoiceBotService {
             if (track.kind === TrackKind.KIND_AUDIO && !participant.identity.startsWith('ai-bot')) {
                 this.logger.log(`[오디오 트랙 구독] ${participant.identity}`);
                 await this.handleAudioTrack(roomName, track, participant.identity);
+            }
+            // 화면 공유 트랙 감지
+            if (publication.source === TrackSource.SOURCE_SCREENSHARE) {
+                this.logger.log(`[화면 공유 시작] ${participant.identity}`);
+                const context = this.activeRooms.get(roomName);
+                if (context) {
+                    context.hasActiveScreenShare = true;
+                }
+            }
+        });
+
+        // 화면 공유 종료 감지
+        room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
+            if (publication.source === TrackSource.SOURCE_SCREENSHARE) {
+                this.logger.log(`[화면 공유 종료] ${participant.identity}`);
+                const context = this.activeRooms.get(roomName);
+                if (context) {
+                    context.hasActiveScreenShare = false;
+                    context.isVisionMode = false;
+                }
+            }
+        });
+
+        // DataChannel 메시지 수신 (Vision 캡처 응답)
+        room.on(RoomEvent.DataReceived, async (payload: Uint8Array, participant?: RemoteParticipant) => {
+            try {
+                const message = JSON.parse(new TextDecoder().decode(payload));
+                this.logger.debug(`[DataChannel] 메시지 수신 from ${participant?.identity || 'unknown'}: type=${message.type}`);
+                if (message.type === 'vision_capture_response') {
+                    this.logger.log(`[Vision] 캡처 응답 수신 - requestId: ${message.requestId}, 이미지 크기: ${(message.imageBase64?.length / 1024).toFixed(1)}KB`);
+                    await this.handleVisionCaptureResponse(roomName, message);
+                }
+            } catch (error) {
+                // JSON 파싱 실패 시 무시 (다른 타입의 DataChannel 메시지일 수 있음)
+                this.logger.debug(`[DataChannel] 파싱 실패 또는 비-JSON 메시지`);
             }
         });
 
@@ -190,6 +235,9 @@ export class VoiceBotService {
                 },
                 lastSpeechTime: Date.now(),
                 proactiveTimer: null,
+                // Vision 관련 초기화
+                hasActiveScreenShare: false,
+                isVisionMode: false,
                 // 아이디어 모드 초기화
                 ideaModeActive: false,
             };
@@ -237,12 +285,12 @@ export class VoiceBotService {
         try {
             this.logger.log(`[입장 인사] "${greeting}"`);
             context.botState = BotState.SPEAKING;
-            
+
             const pcmBuffer = await this.ttsService.synthesizePcm(greeting);
             if (pcmBuffer && pcmBuffer.length > 0) {
                 await this.publishAudio(roomName, context.audioSource, pcmBuffer);
             }
-            
+
             context.botState = BotState.SLEEP;
             context.lastResponseTime = Date.now();
             this.logger.log(`[입장 인사 완료]`);
@@ -414,7 +462,10 @@ export class VoiceBotService {
         try {
             context.isPublishing = true;
             const requestId = Date.now();
-            context.currentRequestId = requestId;
+            // Vision 모드 중에는 currentRequestId 변경하지 않음
+            if (!context.isVisionMode) {
+                context.currentRequestId = requestId;
+            }
 
             // 1. 회의 맥락 기반 제안 생성
             const suggestion = await this.generateProactiveSuggestion(context);
@@ -844,18 +895,24 @@ ${recentTexts}
 
         // 락 획득 시도
         if (this.processingLock.get(roomName)) {
-            this.logger.debug(`[스킵] 다른 처리 진행 중 (락)`);
+            this.logger.log(`[스킵] 다른 처리 진행 중 (락)`);
             return;
         }
 
         if (context.isPublishing) {
-            this.logger.debug(`[스킵] 이미 처리 중`);
+            this.logger.log(`[스킵] 이미 처리 중 (isPublishing=true)`);
+            return;
+        }
+
+        // Vision 모드 중에는 음성 처리 스킵 (Vision TTS와 충돌 방지)
+        if (context.isVisionMode) {
+            this.logger.log(`[스킵] Vision 모드 진행 중`);
             return;
         }
 
         const RESPONSE_COOLDOWN_MS = 3000;
         if (context.lastResponseTime > 0 && Date.now() - context.lastResponseTime < RESPONSE_COOLDOWN_MS) {
-            this.logger.debug(`[스킵] 응답 쿨다운`);
+            this.logger.log(`[스킵] 응답 쿨다운 (${(RESPONSE_COOLDOWN_MS - (Date.now() - context.lastResponseTime)) / 1000}초 남음)`);
             return;
         }
 
@@ -863,7 +920,10 @@ ${recentTexts}
         this.processingLock.set(roomName, true);
 
         const requestId = Date.now();
-        context.currentRequestId = requestId;
+        // Vision 모드 중에는 currentRequestId 변경하지 않음 (Vision TTS가 스킵되는 것 방지)
+        if (!context.isVisionMode) {
+            context.currentRequestId = requestId;
+        }
         const startTime = Date.now();
 
         this.logger.log(`\n========== [음성 처리] ${userId} ==========`);
@@ -922,6 +982,28 @@ ${recentTexts}
                 context.activeUserId = null;
                 context.lastResponseTime = Date.now();
                 return;
+            }
+
+            // ================================================
+            // 3.5. Vision Intent 처리 (화면 공유 분석)
+            // ================================================
+            this.logger.debug(`[Vision 체크] isCallIntent=${intentAnalysis.isCallIntent}, isVisionIntent=${intentAnalysis.isVisionIntent}, hasScreenShare=${context.hasActiveScreenShare}, isVisionMode=${context.isVisionMode}`);
+
+            if (intentAnalysis.isCallIntent && intentAnalysis.isVisionIntent && context.hasActiveScreenShare) {
+                this.logger.log(`[Vision Intent 감지] 화면 분석 모드로 전환`);
+                const visionHandled = await this.processVisionIntent(
+                    roomName,
+                    intentAnalysis.normalizedText,
+                    userId
+                );
+                if (visionHandled) {
+                    // Vision 처리가 시작되면 여기서 리턴 (캡처 응답은 DataChannel로 받음)
+                    this.logger.log(`[Vision] 캡처 요청 전송됨 - 응답 대기 중`);
+                    context.lastSpeechTime = Date.now();
+                    return;
+                }
+                // Vision 처리가 안되면 (화면 공유 없음, 이미 처리 중 등) 일반 플로우로 계속
+                this.logger.log(`[Vision] 처리 불가 - 일반 응답으로 전환`);
             }
 
             // ================================================
@@ -1051,7 +1133,7 @@ ${recentTexts}
                     // 기본
                     return ['음...', '어 잠깐요~', '잠깐만요~'][Math.floor(Math.random() * 3)];
                 };
-                
+
                 const thinkingPhrase = getThinkingPhrase(finalCategory);
                 let thinkingSpoken = false;
                 let llmResolved = false;
@@ -1151,11 +1233,21 @@ ${recentTexts}
         let offset = 0;
         let frameCount = 0;
         const startTime = Date.now();
+        const totalFrames = Math.ceil(pcmBuffer.length / FRAME_BYTES);
+
+        this.logger.log(`[오디오 발행 시작] ${pcmBuffer.length} bytes, ${totalFrames} frames 예상`);
 
         while (offset < pcmBuffer.length) {
             const context = this.activeRooms.get(roomName);
-            if (context?.shouldInterrupt) {
-                this.logger.log(`[오디오 중단] Barge-in`);
+
+            // 컨텍스트가 없으면 중단 (방 나감)
+            if (!context) {
+                this.logger.warn(`[오디오 중단] 컨텍스트 없음 - room: ${roomName}`);
+                break;
+            }
+
+            if (context.shouldInterrupt) {
+                this.logger.log(`[오디오 중단] Barge-in at frame ${frameCount}/${totalFrames}`);
                 context.shouldInterrupt = false;
                 break;
             }
@@ -1169,8 +1261,13 @@ ${recentTexts}
                     samples[i] = pcmBuffer.readInt16LE(offset + i * BYTES_PER_SAMPLE);
                 }
 
-                const frame = new AudioFrame(samples, SAMPLE_RATE, 1, FRAME_SIZE);
-                await audioSource.captureFrame(frame);
+                try {
+                    const frame = new AudioFrame(samples, SAMPLE_RATE, 1, FRAME_SIZE);
+                    await audioSource.captureFrame(frame);
+                } catch (frameError) {
+                    this.logger.error(`[오디오 프레임 에러] ${frameError.message}`);
+                    return;
+                }
 
                 offset += FRAME_BYTES;
                 frameCount++;
@@ -1184,6 +1281,9 @@ ${recentTexts}
                 await this.sleep(sleepTime);
             }
         }
+
+        const elapsed = Date.now() - startTime;
+        this.logger.log(`[오디오 발행 완료] ${frameCount}/${totalFrames} frames, ${elapsed}ms`);
     }
 
     private sleep(ms: number): Promise<void> {
@@ -1196,15 +1296,21 @@ ${recentTexts}
         requestId: number,
         message: string
     ): Promise<void> {
-        context.shouldInterrupt = false;
-
         const ttsStart = Date.now();
         const pcmAudio = await this.ttsService.synthesizePcm(message);
         this.logger.log(`[TTS] ${Date.now() - ttsStart}ms - ${pcmAudio.length} bytes`);
 
         context.speakingStartTime = Date.now();
 
-        if (context.currentRequestId !== requestId) return;
+        // Vision 요청은 requestId 체크 스킵 (별도 플로우)
+        // 일반 음성 요청만 requestId 체크
+        if (context.currentRequestId !== requestId && context.currentRequestId !== 0) {
+            this.logger.warn(`[TTS 스킵] requestId 불일치: current=${context.currentRequestId}, expected=${requestId}`);
+            return;
+        }
+
+        // TTS 합성 완료 후 interrupt 플래그 리셋 (합성 중 barge-in 무시)
+        context.shouldInterrupt = false;
 
         await this.publishAudio(roomName, context.audioSource, pcmAudio);
     }
@@ -1269,5 +1375,246 @@ ${recentTexts}
     getMeetingContext(roomName: string): MeetingContext | null {
         const context = this.activeRooms.get(roomName);
         return context?.meetingContext || null;
+    }
+
+    // =====================================================
+    // Vision (화면 공유 분석) 관련 메서드
+    // =====================================================
+
+    /**
+     * Vision 캡처 요청 전송 (Frontend로)
+     */
+    private async sendVisionCaptureRequest(
+        roomName: string,
+        requestId: number,
+        userQuestion: string,
+        userId: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomName);
+        if (!context) return;
+
+        // 대기 중인 요청 저장
+        context.pendingVisionRequest = {
+            requestId,
+            userQuestion,
+            userId,
+        };
+        context.isVisionMode = true;
+
+        // DataChannel로 캡처 요청 전송
+        const captureRequest = {
+            type: 'vision_capture_request',
+            requestId,
+            timestamp: Date.now(),
+        };
+
+        const encoder = new TextEncoder();
+        await context.room.localParticipant.publishData(
+            encoder.encode(JSON.stringify(captureRequest)),
+            { reliable: true }
+        );
+
+        this.logger.log(`[Vision] 캡처 요청 전송 - requestId: ${requestId}`);
+    }
+
+    /**
+     * Vision 캡처 응답 처리 (HTTP 엔드포인트에서 호출)
+     */
+    async handleVisionCaptureFromHttp(
+        roomName: string,
+        message: {
+            type: string;
+            requestId: number;
+            imageBase64: string;
+            cursorPosition?: { x: number; y: number };
+            highlightedText?: string;
+            screenWidth: number;
+            screenHeight: number;
+        }
+    ): Promise<void> {
+        this.logger.log(`[Vision HTTP] 처리 시작 - room: ${roomName}, requestId: ${message.requestId}`);
+        await this.handleVisionCaptureResponse(roomName, message);
+    }
+
+    /**
+     * Vision 캡처 응답 처리 (내부 메서드)
+     */
+    private async handleVisionCaptureResponse(
+        roomName: string,
+        message: {
+            type: string;
+            requestId: number;
+            imageBase64: string;
+            cursorPosition?: { x: number; y: number };
+            highlightedText?: string;
+            screenWidth: number;
+            screenHeight: number;
+        }
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomName);
+        if (!context || !context.pendingVisionRequest) {
+            this.logger.warn(`[Vision] 대기 중인 요청 없음`);
+            return;
+        }
+
+        const { requestId, userQuestion, userId } = context.pendingVisionRequest;
+
+        // 요청 ID 확인
+        if (message.requestId !== requestId) {
+            this.logger.warn(`[Vision] 요청 ID 불일치: ${message.requestId} vs ${requestId}`);
+            return;
+        }
+
+        // Vision 플로우용 락 획득 (음성 처리와 충돌 방지)
+        if (this.processingLock.get(roomName)) {
+            this.logger.warn(`[Vision] 다른 처리 진행 중 - 대기`);
+            // 짧은 대기 후 재시도 (최대 2초)
+            for (let i = 0; i < 20 && this.processingLock.get(roomName); i++) {
+                await this.sleep(100);
+            }
+            if (this.processingLock.get(roomName)) {
+                this.logger.error(`[Vision] 락 획득 실패 - 취소`);
+                this.resetVisionState(context);
+                return;
+            }
+        }
+        this.processingLock.set(roomName, true);
+        context.isPublishing = true;
+
+        // Vision 플로우용 currentRequestId 설정 (TTS 발화를 위해 필수)
+        context.currentRequestId = requestId;
+
+        this.logger.log(`\n========== [Vision 캡처 응답 처리] ==========`);
+        this.logger.log(`이미지 크기: ${(message.imageBase64.length / 1024).toFixed(1)}KB`);
+        if (message.cursorPosition) {
+            this.logger.log(`마우스 커서: (${message.cursorPosition.x}, ${message.cursorPosition.y})`);
+        } else {
+            this.logger.log(`마우스 커서: 없음`);
+        }
+        this.logger.log(`화면 크기: ${message.screenWidth}x${message.screenHeight}`);
+
+        try {
+            // 이미지 검증
+            const validation = this.visionService.validateAndCompressImage(message.imageBase64);
+            if (!validation.valid) {
+                this.logger.error(`[Vision] 이미지 검증 실패: ${validation.error}`);
+                await this.speakAndPublish(context, roomName, requestId, "화면을 캡처하는데 문제가 있어요. 다시 한번 말씀해주세요.");
+                return;
+            }
+
+            // Vision API 호출
+            const visionContext: VisionContext = {
+                cursorPosition: message.cursorPosition,
+                highlightedText: message.highlightedText,
+                screenWidth: message.screenWidth,
+                screenHeight: message.screenHeight,
+            };
+
+            context.botState = BotState.SPEAKING;
+            context.speakingStartTime = Date.now();
+
+            // "잠깐만요" 먼저 말하기 (Vision API 호출 시간 벌기)
+            const thinkingPhrases = [
+                '어 잠깐 볼게요~',
+                '음 한번 볼게요',
+                '아 잠깐만요~',
+            ];
+            const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
+            await this.speakAndPublish(context, roomName, requestId, thinkingPhrase);
+
+            // Vision API 호출
+            const result = await this.visionService.analyzeScreenShare(
+                validation.compressed!,
+                userQuestion,
+                visionContext
+            );
+
+            this.logger.log(`[Vision] 분석 완료 - 타입: ${result.analysisType}`);
+
+            // DataChannel로 Vision 결과 전송 (Frontend에서 아바타 복귀 등 처리)
+            const visionResultMessage = {
+                type: 'vision_result',
+                requestId,
+                analysisType: result.analysisType,
+                text: result.text,
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(visionResultMessage)),
+                { reliable: true }
+            );
+
+            // TTS 발화
+            await this.speakAndPublish(context, roomName, requestId, result.text);
+
+            this.logger.log(`[Vision] 완료`);
+
+        } catch (error) {
+            this.logger.error(`[Vision] 처리 에러: ${error.message}`);
+            try {
+                await this.speakAndPublish(context, roomName, requestId, "화면 분석 중에 문제가 생겼어요. 다시 한번 해볼게요.");
+            } catch (ttsError) {
+                this.logger.error(`[Vision] 에러 TTS 실패: ${ttsError.message}`);
+            }
+        } finally {
+            // 상태 정리 (항상 실행)
+            this.resetVisionState(context);
+            context.lastResponseTime = Date.now();
+            context.lastSpeechTime = Date.now();
+            context.isPublishing = false;
+            this.processingLock.set(roomName, false);
+            this.logger.log(`[Vision] 상태 정리 완료 - 음성 처리 재개 가능`);
+        }
+    }
+
+    /**
+     * Vision 상태 리셋 헬퍼
+     */
+    private resetVisionState(context: RoomContext): void {
+        context.botState = BotState.SLEEP;
+        context.isVisionMode = false;
+        context.pendingVisionRequest = undefined;
+    }
+
+    /**
+     * Vision Intent 감지 시 처리
+     */
+    async processVisionIntent(
+        roomName: string,
+        userQuestion: string,
+        userId: string
+    ): Promise<boolean> {
+        const context = this.activeRooms.get(roomName);
+        if (!context) return false;
+
+        // 화면 공유 활성 여부 확인
+        if (!context.hasActiveScreenShare) {
+            this.logger.log(`[Vision] 화면 공유 없음 - 일반 응답으로 전환`);
+            return false;
+        }
+
+        // 이미 Vision 처리 중이면 타임아웃 체크 (10초 이상 지났으면 리셋)
+        if (context.isVisionMode && context.pendingVisionRequest) {
+            const elapsed = Date.now() - context.pendingVisionRequest.requestId;
+            if (elapsed < 10000) {
+                this.logger.log(`[Vision] 이미 처리 중 (${(elapsed / 1000).toFixed(1)}초 경과) - 스킵`);
+                return false;
+            }
+            // 10초 이상 응답 없으면 리셋하고 새로 시작
+            this.logger.log(`[Vision] 이전 요청 타임아웃 (${(elapsed / 1000).toFixed(1)}초) - 리셋 후 재시도`);
+            context.isVisionMode = false;
+            context.pendingVisionRequest = undefined;
+        }
+
+        const requestId = Date.now();
+
+        this.logger.log(`\n========== [Vision 요청] ==========`);
+        this.logger.log(`질문: "${userQuestion}"`);
+
+        // 캡처 요청 전송
+        await this.sendVisionCaptureRequest(roomName, requestId, userQuestion, userId);
+
+        return true;
     }
 }

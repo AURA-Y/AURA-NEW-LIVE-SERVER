@@ -109,6 +109,40 @@ export class LivekitController {
     return { roomName: normalizedRoomName, active: isActive };
   }
 
+  // Vision 캡처 응답 수신 (DataChannel 64KB 제한 우회용)
+  @Post('voice-bot/:roomName/vision-capture')
+  async receiveVisionCapture(
+    @Param('roomName') roomName: string,
+    @Body() body: {
+      requestId: number;
+      imageBase64: string;
+      cursorPosition?: { x: number; y: number };
+      highlightedText?: string;
+      screenWidth: number;
+      screenHeight: number;
+    }
+  ) {
+    const normalizedRoomName = roomName.trim();
+    console.log(`[Vision HTTP] 캡처 수신 - room: ${normalizedRoomName}, requestId: ${body.requestId}, 크기: ${(body.imageBase64?.length / 1024).toFixed(1)}KB`);
+
+    try {
+      await this.voiceBotService.handleVisionCaptureFromHttp(normalizedRoomName, {
+        type: 'vision_capture_response',
+        requestId: body.requestId,
+        imageBase64: body.imageBase64,
+        cursorPosition: body.cursorPosition,
+        highlightedText: body.highlightedText,
+        screenWidth: body.screenWidth,
+        screenHeight: body.screenHeight,
+      });
+
+      return { success: true, message: 'Vision 캡처 처리 시작' };
+    } catch (error) {
+      console.error(`[Vision HTTP] 에러: ${error.message}`);
+      throw new HttpException(`Vision 캡처 처리 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
 
   @Post('create')
   async createRoom(@Body() createRoomDto: CreateRoomDto) {
