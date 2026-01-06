@@ -1,17 +1,30 @@
-import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
-import { Response } from 'express';
-import { LivekitService } from './livekit.service';
-import { VoiceBotService } from './voice-bot.service';
-import { SttService } from '../stt/stt.service';
-import { LlmService } from '../llm/llm.service'; //통합 검색
-import { TtsService } from '../tts/tts.service';
-import { RagClientService } from '../rag/rag-client.service';
-import { CreateRoomDto } from './dto/create-room.dto';
-import { JoinRoomDto } from './dto/join-room.dto';
-import { EmbedFilesDto } from './dto/embed-files.dto';
+import {
+  Controller,
+  Post,
+  Get,
+  Body,
+  Param,
+  UseInterceptors,
+  UploadedFile,
+  HttpException,
+  HttpStatus,
+  Res,
+  Delete,
+  Query,
+} from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { Response } from "express";
+import { LivekitService } from "./livekit.service";
+import { VoiceBotService } from "./voice-bot.service";
+import { SttService } from "../stt/stt.service";
+import { LlmService } from "../llm/llm.service"; //통합 검색
+import { TtsService } from "../tts/tts.service";
+import { RagClientService } from "../rag/rag-client.service";
+import { CreateRoomDto } from "./dto/create-room.dto";
+import { JoinRoomDto } from "./dto/join-room.dto";
+import { EmbedFilesDto } from "./dto/embed-files.dto";
 
-@Controller('room')
+@Controller("room")
 export class LivekitController {
   constructor(
     private readonly livekitService: LivekitService,
@@ -19,12 +32,12 @@ export class LivekitController {
     private readonly sttService: SttService,
     private readonly llmService: LlmService, //통합 검색
     private readonly ttsService: TtsService,
-    private readonly ragClientService: RagClientService,
-  ) { }
+    private readonly ragClientService: RagClientService
+  ) {}
 
   // AI 음성 봇 시작
-  @Post('voice-bot/:roomName')
-  async startVoiceBot(@Param('roomName') roomName: string) {
+  @Post("voice-bot/:roomName")
+  async startVoiceBot(@Param("roomName") roomName: string) {
     const normalizedRoomName = roomName.trim();
     console.log(`[AI 봇 요청] 방: ${normalizedRoomName}`);
 
@@ -35,10 +48,13 @@ export class LivekitController {
       await this.livekitService.removeBots(normalizedRoomName);
 
       // 봇 전용 토큰 생성
-      const { token } = await this.livekitService.joinRoom({
-        userName: `ai-bot-${Math.floor(Math.random() * 1000)}`,
-        roomName: normalizedRoomName,
-      }, true);
+      const { token } = await this.livekitService.joinRoom(
+        {
+          userName: `ai-bot-${Math.floor(Math.random() * 1000)}`,
+          roomName: normalizedRoomName,
+        },
+        true
+      );
 
       // 봇 시작
       await this.voiceBotService.startBot(normalizedRoomName, token);
@@ -49,31 +65,38 @@ export class LivekitController {
         roomName: normalizedRoomName,
       };
     } catch (error) {
-      throw new HttpException(`AI 봇 시작 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException(
+        `AI 봇 시작 실패: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
     }
   }
 
   // AI 음성 봇 종료
-  @Delete('voice-bot/:roomName')
-  async stopVoiceBot(@Param('roomName') roomName: string) {
+  @Delete("voice-bot/:roomName")
+  async stopVoiceBot(@Param("roomName") roomName: string) {
     const normalizedRoomName = roomName.trim();
     await this.voiceBotService.stopBot(normalizedRoomName);
-    return { success: true, message: `AI 봇이 방 '${normalizedRoomName}'에서 퇴장했습니다.` };
+    return {
+      success: true,
+      message: `AI 봇이 방 '${normalizedRoomName}'에서 퇴장했습니다.`,
+    };
   }
 
   // AI 봇 상태 확인
-  @Get('voice-bot/:roomName/status')
-  async getVoiceBotStatus(@Param('roomName') roomName: string) {
+  @Get("voice-bot/:roomName/status")
+  async getVoiceBotStatus(@Param("roomName") roomName: string) {
     const normalizedRoomName = roomName.trim();
     const isActive = this.voiceBotService.isActive(normalizedRoomName);
     return { roomName: normalizedRoomName, active: isActive };
   }
 
   // Vision 캡처 응답 수신 (DataChannel 64KB 제한 우회용)
-  @Post('voice-bot/:roomName/vision-capture')
+  @Post("voice-bot/:roomName/vision-capture")
   async receiveVisionCapture(
-    @Param('roomName') roomName: string,
-    @Body() body: {
+    @Param("roomName") roomName: string,
+    @Body()
+    body: {
       requestId: number;
       imageBase64: string;
       cursorPosition?: { x: number; y: number };
@@ -83,28 +106,37 @@ export class LivekitController {
     }
   ) {
     const normalizedRoomName = roomName.trim();
-    console.log(`[Vision HTTP] 캡처 수신 - room: ${normalizedRoomName}, requestId: ${body.requestId}, 크기: ${(body.imageBase64?.length / 1024).toFixed(1)}KB`);
+    console.log(
+      `[Vision HTTP] 캡처 수신 - room: ${normalizedRoomName}, requestId: ${
+        body.requestId
+      }, 크기: ${(body.imageBase64?.length / 1024).toFixed(1)}KB`
+    );
 
     try {
-      await this.voiceBotService.handleVisionCaptureFromHttp(normalizedRoomName, {
-        type: 'vision_capture_response',
-        requestId: body.requestId,
-        imageBase64: body.imageBase64,
-        cursorPosition: body.cursorPosition,
-        highlightedText: body.highlightedText,
-        screenWidth: body.screenWidth,
-        screenHeight: body.screenHeight,
-      });
+      await this.voiceBotService.handleVisionCaptureFromHttp(
+        normalizedRoomName,
+        {
+          type: "vision_capture_response",
+          requestId: body.requestId,
+          imageBase64: body.imageBase64,
+          cursorPosition: body.cursorPosition,
+          highlightedText: body.highlightedText,
+          screenWidth: body.screenWidth,
+          screenHeight: body.screenHeight,
+        }
+      );
 
-      return { success: true, message: 'Vision 캡처 처리 시작' };
+      return { success: true, message: "Vision 캡처 처리 시작" };
     } catch (error) {
       console.error(`[Vision HTTP] 에러: ${error.message}`);
-      throw new HttpException(`Vision 캡처 처리 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException(
+        `Vision 캡처 처리 실패: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
     }
   }
 
-
-  @Post('create')
+  @Post("create")
   async createRoom(@Body() createRoomDto: CreateRoomDto) {
     const result = await this.livekitService.createRoom(createRoomDto);
     const normalizedRoomTitle = result.roomTitle.trim();
@@ -115,16 +147,24 @@ export class LivekitController {
         await this.voiceBotService.stopBot(normalizedRoomTitle);
       }
       await this.livekitService.removeBots(normalizedRoomTitle);
-      const { token } = await this.livekitService.joinRoom({
-        userName: `ai-bot-${Math.floor(Math.random() * 1000)}`,
-        roomName: normalizedRoomTitle,
-      }, true);
+      const { token } = await this.livekitService.joinRoom(
+        {
+          userName: `ai-bot-${Math.floor(Math.random() * 1000)}`,
+          roomName: normalizedRoomTitle,
+        },
+        true
+      );
 
-      void this.voiceBotService.startBot(normalizedRoomTitle, token).then(() => {
-        console.log(`[자동 봇 시작] 방 '${normalizedRoomTitle}'에 봇이 자동으로 입장했습니다.`);
-      }).catch((error) => {
-        console.error(`[자동 봇 시작 실패] ${error.message}`);
-      });
+      void this.voiceBotService
+        .startBot(normalizedRoomTitle, token)
+        .then(() => {
+          console.log(
+            `[자동 봇 시작] 방 '${normalizedRoomTitle}'에 봇이 자동으로 입장했습니다.`
+          );
+        })
+        .catch((error) => {
+          console.error(`[자동 봇 시작 실패] ${error.message}`);
+        });
     } catch (error) {
       console.error(`[자동 봇 시작 실패] ${error.message}`);
       // 봇 시작 실패해도 방 생성은 성공으로 처리
@@ -133,33 +173,41 @@ export class LivekitController {
     return result;
   }
 
-  @Post('join')
+  @Post("join")
   async joinRoom(@Body() joinRoomDto: JoinRoomDto) {
     return this.livekitService.joinRoom(joinRoomDto);
   }
 
-  @Get(':roomId')
-  async getRoom(@Param('roomId') roomId: string) {
+  @Get(":roomId")
+  async getRoom(@Param("roomId") roomId: string) {
     return this.livekitService.getRoom(roomId);
   }
 
-  @Delete(':roomId')
-  async deleteRoom(@Param('roomId') roomId: string) {
+  @Delete(":roomId")
+  async deleteRoom(@Param("roomId") roomId: string) {
     return this.livekitService.deleteRoom(roomId);
   }
 
   // 오디오 파일로 STT 테스트 (마이크 없이 테스트용)
-  @Post('stt-test')
-  @UseInterceptors(FileInterceptor('audio'))
+  @Post("stt-test")
+  @UseInterceptors(FileInterceptor("audio"))
   async testStt(@UploadedFile() file: Express.Multer.File) {
     if (!file) {
-      throw new HttpException('오디오 파일이 필요합니다', HttpStatus.BAD_REQUEST);
+      throw new HttpException(
+        "오디오 파일이 필요합니다",
+        HttpStatus.BAD_REQUEST
+      );
     }
 
-    console.log(`[STT 테스트] 파일: ${file.originalname}, 크기: ${file.size} bytes`);
+    console.log(
+      `[STT 테스트] 파일: ${file.originalname}, 크기: ${file.size} bytes`
+    );
 
     try {
-      const transcript = await this.sttService.transcribeFromBuffer(file.buffer, file.originalname);
+      const transcript = await this.sttService.transcribeFromBuffer(
+        file.buffer,
+        file.originalname
+      );
       return {
         success: true,
         fileName: file.originalname,
@@ -167,7 +215,10 @@ export class LivekitController {
         transcript: transcript,
       };
     } catch (error) {
-      throw new HttpException(`STT 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException(
+        `STT 실패: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
     }
   }
 
@@ -262,12 +313,11 @@ export class LivekitController {
   }
   */
 
-
   // TTS만 테스트 (Polly 권한 확인용)
-  @Post('tts-test')
-  async testTts(@Body('text') text: string, @Res() res: Response) {
+  @Post("tts-test")
+  async testTts(@Body("text") text: string, @Res() res: Response) {
     if (!text) {
-      text = '안녕하세요, TTS 테스트입니다.';
+      text = "안녕하세요, TTS 테스트입니다.";
     }
 
     console.log(`[TTS 테스트] 텍스트: ${text}`);
@@ -277,48 +327,73 @@ export class LivekitController {
       console.log(`[TTS 완료] 오디오 크기: ${audioBuffer.length} bytes`);
 
       res.set({
-        'Content-Type': 'audio/mpeg',
-        'Content-Length': audioBuffer.length,
+        "Content-Type": "audio/mpeg",
+        "Content-Length": audioBuffer.length,
       });
 
       res.send(audioBuffer);
     } catch (error) {
       console.error(`[TTS 에러] ${error.message}`);
-      throw new HttpException(`TTS 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException(
+        `TTS 실패: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
     }
   }
 
   // 파일 임베딩 및 회의 시작 정보 전송
-  @Post('embed-files')
-  async embedFiles(@Body() body: { roomName: string; files: any[]; topic?: string; description?: string; roomId?: string }) {
-    console.log(`[Embed Files] Received for room: ${body.roomName}, Files: ${body.files?.length || 0}`);
+  @Post("embed-files")
+  async embedFiles(
+    @Body()
+    body: {
+      roomName: string;
+      files: any[];
+      topic?: string;
+      description?: string;
+      roomId?: string;
+    }
+  ) {
+    console.log(
+      `[Embed Files] Received for room: ${body.roomName}, Files: ${
+        body.files?.length || 0
+      }`
+    );
 
     // RAG 서버에 회의 시작 정보 및 파일 전달
     // RAG API Spec: POST /meetings/{roomId}/start Body: { "description": "...", "files": [...], "roomName": "..." }
     const ragPayload = {
-      description: body.description || '',
+      description: body.description || "",
       files: body.files || [],
-      room_name: body.roomName,
+      room_name: body.roomName, // This might be UUID or Topic depending on frontend. RAG uses this for something?
+      // RAG worker expects 'room_name_value' for the human-readable title
+      room_name_value: body.topic || body.roomName,
     };
 
     // URL path parameter로 roomId(UUID) 사용
-    const targetId = body.roomId || body.roomName; 
-    const ragResult = await this.ragClientService.startMeeting(targetId, ragPayload);
+    const targetId = body.roomId || body.roomName;
+    const ragResult = await this.ragClientService.startMeeting(
+      targetId,
+      ragPayload
+    );
 
     if (ragResult.success) {
-      return { status: 'success', roomName: body.roomName, ragResponse: ragResult.message };
+      return {
+        status: "success",
+        roomName: body.roomName,
+        ragResponse: ragResult.message,
+      };
     } else {
       // 실패 로그는 남기되, 500 에러를 던질지 여부 결정.
       // 프론트엔드가 에러 핸들링을 하고 있으므로 던지는 게 맞음.
       throw new HttpException(
-        { status: 'fail', message: ragResult.message },
-        HttpStatus.INTERNAL_SERVER_ERROR,
+        { status: "fail", message: ragResult.message },
+        HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
   }
 
   // 회의 종료 - room_name 수신 후 RAG 서버로 전달
-  @Post('end-meeting')
+  @Post("end-meeting")
   async endMeeting(@Body() body: { roomName: string }) {
     console.log(`[End Meeting] Received room name: ${body.roomName}`);
 
@@ -326,56 +401,60 @@ export class LivekitController {
     const ragResult = await this.ragClientService.endMeeting(body.roomName);
 
     if (ragResult.success) {
-      return { status: 'success', roomName: body.roomName, ragResponse: ragResult.message };
+      return {
+        status: "success",
+        roomName: body.roomName,
+        ragResponse: ragResult.message,
+      };
     } else {
       throw new HttpException(
-        { status: 'fail', message: ragResult.message },
-        HttpStatus.INTERNAL_SERVER_ERROR,
+        { status: "fail", message: ragResult.message },
+        HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
   }
 }
 
-
-
-
 @Controller()
 export class ApiController {
   constructor(
     private readonly livekitService: LivekitService,
-    private readonly llmService: LlmService,
-  ) { }
+    private readonly llmService: LlmService
+  ) {}
 
-  @Get('health')
+  @Get("health")
   health() {
     return {
-      status: 'ok',
+      status: "ok",
       timestamp: new Date().toISOString(),
     };
   }
 
-  @Get('rooms')
+  @Get("rooms")
   async listRooms() {
     return this.livekitService.listRooms();
   }
 
-  @Post('token')
+  @Post("token")
   async generateToken(@Body() joinRoomDto: JoinRoomDto) {
     return this.livekitService.joinRoom(joinRoomDto);
-  } 
+  }
 
-  @Get('map/static')
+  @Get("map/static")
   async getStaticMap(
-    @Query('originLng') originLng: string,
-    @Query('originLat') originLat: string,
-    @Query('destLng') destLng: string,
-    @Query('destLat') destLat: string,
-    @Query('width') width: string,
-    @Query('height') height: string,
-    @Res() res: Response,
+    @Query("originLng") originLng: string,
+    @Query("originLat") originLat: string,
+    @Query("destLng") destLng: string,
+    @Query("destLat") destLat: string,
+    @Query("width") width: string,
+    @Query("height") height: string,
+    @Res() res: Response
   ) {
     if (!originLng || !originLat || !destLng || !destLat) {
-      throw new HttpException('origin/destination 좌표가 필요합니다.', HttpStatus.BAD_REQUEST);
+      throw new HttpException(
+        "origin/destination 좌표가 필요합니다.",
+        HttpStatus.BAD_REQUEST
+      );
     }
 
     const image = await this.llmService.getStaticMapImage({
@@ -386,13 +465,13 @@ export class ApiController {
     });
 
     if (!image) {
-      throw new HttpException('Static Map 생성 실패', HttpStatus.BAD_GATEWAY);
+      throw new HttpException("Static Map 생성 실패", HttpStatus.BAD_GATEWAY);
     }
 
     res.set({
-      'Content-Type': image.contentType,
-      'Cache-Control': 'no-store',
-      'Access-Control-Allow-Origin': '*',
+      "Content-Type": image.contentType,
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
     });
 
     res.send(image.buffer);

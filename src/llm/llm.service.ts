@@ -1,404 +1,489 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import {
-    BedrockRuntimeClient,
-    InvokeModelCommand,
-} from '@aws-sdk/client-bedrock-runtime';
-import { RagClientService } from '../rag/rag-client.service';
-import { SearchService, SearchResult, SearchType } from './search.service';
-import { MapService } from './map.service';
+  BedrockRuntimeClient,
+  InvokeModelCommand,
+} from "@aws-sdk/client-bedrock-runtime";
+import { RagClientService } from "../rag/rag-client.service";
+import { SearchService, SearchResult, SearchType } from "./search.service";
+import { MapService } from "./map.service";
 
 @Injectable()
 export class LlmService {
-    private readonly logger = new Logger(LlmService.name);
-    private bedrockClient: BedrockRuntimeClient;
-    private readonly modelId = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
-    private readonly restApiUrl: string;
-    private readonly topicCache = new Map<string, string>();
+  private readonly logger = new Logger(LlmService.name);
+  private bedrockClient: BedrockRuntimeClient;
+  private readonly modelId = "global.anthropic.claude-haiku-4-5-20251001-v1:0";
+  private readonly restApiUrl: string;
+  private readonly topicCache = new Map<string, string>();
 
-    private lastRequestTime = 0;
-    private isProcessing = false;
-    private readonly MIN_REQUEST_INTERVAL = 1500;
-    private readonly MAX_RETRIES = 3;
+  private lastRequestTime = 0;
+  private isProcessing = false;
+  private readonly MIN_REQUEST_INTERVAL = 1500;
+  private readonly MAX_RETRIES = 3;
 
-    // sendMessagePure용 rate limiting (DDD 분석 등)
-    private lastPureRequestTime = 0;
-    private isPureProcessing = false;
-    private readonly PURE_MIN_INTERVAL = 1000; // 1초
-    private readonly PURE_MAX_RETRIES = 2;
+  // sendMessagePure용 rate limiting (DDD 분석 등)
+  private lastPureRequestTime = 0;
+  private isPureProcessing = false;
+  private readonly PURE_MIN_INTERVAL = 1000; // 1초
+  private readonly PURE_MAX_RETRIES = 2;
 
-    constructor(
-        private configService: ConfigService,
-        private ragClientService: RagClientService,
-        private searchService: SearchService,
-        private mapService: MapService,
-    ) {
-        this.restApiUrl =
-            (this.configService.get<string>('REST_API_URL') ||
-                this.configService.get<string>('BACKEND_API_URL') ||
-                'http://localhost:3002').replace(/\/+$/, '');
+  constructor(
+    private configService: ConfigService,
+    private ragClientService: RagClientService,
+    private searchService: SearchService,
+    private mapService: MapService
+  ) {
+    this.restApiUrl = (
+      this.configService.get<string>("REST_API_URL") ||
+      this.configService.get<string>("BACKEND_API_URL") ||
+      "http://localhost:3002"
+    ).replace(/\/+$/, "");
 
-        this.bedrockClient = new BedrockRuntimeClient({
-            region: this.configService.get<string>('AWS_REGION') || 'ap-northeast-2',
-            credentials: {
-                accessKeyId: this.configService.get<string>('AWS_ACCESS_KEY_ID'),
-                secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY'),
-            },
-        });
-    }
+    this.bedrockClient = new BedrockRuntimeClient({
+      region: this.configService.get<string>("AWS_REGION") || "ap-northeast-2",
+      credentials: {
+        accessKeyId: this.configService.get<string>("AWS_ACCESS_KEY_ID"),
+        secretAccessKey: this.configService.get<string>(
+          "AWS_SECRET_ACCESS_KEY"
+        ),
+      },
+    });
+  }
 
-    // ============================================================
-    // Public API
-    // ============================================================
+  // ============================================================
+  // Public API
+  // ============================================================
 
-    async sendMessage(
-        userMessage: string,
-        searchDomain?: 'weather' | 'naver' | null,
-        roomId?: string
-    ): Promise<{ text: string; searchResults?: SearchResult[] }> {
-        // 회의록 관련 질문이고 roomId가 있으면 RAG 서버에 질문
-        const meetingKeywords = [
-            '회의', '미팅', '액션', '액션아이템', '할 일', '할일', 'todo', 'action',
-            '결정', '논의', '안건', '발언', '누가', '언제', '요약', '정리',
-        ];
-        const isMeetingQuery = meetingKeywords.some(kw => userMessage.toLowerCase().includes(kw));
-        
-        if (isMeetingQuery && roomId) {
-            const resolvedRoomId = await this.getRoomIdByTopic(roomId);
-    
-            try {
-                // RAG 연결이 없으면 시도해서 붙여본다
-                if (!this.ragClientService.isConnected(resolvedRoomId)) {
-                    try {
-                        await this.ragClientService.connect(resolvedRoomId);
-                    } catch (err) {
-                        this.logger.warn(`[RAG] 연결 시도 실패: ${resolvedRoomId} (${(err as Error).message})`);
-                    }
-                }
+  async sendMessage(
+    userMessage: string,
+    searchDomain?: "weather" | "naver" | null,
+    roomId?: string
+  ): Promise<{ text: string; searchResults?: SearchResult[] }> {
+    // 회의록 관련 질문이고 roomId가 있으면 RAG 서버에 질문
+    const meetingKeywords = [
+      "회의",
+      "미팅",
+      "액션",
+      "액션아이템",
+      "할 일",
+      "할일",
+      "todo",
+      "action",
+      "결정",
+      "논의",
+      "안건",
+      "발언",
+      "누가",
+      "언제",
+      "요약",
+      "정리",
+    ];
+    const isMeetingQuery = meetingKeywords.some((kw) =>
+      userMessage.toLowerCase().includes(kw)
+    );
 
-                if (!this.ragClientService.isConnected(resolvedRoomId)) {
-                    this.logger.warn(`[RAG] 연결되지 않음: ${resolvedRoomId}`);
-                    return { text: '회의록 기능을 사용할 수 없습니다.' };
-                }
-                this.logger.log(`[RAG 질문] Room: ${resolvedRoomId}, 질문: "${userMessage}"`);
-                const ragAnswer = await this.ragClientService.sendQuestion(resolvedRoomId, userMessage);
-                return { text: ragAnswer };
-            } catch (error) {
-                this.logger.error(`[RAG 에러] ${error.message}`);
-                return { text: '회의록을 조회하는 중 오류가 발생했습니다.' };
-            }
-        }
+    if (isMeetingQuery && roomId) {
+      const resolvedRoomId = await this.getRoomIdByTopic(roomId);
 
-        // 동시 요청 방지
-        while (this.isProcessing) {
-            await this.sleep(100);
-        }
-
-        // 쿨다운 체크
-        const now = Date.now();
-        const timeSinceLastRequest = now - this.lastRequestTime;
-        if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
-            await this.sleep(this.MIN_REQUEST_INTERVAL - timeSinceLastRequest);
-        }
-
-        this.isProcessing = true;
-        this.lastRequestTime = Date.now();
-
-        try {
-            const messages = [{ role: "user", content: userMessage }];
-            return await this.processWithTools(messages, 0, undefined, searchDomain, true);
-        } finally {
-            this.isProcessing = false;
-        }
-    }
-
-    /**
-     * 순수 LLM 호출 (검색 없이)
-     * DDD 분석 등 검색이 필요 없는 LLM 작업에 사용
-     */
-    async sendMessagePure(prompt: string, maxTokens = 500): Promise<string> {
-        // 동시 요청 방지
-        while (this.isPureProcessing) {
-            await this.sleep(100);
-        }
-
-        // 쿨다운 체크
-        const now = Date.now();
-        const timeSinceLastRequest = now - this.lastPureRequestTime;
-        if (timeSinceLastRequest < this.PURE_MIN_INTERVAL) {
-            await this.sleep(this.PURE_MIN_INTERVAL - timeSinceLastRequest);
-        }
-
-        this.isPureProcessing = true;
-        this.lastPureRequestTime = Date.now();
-
-        try {
-            return await this.sendMessagePureWithRetry(prompt, maxTokens, 0);
-        } finally {
-            this.isPureProcessing = false;
-        }
-    }
-
-    /**
-     * sendMessagePure 내부 재시도 로직
-     */
-    private async sendMessagePureWithRetry(prompt: string, maxTokens: number, retryCount: number): Promise<string> {
-        try {
-            const payload = {
-                anthropic_version: "bedrock-2023-05-31",
-                max_tokens: maxTokens,
-                messages: [{ role: "user", content: prompt }],
-            };
-
-            const command = new InvokeModelCommand({
-                modelId: this.modelId,
-                contentType: 'application/json',
-                accept: 'application/json',
-                body: JSON.stringify(payload),
-            });
-
-            const response = await this.bedrockClient.send(command);
-            const body = JSON.parse(new TextDecoder().decode(response.body));
-            const text = body.content?.[0]?.text || '';
-
-            return text.trim();
-        } catch (error) {
-            const isThrottled = error.name === 'ThrottlingException' ||
-                error.message?.includes('Too many requests');
-
-            if (isThrottled && retryCount < this.PURE_MAX_RETRIES) {
-                const backoffTime = Math.pow(2, retryCount + 1) * 1000; // 2초, 4초
-                this.logger.warn(`[LLM Pure 재시도] ${backoffTime}ms 후 재시도 (${retryCount + 1}/${this.PURE_MAX_RETRIES})`);
-                await this.sleep(backoffTime);
-                return this.sendMessagePureWithRetry(prompt, maxTokens, retryCount + 1);
-            }
-
-            this.logger.error(`[LLM Pure 호출 에러] ${error.message}`);
-            throw error;
-        }
-    }
-
-    /**
-     * 검색 계획 수립 (SearchService 위임)
-     */
-    async buildSearchPlan(rawQuery: string) {
-        return this.searchService.buildSearchPlan(rawQuery);
-    }
-
-    /**
-     * 경로 정보 조회 (MapService 위임)
-     */
-    async getRouteInfo(result: SearchResult) {
-        return this.mapService.getRouteInfo(result);
-    }
-
-    /**
-     * 정적 지도 이미지 (MapService 위임)
-     */
-    async getStaticMapImage(params: {
-        origin: { lng: string; lat: string };
-        destination: { lng: string; lat: string };
-        width: number;
-        height: number;
-        path?: { lng: string; lat: string }[];
-        distanceMeters?: number;
-    }) {
-        return this.mapService.getStaticMapImage(params);
-    }
-
-    // ============================================================
-    // Core Processing
-    // ============================================================
-
-    /**
-     * topic → roomId 조회 (1) 캐시 확인 (2) REST API 호출
-     */
-    private async getRoomIdByTopic(topicOrId: string): Promise<string> {
-        if (!topicOrId) return topicOrId;
-        // 이미 id처럼 보이면 그대로 사용
-        const hasDash = topicOrId.includes('-');
-        if (topicOrId.length >= 30 && hasDash) return topicOrId;
-
-        // 캐시
-        const cached = this.topicCache.get(topicOrId);
-        if (cached) return cached;
-
-        if (!this.restApiUrl) return topicOrId;
-
-        try {
-            const resp = await fetch(
-                `${this.restApiUrl}/restapi/rooms/topic/${encodeURIComponent(topicOrId)}`,
-                { method: 'GET' }
+      try {
+        // RAG 연결이 없으면 시도해서 붙여본다
+        if (!this.ragClientService.isConnected(resolvedRoomId)) {
+          try {
+            await this.ragClientService.connect(resolvedRoomId);
+          } catch (err) {
+            this.logger.warn(
+              `[RAG] 연결 시도 실패: ${resolvedRoomId} (${
+                (err as Error).message
+              })`
             );
-            if (!resp.ok) {
-                this.logger.warn(`[RAG] topic→roomId 조회 실패: ${topicOrId} (${resp.status})`);
-                return topicOrId;
-            }
-            const data = await resp.json();
-            if (data?.roomId) {
-                this.logger.log(`[RAG] topic "${topicOrId}" → roomId ${data.roomId}`);
-                this.topicCache.set(topicOrId, data.roomId);
-                return data.roomId;
-            }
-        } catch (err) {
-            this.logger.warn(`[RAG] topic→roomId 조회 에러: ${(err as Error).message}`);
+          }
         }
+
+        if (!this.ragClientService.isConnected(resolvedRoomId)) {
+          this.logger.warn(`[RAG] 연결되지 않음: ${resolvedRoomId}`);
+          return { text: "회의록 기능을 사용할 수 없습니다." };
+        }
+        this.logger.log(
+          `[RAG 질문] Room: ${resolvedRoomId}, 질문: "${userMessage}"`
+        );
+        const ragAnswer = await this.ragClientService.sendQuestion(
+          resolvedRoomId,
+          userMessage
+        );
+        return { text: ragAnswer };
+      } catch (error) {
+        this.logger.error(`[RAG 에러] ${error.message}`);
+        return { text: "회의록을 조회하는 중 오류가 발생했습니다." };
+      }
+    }
+
+    // 동시 요청 방지
+    while (this.isProcessing) {
+      await this.sleep(100);
+    }
+
+    // 쿨다운 체크
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
+      await this.sleep(this.MIN_REQUEST_INTERVAL - timeSinceLastRequest);
+    }
+
+    this.isProcessing = true;
+    this.lastRequestTime = Date.now();
+
+    try {
+      const messages = [{ role: "user", content: userMessage }];
+      return await this.processWithTools(
+        messages,
+        0,
+        undefined,
+        searchDomain,
+        true
+      );
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  /**
+   * 순수 LLM 호출 (검색 없이)
+   * DDD 분석 등 검색이 필요 없는 LLM 작업에 사용
+   */
+  async sendMessagePure(prompt: string, maxTokens = 500): Promise<string> {
+    // 동시 요청 방지
+    while (this.isPureProcessing) {
+      await this.sleep(100);
+    }
+
+    // 쿨다운 체크
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastPureRequestTime;
+    if (timeSinceLastRequest < this.PURE_MIN_INTERVAL) {
+      await this.sleep(this.PURE_MIN_INTERVAL - timeSinceLastRequest);
+    }
+
+    this.isPureProcessing = true;
+    this.lastPureRequestTime = Date.now();
+
+    try {
+      return await this.sendMessagePureWithRetry(prompt, maxTokens, 0);
+    } finally {
+      this.isPureProcessing = false;
+    }
+  }
+
+  /**
+   * sendMessagePure 내부 재시도 로직
+   */
+  private async sendMessagePureWithRetry(
+    prompt: string,
+    maxTokens: number,
+    retryCount: number
+  ): Promise<string> {
+    try {
+      const payload = {
+        anthropic_version: "bedrock-2023-05-31",
+        max_tokens: maxTokens,
+        messages: [{ role: "user", content: prompt }],
+      };
+
+      const command = new InvokeModelCommand({
+        modelId: this.modelId,
+        contentType: "application/json",
+        accept: "application/json",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await this.bedrockClient.send(command);
+      const body = JSON.parse(new TextDecoder().decode(response.body));
+      const text = body.content?.[0]?.text || "";
+
+      return text.trim();
+    } catch (error) {
+      const isThrottled =
+        error.name === "ThrottlingException" ||
+        error.message?.includes("Too many requests");
+
+      if (isThrottled && retryCount < this.PURE_MAX_RETRIES) {
+        const backoffTime = Math.pow(2, retryCount + 1) * 1000; // 2초, 4초
+        this.logger.warn(
+          `[LLM Pure 재시도] ${backoffTime}ms 후 재시도 (${retryCount + 1}/${
+            this.PURE_MAX_RETRIES
+          })`
+        );
+        await this.sleep(backoffTime);
+        return this.sendMessagePureWithRetry(prompt, maxTokens, retryCount + 1);
+      }
+
+      this.logger.error(`[LLM Pure 호출 에러] ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * 검색 계획 수립 (SearchService 위임)
+   */
+  async buildSearchPlan(rawQuery: string) {
+    return this.searchService.buildSearchPlan(rawQuery);
+  }
+
+  /**
+   * 경로 정보 조회 (MapService 위임)
+   */
+  async getRouteInfo(result: SearchResult) {
+    return this.mapService.getRouteInfo(result);
+  }
+
+  /**
+   * 정적 지도 이미지 (MapService 위임)
+   */
+  async getStaticMapImage(params: {
+    origin: { lng: string; lat: string };
+    destination: { lng: string; lat: string };
+    width: number;
+    height: number;
+    path?: { lng: string; lat: string }[];
+    distanceMeters?: number;
+  }) {
+    return this.mapService.getStaticMapImage(params);
+  }
+
+  // ============================================================
+  // Core Processing
+  // ============================================================
+
+  /**
+   * topic → roomId 조회 (1) 캐시 확인 (2) REST API 호출
+   */
+  private async getRoomIdByTopic(topicOrId: string): Promise<string> {
+    if (!topicOrId) return topicOrId;
+    // 이미 id처럼 보이면 그대로 사용
+    const hasDash = topicOrId.includes("-");
+    if (topicOrId.length >= 30 && hasDash) return topicOrId;
+
+    // 캐시
+    const cached = this.topicCache.get(topicOrId);
+    if (cached) return cached;
+
+    if (!this.restApiUrl) return topicOrId;
+
+    try {
+      const resp = await fetch(
+        `${this.restApiUrl}/system/rooms/topic/${encodeURIComponent(
+          topicOrId
+        )}`,
+        { method: "GET" }
+      );
+      if (!resp.ok) {
+        this.logger.warn(
+          `[RAG] topic→roomId 조회 실패: ${topicOrId} (${resp.status})`
+        );
         return topicOrId;
+      }
+      const data = await resp.json();
+      if (data?.roomId) {
+        this.logger.log(`[RAG] topic "${topicOrId}" → roomId ${data.roomId}`);
+        this.topicCache.set(topicOrId, data.roomId);
+        return data.roomId;
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[RAG] topic→roomId 조회 에러: ${(err as Error).message}`
+      );
+    }
+    return topicOrId;
+  }
+
+  private async processWithTools(
+    messages: any[],
+    retryCount: number,
+    searchResults?: SearchResult[],
+    searchDomain?: "weather" | "naver" | null,
+    forceSearch = false
+  ): Promise<{ text: string; searchResults?: SearchResult[] }> {
+    // 검색 실행
+    if (forceSearch && !searchResults) {
+      const latestUser = [...messages].reverse().find((m) => m.role === "user");
+      const rawQuery =
+        typeof latestUser?.content === "string" ? latestUser.content : "";
+      const trimmedQuery = rawQuery.trim();
+
+      if (trimmedQuery.length > 5) {
+        const { query, searchType } = await this.searchService.buildSearchPlan(
+          trimmedQuery
+        );
+
+        if (searchType === "none") {
+          this.logger.log(`[검색 스킵] 카테고리/키워드 없음`);
+          // 자연스러운 응답
+          const responses = [
+            "네? 뭐 찾아볼까요?",
+            "어 뭐 궁금한 거 있어요?",
+            "네~ 뭐 도와드릴까요?",
+          ];
+          return {
+            text: responses[Math.floor(Math.random() * responses.length)],
+            searchResults: undefined,
+          };
+        }
+
+        this.logger.log(`[검색] type=${searchType}, query="${query}"`);
+        searchResults = await this.searchService.search(query, searchType);
+
+        // 검색했는데 결과가 없으면
+        if (!searchResults || searchResults.length === 0) {
+          this.logger.log(`[검색 결과 없음]`);
+          const noResultResponses = [
+            "음 검색해봤는데 잘 안 나오네요, 다른 걸로 찾아볼까요?",
+            "아 그건 검색이 잘 안 돼요, 다르게 말해줄 수 있어요?",
+          ];
+          return {
+            text: noResultResponses[
+              Math.floor(Math.random() * noResultResponses.length)
+            ],
+            searchResults: undefined,
+          };
+        }
+      }
     }
 
-    private async processWithTools(
-        messages: any[],
-        retryCount: number,
-        searchResults?: SearchResult[],
-        searchDomain?: 'weather' | 'naver' | null,
-        forceSearch = false
-    ): Promise<{ text: string; searchResults?: SearchResult[] }> {
+    // 프롬프트 생성
+    const latestUser = [...messages].reverse().find((m) => m.role === "user");
+    const userMessage =
+      typeof latestUser?.content === "string" ? latestUser.content : "";
+    const systemPrompt = this.buildSystemPrompt(
+      userMessage,
+      searchResults || []
+    );
 
-        // 검색 실행
-        if (forceSearch && !searchResults) {
-            const latestUser = [...messages].reverse().find(m => m.role === 'user');
-            const rawQuery = typeof latestUser?.content === 'string' ? latestUser.content : '';
-            const trimmedQuery = rawQuery.trim();
+    const messagesWithSearch =
+      searchResults && searchResults.length > 0
+        ? [
+            ...messages,
+            {
+              role: "user",
+              content: `[검색 결과]\n${searchResults
+                .map((r) => `- ${r.title}: ${r.content}`)
+                .join("\n")}`,
+            },
+          ]
+        : messages;
 
-            if (trimmedQuery.length > 5) {
-                const { query, searchType } = await this.searchService.buildSearchPlan(trimmedQuery);
-                
-                if (searchType === 'none') {
-                    this.logger.log(`[검색 스킵] 카테고리/키워드 없음`);
-                    // 자연스러운 응답
-                    const responses = [
-                        '네? 뭐 찾아볼까요?',
-                        '어 뭐 궁금한 거 있어요?',
-                        '네~ 뭐 도와드릴까요?',
-                    ];
-                    return { 
-                        text: responses[Math.floor(Math.random() * responses.length)],
-                        searchResults: undefined 
-                    };
-                }
+    const payload = {
+      anthropic_version: "bedrock-2023-05-31",
+      max_tokens: 400,
+      system: systemPrompt,
+      messages: messagesWithSearch,
+    };
 
-                this.logger.log(`[검색] type=${searchType}, query="${query}"`);
-                searchResults = await this.searchService.search(query, searchType);
-                
-                // 검색했는데 결과가 없으면
-                if (!searchResults || searchResults.length === 0) {
-                    this.logger.log(`[검색 결과 없음]`);
-                    const noResultResponses = [
-                        '음 검색해봤는데 잘 안 나오네요, 다른 걸로 찾아볼까요?',
-                        '아 그건 검색이 잘 안 돼요, 다르게 말해줄 수 있어요?',
-                    ];
-                    return {
-                        text: noResultResponses[Math.floor(Math.random() * noResultResponses.length)],
-                        searchResults: undefined
-                    };
-                }
-            }
+    const command = new InvokeModelCommand({
+      modelId: this.modelId,
+      contentType: "application/json",
+      accept: "application/json",
+      body: JSON.stringify(payload),
+    });
+
+    try {
+      const response = await this.bedrockClient.send(command);
+      const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+      const textBlock = responseBody.content?.find(
+        (b: any) => b.type === "text"
+      );
+      let finalMessage =
+        textBlock?.text || "죄송합니다, 응답을 생성할 수 없습니다.";
+
+      // 검색 결과가 있는 경우 응답 형식 결정
+      if (searchResults && searchResults.length > 0) {
+        const hasLocation = searchResults.some(
+          (r) => r.address || r.roadAddress
+        );
+
+        if (hasLocation) {
+          const placeResult = searchResults.find(
+            (r) => r.address || r.roadAddress
+          );
+          if (placeResult) {
+            finalMessage = this.buildPlaceRecommendation(placeResult);
+          }
+        } else {
+          finalMessage = this.validateAndBuildNewsResponse(
+            finalMessage,
+            searchResults
+          );
         }
+      }
 
-        // 프롬프트 생성
-        const latestUser = [...messages].reverse().find(m => m.role === 'user');
-        const userMessage = typeof latestUser?.content === 'string' ? latestUser.content : '';
-        const systemPrompt = this.buildSystemPrompt(userMessage, searchResults || []);
+      this.logger.log(`[LLM 응답] ${finalMessage.substring(0, 80)}...`);
+      return { text: finalMessage, searchResults };
+    } catch (error) {
+      const isThrottled =
+        error.name === "ThrottlingException" ||
+        error.message?.includes("Too many requests");
 
-        const messagesWithSearch = searchResults && searchResults.length > 0
-            ? [...messages, {
-                role: "user",
-                content: `[검색 결과]\n${searchResults.map(r => `- ${r.title}: ${r.content}`).join('\n')}`
-            }]
-            : messages;
+      if (isThrottled && retryCount < this.MAX_RETRIES) {
+        const backoffTime = Math.pow(2, retryCount + 1) * 2000;
+        this.logger.warn(`[LLM 재시도] ${backoffTime}ms`);
+        await this.sleep(backoffTime);
+        return this.processWithTools(
+          messages,
+          retryCount + 1,
+          searchResults,
+          searchDomain
+        );
+      }
 
-        const payload = {
-            anthropic_version: "bedrock-2023-05-31",
-            max_tokens: 400,
-            system: systemPrompt,
-            messages: messagesWithSearch,
-        };
+      this.logger.error(`[LLM 에러] ${error.message}`);
+      throw error;
+    }
+  }
 
-        const command = new InvokeModelCommand({
-            modelId: this.modelId,
-            contentType: 'application/json',
-            accept: 'application/json',
-            body: JSON.stringify(payload),
-        });
+  // ============================================================
+  // System Prompt Builder
+  // ============================================================
 
-        try {
-            const response = await this.bedrockClient.send(command);
-            const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-            const textBlock = responseBody.content?.find((b: any) => b.type === 'text');
-            let finalMessage = textBlock?.text || "죄송합니다, 응답을 생성할 수 없습니다.";
+  private buildSystemPrompt(
+    userMessage: string,
+    searchResults: SearchResult[]
+  ): string {
+    const lowerMessage = userMessage.toLowerCase();
 
-            // 검색 결과가 있는 경우 응답 형식 결정
-            if (searchResults && searchResults.length > 0) {
-                const hasLocation = searchResults.some(r => r.address || r.roadAddress);
-                
-                if (hasLocation) {
-                    const placeResult = searchResults.find(r => r.address || r.roadAddress);
-                    if (placeResult) {
-                        finalMessage = this.buildPlaceRecommendation(placeResult);
-                    }
-                } else {
-                    finalMessage = this.validateAndBuildNewsResponse(finalMessage, searchResults);
-                }
-            }
+    // 카테고리 매칭
+    const categoryKeywords: Record<string, string[]> = {
+      날씨: ["날씨", "기온", "온도", "비", "눈", "바람"],
+      카페: ["카페", "커피"],
+      맛집: ["맛집", "식당", "레스토랑", "밥집", "저녁", "점심"],
+      술집: ["술집", "바", "포차", "호프"],
+      팝업: ["팝업", "팝업스토어"],
+      전시: ["전시", "전시회", "갤러리"],
+      영화: ["영화", "개봉", "영화관"],
+      뉴스: ["뉴스", "소식", "기사"],
+      주식: ["주식", "주가", "코스피"],
+      스포츠: ["스포츠", "축구", "야구"],
+      백과: ["정의", "의미", "개념", "효능"],
+    };
 
-            this.logger.log(`[LLM 응답] ${finalMessage.substring(0, 80)}...`);
-            return { text: finalMessage, searchResults };
-
-        } catch (error) {
-            const isThrottled = error.name === 'ThrottlingException' ||
-                error.message?.includes('Too many requests');
-
-            if (isThrottled && retryCount < this.MAX_RETRIES) {
-                const backoffTime = Math.pow(2, retryCount + 1) * 2000;
-                this.logger.warn(`[LLM 재시도] ${backoffTime}ms`);
-                await this.sleep(backoffTime);
-                return this.processWithTools(messages, retryCount + 1, searchResults, searchDomain);
-            }
-
-            this.logger.error(`[LLM 에러] ${error.message}`);
-            throw error;
-        }
+    let matchedCategory: string | null = null;
+    for (const [category, keywords] of Object.entries(categoryKeywords)) {
+      if (keywords.some((kw) => lowerMessage.includes(kw))) {
+        matchedCategory = category;
+        break;
+      }
     }
 
-    // ============================================================
-    // System Prompt Builder
-    // ============================================================
+    const location = this.searchService.extractLocation(userMessage) || "서울";
+    const hasLocation = searchResults.some((r) => r.address || r.roadAddress);
 
-    private buildSystemPrompt(userMessage: string, searchResults: SearchResult[]): string {
-        const lowerMessage = userMessage.toLowerCase();
-        
-        // 카테고리 매칭
-        const categoryKeywords: Record<string, string[]> = {
-            '날씨': ['날씨', '기온', '온도', '비', '눈', '바람'],
-            '카페': ['카페', '커피'],
-            '맛집': ['맛집', '식당', '레스토랑', '밥집', '저녁', '점심'],
-            '술집': ['술집', '바', '포차', '호프'],
-            '팝업': ['팝업', '팝업스토어'],
-            '전시': ['전시', '전시회', '갤러리'],
-            '영화': ['영화', '개봉', '영화관'],
-            '뉴스': ['뉴스', '소식', '기사'],
-            '주식': ['주식', '주가', '코스피'],
-            '스포츠': ['스포츠', '축구', '야구'],
-            '백과': ['정의', '의미', '개념', '효능'],
-        };
-
-        let matchedCategory: string | null = null;
-        for (const [category, keywords] of Object.entries(categoryKeywords)) {
-            if (keywords.some(kw => lowerMessage.includes(kw))) {
-                matchedCategory = category;
-                break;
-            }
-        }
-
-        const location = this.searchService.extractLocation(userMessage) || '서울';
-        const hasLocation = searchResults.some(r => r.address || r.roadAddress);
-
-        switch (matchedCategory) {
-            case '날씨': {
-                const timeWord = userMessage.includes('내일') ? '내일' :
-                    userMessage.includes('모레') ? '모레' :
-                    userMessage.includes('이번주') ? '이번주' : '오늘';
-                return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 자연스럽게 말해요.
+    switch (matchedCategory) {
+      case "날씨": {
+        const timeWord = userMessage.includes("내일")
+          ? "내일"
+          : userMessage.includes("모레")
+          ? "모레"
+          : userMessage.includes("이번주")
+          ? "이번주"
+          : "오늘";
+        return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 자연스럽게 말해요.
 
 "${location}" "${timeWord}" 날씨 물어봤어요.
 
@@ -419,22 +504,25 @@ export class LlmService {
 - "비 올 것 같아요" ← 확률 없음!
 
 ## 검색 결과
-${searchResults.map(r => r.content || r.title).join('\n').slice(0, 500)}`;
-            }
+${searchResults
+  .map((r) => r.content || r.title)
+  .join("\n")
+  .slice(0, 500)}`;
+      }
 
-            case '카페':
-            case '맛집':
-            case '술집':
-            case '분식':
-            case '치킨':
-            case '피자':
-            case '빵집':
-            case '디저트':
-            case '쇼핑': {
-                if (!hasLocation || searchResults.length === 0) {
-                    return this.buildNoResultPrompt(matchedCategory, location);
-                }
-                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
+      case "카페":
+      case "맛집":
+      case "술집":
+      case "분식":
+      case "치킨":
+      case "피자":
+      case "빵집":
+      case "디저트":
+      case "쇼핑": {
+        if (!hasLocation || searchResults.length === 0) {
+          return this.buildNoResultPrompt(matchedCategory, location);
+        }
+        return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
 
 "${location}" 근처 ${matchedCategory} 추천해달래요.
 
@@ -457,18 +545,18 @@ ${searchResults.map(r => r.content || r.title).join('\n').slice(0, 500)}`;
 
 ## 검색 결과 (첫 번째만 사용)
 ${JSON.stringify(searchResults[0])}`;
-            }
+      }
 
-            case '팝업':
-            case '전시': {
-                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
+      case "팝업":
+      case "전시": {
+        return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
 
 "${location}" 근처 ${matchedCategory} 정보 물어봤어요.
 
 ## 말투
 - 친근하게, 짧게 (2~3문장)
 - "~입니다" ❌ → "~요", "~해요", "~하고 있어요" ✅
-${hasLocation ? '- 마지막에 "경로 보내줄게요~" 추가' : ''}
+${hasLocation ? '- 마지막에 "경로 보내줄게요~" 추가' : ""}
 
 ## 예시
 - "아 [이름] ${matchedCategory} 하고 있어요! [장소]에서요. 경로 보내줄게요~"
@@ -476,21 +564,25 @@ ${hasLocation ? '- 마지막에 "경로 보내줄게요~" 추가' : ''}
 
 ## 검색 결과
 ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
-            }
+      }
 
-            case '영화': {
-                const movieNews = searchResults.filter(r => !r.address && !r.roadAddress);
-                const movieTheaters = searchResults.filter(r => r.address || r.roadAddress);
-                const hasTheater = movieTheaters.length > 0;
+      case "영화": {
+        const movieNews = searchResults.filter(
+          (r) => !r.address && !r.roadAddress
+        );
+        const movieTheaters = searchResults.filter(
+          (r) => r.address || r.roadAddress
+        );
+        const hasTheater = movieTheaters.length > 0;
 
-                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
+        return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
 
 영화 관련 정보 물어봤어요.
 
 ## 말투
 - 친근하게, 짧게 (2~3문장)
 - 영화 제목만 언급 (줄거리 ❌)
-${hasTheater ? '- 영화관 있으면 "근처 영화관도 알려줄게요~" 추가' : ''}
+${hasTheater ? '- 영화관 있으면 "근처 영화관도 알려줄게요~" 추가' : ""}
 
 ## 예시
 - "요즘 [영화] 재밌대요! 근처 영화관도 알려줄게요~"
@@ -501,12 +593,12 @@ ${JSON.stringify(movieNews.slice(0, 2), null, 2)}
 
 ## 검색 결과 - 근처 영화관
 ${JSON.stringify(movieTheaters.slice(0, 1), null, 2)}`;
-            }
+      }
 
-            case '뉴스':
-            case '주식':
-            case '스포츠': {
-                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
+      case "뉴스":
+      case "주식":
+      case "스포츠": {
+        return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
 
 ${matchedCategory} 정보 물어봤어요.
 
@@ -528,10 +620,10 @@ ${matchedCategory} 정보 물어봤어요.
 
 ## 검색 결과
 ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
-            }
+      }
 
-            case '백과': {
-                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 설명해주듯이 말해요.
+      case "백과": {
+        return `당신은 회의 중인 동료 '아우라'예요. 친구한테 설명해주듯이 말해요.
 
 뭔가에 대해 물어봤어요.
 
@@ -553,11 +645,11 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
 ## 검색 결과
 ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
-            }
+      }
 
-            default: {
-                if (searchResults.length === 0) {
-                    return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 말해요.
+      default: {
+        if (searchResults.length === 0) {
+          return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 말해요.
 
 ## 말투
 - 친근하게, 짧게 (1~2문장)
@@ -566,10 +658,10 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 ## 예시
 - "네? 뭐 찾아볼까요?"
 - "어 뭐 궁금한 거 있어요?"`;
-                }
+        }
 
-                if (hasLocation) {
-                    return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
+        if (hasLocation) {
+          return `당신은 회의 중인 동료 '아우라'예요. 친구한테 추천하듯이 말해요.
 
 ## 말투  
 - 친근하게, 짧게 (1~2문장)
@@ -577,21 +669,21 @@ ${JSON.stringify(searchResults.slice(0, 2), null, 2)}`;
 
 ## 검색 결과
 ${JSON.stringify(searchResults[0])}`;
-                }
+        }
 
-                return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
+        return `당신은 회의 중인 동료 '아우라'예요. 친구한테 알려주듯이 말해요.
 
 ## 말투
 - 친근하게, 짧게 (1~2문장)
 
 ## 검색 결과
 ${JSON.stringify(searchResults.slice(0, 2))}`;
-            }
-        }
+      }
     }
+  }
 
-    private buildNoResultPrompt(category: string, location: string): string {
-        return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 말해요.
+  private buildNoResultPrompt(category: string, location: string): string {
+    return `당신은 회의 중인 동료 '아우라'예요. 친구처럼 말해요.
 
 "${location}" 근처 ${category} 찾아봤는데 결과가 없어요.
 
@@ -601,128 +693,136 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
 ## 예시
 - "음 거기는 ${category} 검색이 잘 안 되네요, 다른 데 찾아볼까요?"
 - "아 ${location} ${category}은 안 나오네요... 다른 지역은요?"`;
+  }
+
+  // ============================================================
+  // Response Builders
+  // ============================================================
+
+  private buildPlaceRecommendation(result: SearchResult): string {
+    const title = result.title || "그 장소";
+    const address = result.roadAddress || result.address || "";
+    const newsHighlight = (result as any).newsHighlight;
+
+    let response = `아 ${title} 괜찮아요!`;
+    if (newsHighlight) {
+      response += ` ${newsHighlight}까지래요.`;
+    }
+    if (address) {
+      response += ` ${address} 쪽이에요.`;
+    }
+    response += " 경로 보내줄게요~";
+
+    return response.replace(/\s+/g, " ").trim();
+  }
+
+  private validateAndBuildNewsResponse(
+    llmResponse: string,
+    results: SearchResult[]
+  ): string {
+    const placePatterns = [
+      /을?\s*추천해요\.?/g,
+      /해당\s*지점까지\s*경로를\s*채팅창으로\s*공유드릴게요\.?/g,
+      /경로를\s*공유드릴게요\.?/g,
+      /위치까지\s*경로를.*?공유.*?\.?/g,
+    ];
+
+    let cleaned = llmResponse;
+    for (const pattern of placePatterns) {
+      cleaned = cleaned.replace(pattern, "");
+    }
+    cleaned = cleaned.replace(/\s+/g, " ").trim();
+
+    if (!cleaned || cleaned.length < 10) {
+      if (results.length > 0) {
+        const firstResult = results[0];
+        return `${
+          firstResult.title
+        }에 대한 소식이에요. ${firstResult.content.slice(0, 80)}`;
+      }
+      return "관련 정보를 찾았어요. 검색 결과를 확인해주세요.";
     }
 
-    // ============================================================
-    // Response Builders
-    // ============================================================
+    return cleaned;
+  }
 
-    private buildPlaceRecommendation(result: SearchResult): string {
-        const title = result.title || '그 장소';
-        const address = result.roadAddress || result.address || '';
-        const newsHighlight = (result as any).newsHighlight;
+  // ============================================================
+  // Voice Intent Processing
+  // ============================================================
 
-        let response = `아 ${title} 괜찮아요!`;
-        if (newsHighlight) {
-            response += ` ${newsHighlight}까지래요.`;
-        }
-        if (address) {
-            response += ` ${address} 쪽이에요.`;
-        }
-        response += ' 경로 보내줄게요~';
-
-        return response.replace(/\s+/g, ' ').trim();
+  async processVoiceIntent(
+    rawTranscript: string,
+    intentAnalysis: {
+      isCallIntent: boolean;
+      confidence: number;
+      normalizedText: string;
+      category?: string | null;
+      extractedKeyword?: string | null;
+      searchType?: SearchType | null;
+      needsLlmCorrection: boolean;
     }
+  ): Promise<{
+    shouldRespond: boolean;
+    correctedText: string;
+    searchKeyword: string | null;
+    searchType: SearchType | null;
+    category: string | null;
+  }> {
+    if (intentAnalysis.isCallIntent && intentAnalysis.confidence >= 0.6) {
+      if (!intentAnalysis.extractedKeyword) {
+        const { query, searchType, category } =
+          await this.searchService.buildSearchPlan(
+            intentAnalysis.normalizedText
+          );
 
-    private validateAndBuildNewsResponse(llmResponse: string, results: SearchResult[]): string {
-        const placePatterns = [
-            /을?\s*추천해요\.?/g,
-            /해당\s*지점까지\s*경로를\s*채팅창으로\s*공유드릴게요\.?/g,
-            /경로를\s*공유드릴게요\.?/g,
-            /위치까지\s*경로를.*?공유.*?\.?/g,
-        ];
-
-        let cleaned = llmResponse;
-        for (const pattern of placePatterns) {
-            cleaned = cleaned.replace(pattern, '');
-        }
-        cleaned = cleaned.replace(/\s+/g, ' ').trim();
-
-        if (!cleaned || cleaned.length < 10) {
-            if (results.length > 0) {
-                const firstResult = results[0];
-                return `${firstResult.title}에 대한 소식이에요. ${firstResult.content.slice(0, 80)}`;
-            }
-            return '관련 정보를 찾았어요. 검색 결과를 확인해주세요.';
-        }
-
-        return cleaned;
-    }
-
-    // ============================================================
-    // Voice Intent Processing
-    // ============================================================
-
-    async processVoiceIntent(
-        rawTranscript: string,
-        intentAnalysis: {
-            isCallIntent: boolean;
-            confidence: number;
-            normalizedText: string;
-            category?: string | null;
-            extractedKeyword?: string | null;
-            searchType?: SearchType | null;
-            needsLlmCorrection: boolean;
-        },
-    ): Promise<{
-        shouldRespond: boolean;
-        correctedText: string;
-        searchKeyword: string | null;
-        searchType: SearchType | null;
-        category: string | null;
-    }> {
-        if (intentAnalysis.isCallIntent && intentAnalysis.confidence >= 0.6) {
-            if (!intentAnalysis.extractedKeyword) {
-                const { query, searchType, category } = await this.searchService.buildSearchPlan(intentAnalysis.normalizedText);
-                
-                if (searchType === 'none') {
-                    return {
-                        shouldRespond: true,
-                        correctedText: intentAnalysis.normalizedText,
-                        searchKeyword: null,
-                        searchType: null,
-                        category: null,
-                    };
-                }
-                
-                return {
-                    shouldRespond: true,
-                    correctedText: intentAnalysis.normalizedText,
-                    searchKeyword: query,
-                    searchType: searchType,
-                    category: category || null,
-                };
-            }
-            return {
-                shouldRespond: true,
-                correctedText: intentAnalysis.normalizedText,
-                searchKeyword: intentAnalysis.extractedKeyword,
-                searchType: intentAnalysis.searchType || 'web',
-                category: intentAnalysis.category || null,
-            };
-        }
-
-        if (intentAnalysis.needsLlmCorrection) {
-            return this.correctAndExtract(rawTranscript);
-        }
-
-        return {
-            shouldRespond: false,
+        if (searchType === "none") {
+          return {
+            shouldRespond: true,
             correctedText: intentAnalysis.normalizedText,
             searchKeyword: null,
             searchType: null,
             category: null,
+          };
+        }
+
+        return {
+          shouldRespond: true,
+          correctedText: intentAnalysis.normalizedText,
+          searchKeyword: query,
+          searchType: searchType,
+          category: category || null,
         };
+      }
+      return {
+        shouldRespond: true,
+        correctedText: intentAnalysis.normalizedText,
+        searchKeyword: intentAnalysis.extractedKeyword,
+        searchType: intentAnalysis.searchType || "web",
+        category: intentAnalysis.category || null,
+      };
     }
 
-    private async correctAndExtract(rawTranscript: string): Promise<{
-        shouldRespond: boolean;
-        correctedText: string;
-        searchKeyword: string | null;
-        searchType: SearchType | null;
-        category: string | null;
-    }> {
-        const prompt = `화상회의 음성인식 결과를 분석하세요.
+    if (intentAnalysis.needsLlmCorrection) {
+      return this.correctAndExtract(rawTranscript);
+    }
+
+    return {
+      shouldRespond: false,
+      correctedText: intentAnalysis.normalizedText,
+      searchKeyword: null,
+      searchType: null,
+      category: null,
+    };
+  }
+
+  private async correctAndExtract(rawTranscript: string): Promise<{
+    shouldRespond: boolean;
+    correctedText: string;
+    searchKeyword: string | null;
+    searchType: SearchType | null;
+    category: string | null;
+  }> {
+    const prompt = `화상회의 음성인식 결과를 분석하세요.
 
 ## 웨이크워드
 표준: 아우라야, 헤이아우라, 헤이 아우라
@@ -741,55 +841,68 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
 ## 출력 (JSON만)
 {"hasWakeWord":true/false,"correctedText":"교정문장","searchKeyword":"키워드","searchType":"local/news","category":"카테고리","confidence":0.0-1.0}`;
 
-        try {
-            const payload = {
-                anthropic_version: "bedrock-2023-05-31",
-                max_tokens: 200,
-                messages: [{ role: "user", content: prompt }],
-            };
+    try {
+      const payload = {
+        anthropic_version: "bedrock-2023-05-31",
+        max_tokens: 200,
+        messages: [{ role: "user", content: prompt }],
+      };
 
-            const command = new InvokeModelCommand({
-                modelId: this.modelId,
-                contentType: 'application/json',
-                accept: 'application/json',
-                body: JSON.stringify(payload),
-            });
+      const command = new InvokeModelCommand({
+        modelId: this.modelId,
+        contentType: "application/json",
+        accept: "application/json",
+        body: JSON.stringify(payload),
+      });
 
-            const response = await this.bedrockClient.send(command);
-            const body = JSON.parse(new TextDecoder().decode(response.body));
-            const text = body.content?.[0]?.text || '{}';
+      const response = await this.bedrockClient.send(command);
+      const body = JSON.parse(new TextDecoder().decode(response.body));
+      const text = body.content?.[0]?.text || "{}";
 
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) throw new Error('JSON not found');
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("JSON not found");
 
-            const result = JSON.parse(jsonMatch[0]);
+      const result = JSON.parse(jsonMatch[0]);
 
-            this.logger.log(`[LLM 교정] "${rawTranscript.substring(0, 30)}..." → wake=${result.hasWakeWord}`);
+      this.logger.log(
+        `[LLM 교정] "${rawTranscript.substring(0, 30)}..." → wake=${
+          result.hasWakeWord
+        }`
+      );
 
-            return {
-                shouldRespond: result.hasWakeWord ?? false,
-                correctedText: result.correctedText ?? rawTranscript,
-                searchKeyword: result.searchKeyword ?? null,
-                searchType: ['local', 'news', 'web', 'encyc', 'hybrid', 'none'].includes(result.searchType) ? result.searchType : null,
-                category: result.category ?? null,
-            };
-        } catch (error) {
-            this.logger.warn(`[LLM 교정 실패] ${error.message}`);
-            return {
-                shouldRespond: false,
-                correctedText: rawTranscript,
-                searchKeyword: null,
-                searchType: null,
-                category: null,
-            };
-        }
+      return {
+        shouldRespond: result.hasWakeWord ?? false,
+        correctedText: result.correctedText ?? rawTranscript,
+        searchKeyword: result.searchKeyword ?? null,
+        searchType: [
+          "local",
+          "news",
+          "web",
+          "encyc",
+          "hybrid",
+          "none",
+        ].includes(result.searchType)
+          ? result.searchType
+          : null,
+        category: result.category ?? null,
+      };
+    } catch (error) {
+      this.logger.warn(`[LLM 교정 실패] ${error.message}`);
+      return {
+        shouldRespond: false,
+        correctedText: rawTranscript,
+        searchKeyword: null,
+        searchType: null,
+        category: null,
+      };
     }
+  }
 
-    // ============================================================
-    // Helpers
-    // ============================================================
+  // ============================================================
+  // Helpers
+  // ============================================================
 
-    private sleep(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 }
