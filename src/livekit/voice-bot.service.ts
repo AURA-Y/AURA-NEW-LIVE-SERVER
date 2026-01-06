@@ -62,6 +62,8 @@ interface RoomContext {
     lastIdeaModeChange: number;
     // 이벤트 스토밍 모드
     eventStormModeActive: boolean;
+    eventStormInitiator: string | null;  // 보드를 연 사람 (이 사람만 닫을 수 있음)
+    eventStormOpenTime: number;   // 보드가 열린 시간 (grace period용)
     lastEventStormStart: number;  // START 전용 디바운싱
     lastEventStormEnd: number;    // END 전용 디바운싱
     // DDD 처리 상태 (중복 방지)
@@ -210,9 +212,10 @@ export class VoiceBotService {
                     context.lastIdeaModeChange = now;
                     this.logger.log(`[모드 변경] 아이디어 모드 OFF`);
                 } else if (message.type === 'EVENT_STORM_START') {
-                    // 이미 ON이면 무시
+                    const senderId = participant?.identity || 'unknown';
+                    // 이미 ON이면 무시 (음성 명령으로 먼저 열렸을 수 있음)
                     if (context.eventStormModeActive) {
-                        this.logger.debug(`[모드 변경] 이벤트스토밍 START 무시 (이미 ON)`);
+                        this.logger.debug(`[모드 변경] 이벤트스토밍 START 무시 - 이미 ON (initiator=${context.eventStormInitiator}, 요청자=${senderId})`);
                         return;
                     }
                     // START끼리만 디바운싱 (END 후 즉시 START는 허용)
@@ -221,12 +224,25 @@ export class VoiceBotService {
                         return;
                     }
                     context.eventStormModeActive = true;
+                    context.eventStormInitiator = senderId;  // 발화자 기록
                     context.lastEventStormStart = now;
-                    this.logger.log(`[모드 변경] 이벤트 스토밍 ON by ${participant?.identity || 'unknown'}`);
+                    this.logger.log(`[모드 변경] 이벤트 스토밍 ON by ${senderId} (initiator 설정)`);
                 } else if (message.type === 'EVENT_STORM_END') {
+                    const senderId = participant?.identity || 'unknown';
                     // 이미 OFF면 무시
                     if (!context.eventStormModeActive) {
                         this.logger.debug(`[모드 변경] 이벤트스토밍 END 무시 (이미 OFF)`);
+                        return;
+                    }
+                    // ★ Grace period: 보드 열린 직후 1초 이내의 END는 무시 (React useEffect cleanup 문제 방지)
+                    const OPEN_GRACE_PERIOD_MS = 1000;
+                    if (context.eventStormOpenTime > 0 && now - context.eventStormOpenTime < OPEN_GRACE_PERIOD_MS) {
+                        this.logger.debug(`[모드 변경] 이벤트스토밍 END 무시 (grace period: ${now - context.eventStormOpenTime}ms < ${OPEN_GRACE_PERIOD_MS}ms)`);
+                        return;
+                    }
+                    // 발화자(initiator)만 닫을 수 있음
+                    if (context.eventStormInitiator && context.eventStormInitiator !== senderId) {
+                        this.logger.debug(`[모드 변경] 이벤트스토밍 END 무시 (발화자 아님: ${senderId} != ${context.eventStormInitiator})`);
                         return;
                     }
                     // END끼리만 디바운싱 (START 후 즉시 END는 허용)
@@ -235,8 +251,22 @@ export class VoiceBotService {
                         return;
                     }
                     context.eventStormModeActive = false;
+                    context.eventStormInitiator = null;  // 초기화
+                    context.eventStormOpenTime = 0;      // 초기화
                     context.lastEventStormEnd = now;
-                    this.logger.log(`[모드 변경] 이벤트 스토밍 OFF`);
+                    this.logger.log(`[모드 변경] 이벤트 스토밍 OFF by ${senderId}`);
+                } else if (message.type === 'DDD_SUGGEST_REQUEST') {
+                    // DDD AI 제안 요청
+                    this.logger.log(`[DDD 제안] 요청 수신 - 요소 수: ${message.boardState?.length || 0}`);
+                    this.handleDddSuggestRequest(roomName, message.boardState || []);
+                } else if (message.type === 'DDD_SUMMARY_REQUEST') {
+                    // DDD 요약 요청
+                    this.logger.log(`[DDD 요약] 요청 수신 - 요소: ${message.boardState?.length || 0}, 컨텍스트: ${message.contexts?.length || 0}`);
+                    this.handleDddSummaryRequest(roomName, message.boardState || [], message.contexts || []);
+                } else if (message.type === 'DDD_CODE_REQUEST') {
+                    // DDD 코드 생성 요청
+                    this.logger.log(`[DDD 코드] 요청 수신 - 요소: ${message.boardState?.length || 0}, 언어: ${message.language || 'python'}`);
+                    this.handleDddCodeRequest(roomName, message.boardState || [], message.contexts || [], message.language || 'python', message.requesterId);
                 }
             } catch (error) {
                 // JSON 파싱 실패는 무시 (다른 메시지일 수 있음)
@@ -282,6 +312,8 @@ export class VoiceBotService {
                 ideaModeActive: false,
                 lastIdeaModeChange: 0,
                 eventStormModeActive: false,
+                eventStormInitiator: null,
+                eventStormOpenTime: 0,
                 lastEventStormStart: 0,
                 lastEventStormEnd: 0,
                 isDddProcessing: false,
@@ -915,10 +947,18 @@ JSON 배열만 출력:`;
             }
 
             if (intentAnalysis.isCallIntent && intentAnalysis.isDddBoardIntent) {
-                this.logger.log(`[DDD 보드 열기] Intent 감지`);
+                this.logger.log(`[DDD 보드 열기] Intent 감지 - 발화자: ${userId}`);
 
-                // DataChannel로 보드 열기 메시지 전송
-                const openMessage = { type: 'OPEN_DDD_BOARD' };
+                // ★ 발화자를 initiator로 미리 설정 (프론트엔드 메시지 도착 전에!)
+                const openTime = Date.now();
+                context.eventStormInitiator = userId;
+                context.eventStormModeActive = true;
+                context.eventStormOpenTime = openTime;  // grace period용
+                context.lastEventStormStart = openTime;
+                this.logger.log(`[DDD 보드] initiator 설정: ${userId}, openTime: ${openTime}`);
+
+                // DataChannel로 보드 열기 메시지 전송 (발화자 정보 포함)
+                const openMessage = { type: 'OPEN_DDD_BOARD', initiator: userId };
                 const encoder = new TextEncoder();
                 await context.room.localParticipant.publishData(
                     encoder.encode(JSON.stringify(openMessage)),
@@ -1523,5 +1563,312 @@ JSON 배열만 출력:`;
         await this.sendVisionCaptureRequest(roomName, requestId, userQuestion, userId);
 
         return true;
+    }
+
+    // ============================================================
+    // DDD Event Storming AI 제안
+    // ============================================================
+
+    private async handleDddSuggestRequest(
+        roomName: string,
+        boardState: Array<{ type: string; content: string; connections: string[] }>
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomName);
+        if (!context) return;
+
+        try {
+            const boardSummary = this.summarizeDddBoard(boardState);
+            const prompt = `DDD Event Storming 보드 분석. 다음에 추가할 요소 3개 제안.
+
+현재 보드:
+${boardSummary}
+
+타입: event(이벤트), command(명령), actor(행위자), policy(정책), readModel(조회), external(외부), aggregate(집합체)
+
+JSON 형식으로만 응답:
+{"suggestions":[{"content":"내용","type":"타입","reason":"이유"}]}`;
+
+            const response = await this.llmService.sendMessagePure(prompt, 800);
+            let suggestions = [];
+            const jsonMatch = response.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                try {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    suggestions = (parsed.suggestions || []).slice(0, 3);
+                } catch { suggestions = []; }
+            }
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify({ type: 'DDD_SUGGEST_RESPONSE', suggestions })),
+                { reliable: true }
+            );
+        } catch (error) {
+            this.logger.error(`[DDD 제안] 에러: ${error.message}`);
+        }
+    }
+
+    // ============================================================
+    // DDD Event Storming 요약
+    // ============================================================
+
+    private async handleDddSummaryRequest(
+        roomName: string,
+        boardState: Array<{ type: string; content: string; connections: string[]; id?: string }>,
+        contexts: Array<{ id: string; name: string; noteIds: string[] }>
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomName);
+        if (!context) return;
+
+        try {
+            const boardSummary = this.summarizeDddBoardDetailed(boardState, contexts);
+            const prompt = `DDD Event Storming 결과 요약. JSON으로만 응답.
+
+보드 상태:
+${boardSummary}
+
+응답 형식:
+{"overview":"도메인 개요","businessFlow":"비즈니스 흐름","contexts":[{"name":"이름","responsibility":"책임","elements":["요소"]}],"contextRelations":[{"from":"A","to":"B","relation":"관계"}],"architecture":"아키텍처 제안","improvements":["개선점"]}`;
+
+            const response = await this.llmService.sendMessagePure(prompt, 1500);
+            let summary = null;
+            const jsonMatch = response.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                try { summary = JSON.parse(jsonMatch[0]); } catch { summary = null; }
+            }
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify({ type: 'DDD_SUMMARY_RESPONSE', summary })),
+                { reliable: true }
+            );
+        } catch (error) {
+            this.logger.error(`[DDD 요약] 에러: ${error.message}`);
+        }
+    }
+
+    // ============================================================
+    // DDD 코드 생성
+    // ============================================================
+
+    private async handleDddCodeRequest(
+        roomName: string,
+        boardState: Array<{ type: string; content: string; connections: string[]; id?: string }>,
+        contexts: Array<{ id: string; name: string; noteIds: string[] }>,
+        language: string,
+        requesterId?: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomName);
+        if (!context) return;
+
+        try {
+            const boardSummary = this.summarizeDddBoardCompact(boardState, contexts);
+
+            const langSpec = {
+                python: 'Python (dataclass, 타입힌트)',
+                typescript: 'TypeScript (interface, class)',
+                java: 'Java (record/class)'
+            };
+
+            // 간결한 프롬프트 - 코드만 출력
+            const prompt = `DDD Event Storming을 ${langSpec[language] || langSpec.python} 코드로 변환하세요.
+
+보드 상태: ${boardSummary}
+
+규칙:
+- Aggregate=class (상태+메서드)
+- Event=dataclass
+- Command=Aggregate 메서드
+- Policy=이벤트 핸들러
+
+코드만 출력하세요. 설명이나 JSON 래퍼 없이 순수 코드만.`;
+
+            this.logger.log(`[DDD 코드] LLM 호출 시작 - 언어: ${language}`);
+            const response = await this.llmService.sendMessagePure(prompt, 1500);
+            this.logger.log(`[DDD 코드] LLM 응답 수신: ${response.substring(0, 100)}...`);
+
+            let code = '';
+            let explanation = '';
+
+            // 1. JSON 형식으로 응답한 경우 파싱 시도
+            const jsonMatch = response.match(/\{[\s\S]*"code"\s*:\s*"[\s\S]*"\s*\}/);
+            if (jsonMatch) {
+                try {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    if (parsed.code) {
+                        code = parsed.code;
+                        explanation = parsed.explanation || '';
+                        this.logger.log(`[DDD 코드] JSON 파싱 성공`);
+                    }
+                } catch (e) {
+                    this.logger.log(`[DDD 코드] JSON 파싱 실패, 다른 방법 시도`);
+                }
+            }
+
+            // 2. 코드 블록 추출 시도 (```python ... ```)
+            if (!code) {
+                const codeBlockMatch = response.match(/```(?:python|typescript|java|ts|py)?\s*\n?([\s\S]*?)```/);
+                if (codeBlockMatch) {
+                    code = codeBlockMatch[1].trim();
+                    this.logger.log(`[DDD 코드] 코드 블록 추출 성공`);
+                }
+            }
+
+            // 3. 그래도 없으면 JSON 내부 code 필드 수동 추출
+            if (!code) {
+                const codeFieldMatch = response.match(/"code"\s*:\s*"([\s\S]*?)(?:"\s*,|\"\s*\})/);
+                if (codeFieldMatch) {
+                    code = codeFieldMatch[1]
+                        .replace(/\\n/g, '\n')
+                        .replace(/\\"/g, '"')
+                        .replace(/\\t/g, '\t')
+                        .replace(/\\\\/g, '\\');
+                    this.logger.log(`[DDD 코드] code 필드 수동 추출 성공`);
+                }
+            }
+
+            // 4. 최후의 수단: 전체 응답 정리
+            if (!code) {
+                code = response
+                    .replace(/^```[\w]*\n?/, '')
+                    .replace(/```$/, '')
+                    .trim();
+                this.logger.log(`[DDD 코드] 전체 응답 사용`);
+            }
+
+            // 간단한 설명 생성 (없으면)
+            const elementCount = boardState.length;
+            if (!explanation) {
+                explanation = `${elementCount}개의 DDD 요소를 기반으로 ${language} 코드를 생성했습니다.`;
+            }
+
+            const responseMessage = {
+                type: 'DDD_CODE_RESPONSE',
+                code,
+                explanation,
+                language,
+                requesterId,
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(responseMessage)),
+                { reliable: true }
+            );
+
+            this.logger.log(`[DDD 코드] 응답 전송 완료 - ${code.length}자`);
+        } catch (error) {
+            this.logger.error(`[DDD 코드] 에러: ${error.message}`);
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify({
+                    type: 'DDD_CODE_RESPONSE',
+                    code: `# 코드 생성 실패: ${error.message}`,
+                    explanation: '오류가 발생했습니다. 다시 시도해주세요.',
+                    language,
+                    requesterId,
+                })),
+                { reliable: true }
+            );
+        }
+    }
+
+    // ============================================================
+    // DDD 헬퍼 메서드
+    // ============================================================
+
+    // 코드 생성용 간결한 요약 (latency 개선)
+    private summarizeDddBoardCompact(
+        boardState: Array<{ type: string; content: string; connections?: string[]; id?: string }>,
+        contexts: Array<{ id: string; name: string; noteIds: string[] }>
+    ): string {
+        const parts: string[] = [];
+
+        // 요소를 타입별로 그룹핑 (간결하게)
+        const grouped: Record<string, string[]> = {};
+        boardState.forEach(e => {
+            if (!grouped[e.type]) grouped[e.type] = [];
+            grouped[e.type].push(e.content);
+        });
+
+        Object.entries(grouped).forEach(([type, items]) => {
+            parts.push(`${type}:[${items.join(',')}]`);
+        });
+
+        // 연결 관계 (핵심만)
+        const conns: string[] = [];
+        boardState.forEach(e => {
+            e.connections?.slice(0, 3).forEach(targetId => {
+                const target = boardState.find(t => t.id === targetId);
+                if (target) conns.push(`${e.content}→${target.content}`);
+            });
+        });
+        if (conns.length > 0) {
+            parts.push(`flow:[${conns.slice(0, 10).join(',')}]`);
+        }
+
+        // 컨텍스트 (있으면)
+        if (contexts.length > 0) {
+            const ctxParts = contexts.map(ctx => {
+                const els = boardState.filter(e => ctx.noteIds.includes(e.id || '')).map(e => e.content);
+                return `${ctx.name}:{${els.join(',')}}`;
+            });
+            parts.push(`ctx:[${ctxParts.join(';')}]`);
+        }
+
+        return parts.join(' | ');
+    }
+
+    private summarizeDddBoard(boardState: Array<{ type: string; content: string }>): string {
+        const grouped: Record<string, string[]> = {};
+        boardState.forEach(e => {
+            if (!grouped[e.type]) grouped[e.type] = [];
+            grouped[e.type].push(e.content);
+        });
+        return Object.entries(grouped).map(([type, items]) => `${type}: ${items.join(', ')}`).join('\n');
+    }
+
+    private summarizeDddBoardDetailed(
+        boardState: Array<{ type: string; content: string; connections: string[]; id?: string }>,
+        contexts: Array<{ id: string; name: string; noteIds: string[] }>
+    ): string {
+        const lines: string[] = [];
+
+        // 요소별 그룹핑
+        const grouped: Record<string, string[]> = {};
+        boardState.forEach(e => {
+            if (!grouped[e.type]) grouped[e.type] = [];
+            grouped[e.type].push(e.content);
+        });
+
+        lines.push('### 요소:');
+        Object.entries(grouped).forEach(([type, items]) => {
+            lines.push(`- ${type}: ${items.join(', ')}`);
+        });
+
+        // 연결 관계
+        const connections: string[] = [];
+        boardState.forEach(e => {
+            e.connections?.forEach(targetId => {
+                const target = boardState.find(t => t.id === targetId);
+                if (target) connections.push(`${e.content} → ${target.content}`);
+            });
+        });
+        if (connections.length > 0) {
+            lines.push('\n### 연결:');
+            connections.forEach(c => lines.push(`- ${c}`));
+        }
+
+        // 컨텍스트
+        if (contexts.length > 0) {
+            lines.push('\n### Bounded Contexts:');
+            contexts.forEach(ctx => {
+                const elements = boardState.filter(e => ctx.noteIds.includes(e.id || ''));
+                lines.push(`- ${ctx.name}: ${elements.map(e => e.content).join(', ')}`);
+            });
+        }
+
+        return lines.join('\n');
     }
 }
