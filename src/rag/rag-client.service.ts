@@ -326,4 +326,26 @@ export class RagClientService implements OnModuleDestroy {
             return { success: false, message: error.message };
         }
     }
+
+    /**
+     * 회의 시작 및 파일 임베딩 API 호출 (HTTP POST)
+     * POST /meetings/{room_name}/start
+     */
+    async startMeeting(roomName: string, payload: any): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomName}/start`;
+
+        this.logger.log(`[RAG 회의 시작] POST ${endpoint} - Payload: ${JSON.stringify(payload)}`);
+
+        try {
+            const axios = await import('axios');
+            // Payload 구조: { description: string, files: { bucket: string, key: string }[] }
+            const response = await axios.default.post(endpoint, payload);
+            this.logger.log(`[RAG 회의 시작 성공] ${roomName} - 응답: ${JSON.stringify(response.data)}`);
+            return { success: true, message: response.data };
+        } catch (error: any) {
+            this.logger.error(`[RAG 회의 시작 실패] ${roomName}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
 }

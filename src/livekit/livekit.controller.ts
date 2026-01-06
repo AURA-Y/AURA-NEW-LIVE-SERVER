@@ -253,6 +253,32 @@ export class LivekitController {
     }
   }
 
+  // 파일 임베딩 및 회의 시작 정보 전송
+  @Post('embed-files')
+  async embedFiles(@Body() body: { roomName: string; files: any[]; topic?: string; description?: string }) {
+    console.log(`[Embed Files] Received for room: ${body.roomName}, Files: ${body.files?.length || 0}`);
+
+    // RAG 서버에 회의 시작 정보 및 파일 전달
+    // RAG API Spec: POST /meetings/{room_name}/start Body: { "description": "...", "files": [...] }
+    const ragPayload = {
+      description: body.description || '',
+      files: body.files || [],
+    };
+
+    const ragResult = await this.ragClientService.startMeeting(body.roomName, ragPayload);
+
+    if (ragResult.success) {
+      return { status: 'success', roomName: body.roomName, ragResponse: ragResult.message };
+    } else {
+      // 실패 로그는 남기되, 500 에러를 던질지 여부 결정.
+      // 프론트엔드가 에러 핸들링을 하고 있으므로 던지는 게 맞음.
+      throw new HttpException(
+        { status: 'fail', message: ragResult.message },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
   // 회의 종료 - room_name 수신 후 RAG 서버로 전달
   @Post('end-meeting')
   async endMeeting(@Body() body: { roomName: string }) {
