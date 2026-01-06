@@ -255,17 +255,20 @@ export class LivekitController {
 
   // 파일 임베딩 및 회의 시작 정보 전송
   @Post('embed-files')
-  async embedFiles(@Body() body: { roomName: string; files: any[]; topic?: string; description?: string }) {
+  async embedFiles(@Body() body: { roomName: string; files: any[]; topic?: string; description?: string; roomId?: string }) {
     console.log(`[Embed Files] Received for room: ${body.roomName}, Files: ${body.files?.length || 0}`);
 
     // RAG 서버에 회의 시작 정보 및 파일 전달
-    // RAG API Spec: POST /meetings/{room_name}/start Body: { "description": "...", "files": [...] }
+    // RAG API Spec: POST /meetings/{roomId}/start Body: { "description": "...", "files": [...], "roomName": "..." }
     const ragPayload = {
       description: body.description || '',
       files: body.files || [],
+      room_name: body.roomName,
     };
 
-    const ragResult = await this.ragClientService.startMeeting(body.roomName, ragPayload);
+    // URL path parameter로 roomId(UUID) 사용
+    const targetId = body.roomId || body.roomName; 
+    const ragResult = await this.ragClientService.startMeeting(targetId, ragPayload);
 
     if (ragResult.success) {
       return { status: 'success', roomName: body.roomName, ragResponse: ragResult.message };
