@@ -28,7 +28,9 @@
     "pdf-parse": "^2.4.5",
     "reflect-metadata": "^0.1.13",
     "rxjs": "^7.8.1",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "class-validator": "^0.14.1",
+    "class-transformer": "^0.5.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.0.0",
