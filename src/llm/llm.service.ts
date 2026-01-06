@@ -12,7 +12,7 @@ import { MapService } from './map.service';
 export class LlmService {
     private readonly logger = new Logger(LlmService.name);
     private bedrockClient: BedrockRuntimeClient;
-    private readonly modelId = 'anthropic.claude-3-haiku-20240307-v1:0';
+    private readonly modelId = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
     private readonly restApiUrl: string;
     private readonly topicCache = new Map<string, string>();
 
@@ -20,6 +20,12 @@ export class LlmService {
     private isProcessing = false;
     private readonly MIN_REQUEST_INTERVAL = 1500;
     private readonly MAX_RETRIES = 3;
+
+    // sendMessagePure용 rate limiting (DDD 분석 등)
+    private lastPureRequestTime = 0;
+    private isPureProcessing = false;
+    private readonly PURE_MIN_INTERVAL = 1000; // 1초
+    private readonly PURE_MAX_RETRIES = 2;
 
     constructor(
         private configService: ConfigService,
@@ -103,6 +109,72 @@ export class LlmService {
             return await this.processWithTools(messages, 0, undefined, searchDomain, true);
         } finally {
             this.isProcessing = false;
+        }
+    }
+
+    /**
+     * 순수 LLM 호출 (검색 없이)
+     * DDD 분석 등 검색이 필요 없는 LLM 작업에 사용
+     */
+    async sendMessagePure(prompt: string, maxTokens = 500): Promise<string> {
+        // 동시 요청 방지
+        while (this.isPureProcessing) {
+            await this.sleep(100);
+        }
+
+        // 쿨다운 체크
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.lastPureRequestTime;
+        if (timeSinceLastRequest < this.PURE_MIN_INTERVAL) {
+            await this.sleep(this.PURE_MIN_INTERVAL - timeSinceLastRequest);
+        }
+
+        this.isPureProcessing = true;
+        this.lastPureRequestTime = Date.now();
+
+        try {
+            return await this.sendMessagePureWithRetry(prompt, maxTokens, 0);
+        } finally {
+            this.isPureProcessing = false;
+        }
+    }
+
+    /**
+     * sendMessagePure 내부 재시도 로직
+     */
+    private async sendMessagePureWithRetry(prompt: string, maxTokens: number, retryCount: number): Promise<string> {
+        try {
+            const payload = {
+                anthropic_version: "bedrock-2023-05-31",
+                max_tokens: maxTokens,
+                messages: [{ role: "user", content: prompt }],
+            };
+
+            const command = new InvokeModelCommand({
+                modelId: this.modelId,
+                contentType: 'application/json',
+                accept: 'application/json',
+                body: JSON.stringify(payload),
+            });
+
+            const response = await this.bedrockClient.send(command);
+            const body = JSON.parse(new TextDecoder().decode(response.body));
+            const text = body.content?.[0]?.text || '';
+
+            return text.trim();
+        } catch (error) {
+            const isThrottled = error.name === 'ThrottlingException' ||
+                error.message?.includes('Too many requests');
+
+            if (isThrottled && retryCount < this.PURE_MAX_RETRIES) {
+                const backoffTime = Math.pow(2, retryCount + 1) * 1000; // 2초, 4초
+                this.logger.warn(`[LLM Pure 재시도] ${backoffTime}ms 후 재시도 (${retryCount + 1}/${this.PURE_MAX_RETRIES})`);
+                await this.sleep(backoffTime);
+                return this.sendMessagePureWithRetry(prompt, maxTokens, retryCount + 1);
+            }
+
+            this.logger.error(`[LLM Pure 호출 에러] ${error.message}`);
+            throw error;
         }
     }
 

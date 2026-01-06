@@ -17,7 +17,7 @@ export class SttService {
 
     // LLM 교정용
     private bedrockClient: BedrockRuntimeClient;
-    private readonly llmModelId = 'anthropic.claude-3-haiku-20240307-v1:0';
+    private readonly llmModelId = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
 
     // =====================================================
     // 키워드 힌트 (STT 인식률 향상용)
