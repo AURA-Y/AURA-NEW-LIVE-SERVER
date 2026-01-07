@@ -677,9 +677,7 @@ export class SttService implements OnModuleDestroy {
 
         try {
             const transcript = await this.clovaAdapter.transcribe(audioBuffer, {
-                language: 'ko-KR',
-                encoding: 'LINEAR16',
-                sampleRate: 16000,
+                language: 'ko',
                 keywordBoosting: this.ALL_HINTS.slice(0, 50), // 상위 50개 키워드
             });
 
@@ -709,9 +707,7 @@ export class SttService implements OnModuleDestroy {
             const transcripts: string[] = [];
 
             for await (const result of this.clovaAdapter.transcribeStream(audioGenerator(audioStream), {
-                language: 'ko-KR',
-                encoding: 'LINEAR16',
-                sampleRate: 16000,
+                language: 'ko',
                 keywordBoosting: this.ALL_HINTS.slice(0, 50),
             })) {
                 if (result.isFinal && result.text) {
