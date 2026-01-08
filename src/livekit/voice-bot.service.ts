@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
     Room,
@@ -17,7 +17,7 @@ import {
 import { SttService } from '../stt/stt.service';
 import { LlmService } from '../llm/llm.service';
 import { TtsService } from '../tts/tts.service';
-import { RagClientService } from '../rag/rag-client.service';
+import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { IntentClassifierService } from '../intent/intent-classifier.service';
 import { VisionService, VisionContext } from '../vision/vision.service';
 
@@ -69,6 +69,7 @@ interface RoomContext {
     // DDD 처리 상태 (중복 방지)
     isDddProcessing: boolean;
     lastDddText: string;
+    shutdownTimeout?: NodeJS.Timeout;
 }
 
 @Injectable()
@@ -85,7 +86,7 @@ export class VoiceBotService {
         private sttService: SttService,
         private llmService: LlmService,
         private ttsService: TtsService,
-        private ragClientService: RagClientService,
+        @Inject(RAG_CLIENT) private ragClient: IRagClient,
         private intentClassifier: IntentClassifierService,
         private visionService: VisionService,
     ) { }
@@ -147,6 +148,16 @@ export class VoiceBotService {
 
         room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
             this.logger.log(`[참여자 입장] ${participant.identity}`);
+
+            // 인간 참여자 입장 시 셧다운 취소
+            if (!participant.identity.startsWith('ai-bot')) {
+                const context = this.activeRooms.get(roomName);
+                if (context?.shutdownTimeout) {
+                    this.logger.log(`[셧다운 취소] 인간 참여자 재입장`);
+                    clearTimeout(context.shutdownTimeout);
+                    context.shutdownTimeout = undefined;
+                }
+            }
         });
 
         room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
@@ -156,8 +167,30 @@ export class VoiceBotService {
                 .filter(p => !p.identity.startsWith('ai-bot')).length;
 
             if (humanCount === 0) {
-                this.logger.log(`[자동 퇴장] 인간 참여자 없음`);
-                this.stopBot(roomName);
+                const context = this.activeRooms.get(roomName);
+                if (context) {
+                    // 이미 예약된 셧다운이 있으면 무시 (또는 갱신)
+                    if (context.shutdownTimeout) {
+                        return;
+                    }
+                    this.logger.log(`[자동 퇴장 예약] 인간 참여자 없음 - 30초 후 종료`);
+                    context.shutdownTimeout = setTimeout(() => {
+                        // 타임아웃 실행 시점에도 여전히 사람이 없으면 종료
+                        const currentContext = this.activeRooms.get(roomName);
+                        if (currentContext) {
+                            const currentHumanCount = Array.from(context.room.remoteParticipants.values())
+                                .filter(p => !p.identity.startsWith('ai-bot')).length;
+
+                            if (currentHumanCount === 0) {
+                                this.logger.log(`[자동 퇴장 실행] 유예 시간 30초 경과`);
+                                this.stopBot(roomName);
+                            } else {
+                                this.logger.log(`[자동 퇴장 취소] 셧다운 직전 인간 참여자 확인됨`);
+                                currentContext.shutdownTimeout = undefined;
+                            }
+                        }
+                    }, 30000); // 30초 유예
+                }
             }
         });
 
@@ -277,7 +310,7 @@ export class VoiceBotService {
             await room.connect(livekitUrl, botToken);
 
             try {
-                await this.ragClientService.connect(roomName);
+                await this.ragClient.connect(roomName);
                 this.logger.log(`[RAG 연결 완료]`);
             } catch (error) {
                 this.logger.error(`[RAG 연결 실패] ${error.message}`);
@@ -1302,6 +1335,10 @@ JSON 배열만 출력:`;
      * 방 정리
      */
     private cleanupRoom(roomName: string): void {
+        const context = this.activeRooms.get(roomName);
+        if (context?.shutdownTimeout) {
+            clearTimeout(context.shutdownTimeout);
+        }
         this.activeRooms.delete(roomName);
     }
 
@@ -1309,7 +1346,7 @@ JSON 배열만 출력:`;
         const context = this.activeRooms.get(roomName);
         if (context) {
             try {
-                await this.ragClientService.disconnect(roomName);
+                await this.ragClient.disconnect(roomName);
             } catch (error) {
                 this.logger.error(`[RAG 해제 실패] ${error.message}`);
             }

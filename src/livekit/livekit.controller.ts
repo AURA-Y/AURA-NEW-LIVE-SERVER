@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query, Inject } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { LivekitService } from './livekit.service';
@@ -6,7 +6,7 @@ import { VoiceBotService } from './voice-bot.service';
 import { SttService } from '../stt/stt.service';
 import { LlmService } from '../llm/llm.service'; //통합 검색
 import { TtsService } from '../tts/tts.service';
-import { RagClientService } from '../rag/rag-client.service';
+import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { EmbedFilesDto } from './dto/embed-files.dto';
@@ -19,7 +19,7 @@ export class LivekitController {
     private readonly sttService: SttService,
     private readonly llmService: LlmService, //통합 검색
     private readonly ttsService: TtsService,
-    private readonly ragClientService: RagClientService,
+    @Inject(RAG_CLIENT) private readonly ragClient: IRagClient,
   ) { }
 
   // AI 음성 봇 시작
@@ -285,53 +285,6 @@ export class LivekitController {
     } catch (error) {
       console.error(`[TTS 에러] ${error.message}`);
       throw new HttpException(`TTS 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
-
-  // 파일 임베딩 및 회의 시작 정보 전송
-  @Post('embed-files')
-  async embedFiles(@Body() body: { roomName: string; files: any[]; topic?: string; description?: string; roomId?: string }) {
-    console.log(`[Embed Files] Received for room: ${body.roomName}, Files: ${body.files?.length || 0}`);
-
-    // RAG 서버에 회의 시작 정보 및 파일 전달
-    // RAG API Spec: POST /meetings/{roomId}/start Body: { "description": "...", "files": [...], "roomName": "..." }
-    const ragPayload = {
-      description: body.description || '',
-      files: body.files || [],
-      room_name: body.roomName,
-    };
-
-    // URL path parameter로 roomId(UUID) 사용
-    const targetId = body.roomId || body.roomName; 
-    const ragResult = await this.ragClientService.startMeeting(targetId, ragPayload);
-
-    if (ragResult.success) {
-      return { status: 'success', roomName: body.roomName, ragResponse: ragResult.message };
-    } else {
-      // 실패 로그는 남기되, 500 에러를 던질지 여부 결정.
-      // 프론트엔드가 에러 핸들링을 하고 있으므로 던지는 게 맞음.
-      throw new HttpException(
-        { status: 'fail', message: ragResult.message },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  // 회의 종료 - room_name 수신 후 RAG 서버로 전달
-  @Post('end-meeting')
-  async endMeeting(@Body() body: { roomName: string }) {
-    console.log(`[End Meeting] Received room name: ${body.roomName}`);
-
-    // RAG 서버에 회의 종료 알림
-    const ragResult = await this.ragClientService.endMeeting(body.roomName);
-
-    if (ragResult.success) {
-      return { status: 'success', roomName: body.roomName, ragResponse: ragResult.message };
-    } else {
-      throw new HttpException(
-        { status: 'fail', message: ragResult.message },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
     }
   }
 }

@@ -1,0 +1,268 @@
+syntax = "proto3";
+
+package aura.rag;
+
+import "google/protobuf/timestamp.proto";
+
+option java_multiple_files = true;
+option java_package = "com.aura.rag.grpc";
+
+// ============================================================
+// RAG Service - LiveKit Backend에서 호출하는 RAG 서비스
+// ============================================================
+
+service RagService {
+  // Health Check
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // 세션 관리
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+
+  // 단일 요청-응답 (Unary RPC)
+  rpc AskQuestion(QuestionRequest) returns (QuestionResponse);
+  rpc StoreStatement(StatementRequest) returns (StatementResponse);
+  rpc ProcessDocument(DocumentRequest) returns (DocumentResponse);
+
+  // 양방향 스트리밍 (Bidirectional Streaming)
+  rpc StreamConversation(stream ConversationMessage) returns (stream ConversationResponse);
+
+  // 회의 관련
+  rpc GenerateReport(ReportRequest) returns (ReportResponse);
+  rpc GetMeetingContext(MeetingContextRequest) returns (MeetingContextResponse);
+}
+
+// ============================================================
+// Health Check
+// ============================================================
+
+message PingRequest {
+  string client_id = 1;
+}
+
+message PingResponse {
+  bool alive = 1;
+  string server_version = 2;
+  int64 timestamp_ms = 3;
+}
+
+// ============================================================
+// 세션 관리
+// ============================================================
+
+message CreateSessionRequest {
+  string room_id = 1;
+  string room_name = 2;
+  repeated string participants = 3;
+  map<string, string> metadata = 4;
+}
+
+message CreateSessionResponse {
+  bool success = 1;
+  string session_id = 2;
+  string error_message = 3;
+}
+
+message EndSessionRequest {
+  string room_id = 1;
+  bool generate_report = 2;
+}
+
+message EndSessionResponse {
+  bool success = 1;
+  string report_url = 2;
+  string error_message = 3;
+}
+
+// ============================================================
+// 질문/답변 (Question & Answer)
+// ============================================================
+
+message QuestionRequest {
+  string room_id = 1;
+  string question = 2;
+  string user_id = 3;
+  string user_name = 4;
+  SearchDomain search_domain = 5;
+  string category = 6;
+}
+
+message QuestionResponse {
+  string answer = 1;
+  repeated SearchResult search_results = 2;
+  float confidence = 3;
+  int64 latency_ms = 4;
+  string request_id = 5;
+}
+
+message SearchResult {
+  string title = 1;
+  string snippet = 2;
+  string url = 3;
+  string source = 4;
+  float relevance_score = 5;
+  map<string, string> metadata = 6;
+}
+
+enum SearchDomain {
+  SEARCH_DOMAIN_UNSPECIFIED = 0;
+  SEARCH_DOMAIN_MEETING = 1;      // 회의 내용만
+  SEARCH_DOMAIN_DOCUMENTS = 2;    // 업로드된 문서만
+  SEARCH_DOMAIN_WEB = 3;          // 웹 검색
+  SEARCH_DOMAIN_ALL = 4;          // 전체
+}
+
+// ============================================================
+// 발언 저장 (Statement Storage)
+// ============================================================
+
+message StatementRequest {
+  string room_id = 1;
+  string text = 2;
+  string speaker_id = 3;
+  string speaker_name = 4;
+  float confidence = 5;
+  google.protobuf.Timestamp timestamp = 6;
+  bool is_final = 7;
+}
+
+message StatementResponse {
+  bool success = 1;
+  string statement_id = 2;
+  string error_message = 3;
+}
+
+// ============================================================
+// 문서 처리 (Document Processing)
+// ============================================================
+
+message DocumentRequest {
+  string room_id = 1;
+  string file_name = 2;
+  bytes file_content = 3;
+  string file_url = 4;           // file_content 대신 URL로 전달 가능
+  DocumentType file_type = 5;
+}
+
+message DocumentResponse {
+  bool success = 1;
+  string document_id = 2;
+  int32 chunk_count = 3;
+  string error_message = 4;
+}
+
+enum DocumentType {
+  DOCUMENT_TYPE_UNSPECIFIED = 0;
+  DOCUMENT_TYPE_PDF = 1;
+  DOCUMENT_TYPE_DOCX = 2;
+  DOCUMENT_TYPE_TXT = 3;
+  DOCUMENT_TYPE_URL = 4;
+  DOCUMENT_TYPE_MARKDOWN = 5;
+}
+
+// ============================================================
+// 양방향 스트리밍 (Bidirectional Streaming)
+// ============================================================
+
+message ConversationMessage {
+  string room_id = 1;
+  string request_id = 2;
+
+  oneof content {
+    QuestionRequest question = 3;
+    StatementRequest statement = 4;
+    PrefetchRequest prefetch = 5;
+  }
+}
+
+message PrefetchRequest {
+  string room_id = 1;
+  string partial_text = 2;  // 중간 텍스트로 미리 검색
+}
+
+message ConversationResponse {
+  string room_id = 1;
+  string request_id = 2;
+
+  oneof content {
+    QuestionResponse answer = 3;
+    StatementResponse stored = 4;
+    PrefetchResponse prefetched = 5;
+    ErrorResponse error = 6;
+  }
+}
+
+message PrefetchResponse {
+  repeated SearchResult cached_results = 1;
+}
+
+message ErrorResponse {
+  string error_code = 1;
+  string error_message = 2;
+}
+
+// ============================================================
+// 회의 리포트 (Meeting Report)
+// ============================================================
+
+message ReportRequest {
+  string room_id = 1;
+  ReportFormat format = 2;
+  repeated string include_sections = 3;  // summary, transcripts, action_items 등
+}
+
+message ReportResponse {
+  bool success = 1;
+  string report_content = 2;
+  string report_url = 3;
+  MeetingSummary summary = 4;
+  string error_message = 5;
+}
+
+enum ReportFormat {
+  REPORT_FORMAT_UNSPECIFIED = 0;
+  REPORT_FORMAT_MARKDOWN = 1;
+  REPORT_FORMAT_HTML = 2;
+  REPORT_FORMAT_PDF = 3;
+  REPORT_FORMAT_JSON = 4;
+}
+
+message MeetingSummary {
+  string title = 1;
+  int32 duration_minutes = 2;
+  int32 participant_count = 3;
+  repeated string key_topics = 4;
+  repeated ActionItem action_items = 5;
+  repeated string decisions = 6;
+}
+
+message ActionItem {
+  string description = 1;
+  string assignee = 2;
+  string due_date = 3;
+  string priority = 4;
+}
+
+// ============================================================
+// 회의 컨텍스트 (Meeting Context)
+// ============================================================
+
+message MeetingContextRequest {
+  string room_id = 1;
+  int32 max_transcripts = 2;  // 최근 N개 발언만 가져오기
+}
+
+message MeetingContextResponse {
+  repeated TranscriptEntry recent_transcripts = 1;
+  repeated string discussed_topics = 2;
+  string meeting_topic = 3;
+  int32 total_statements = 4;
+  int32 total_questions = 5;
+}
+
+message TranscriptEntry {
+  string speaker_id = 1;
+  string speaker_name = 2;
+  string text = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
