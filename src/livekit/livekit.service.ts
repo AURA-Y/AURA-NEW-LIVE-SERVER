@@ -66,19 +66,58 @@ export class LivekitService {
     ];
   }
 
+  /**
+   * 고유한 방 이름(ID) 생성
+   */
+  private generateRoomName(): string {
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).slice(2, 8);
+    return `room-${timestamp}-${random}`;
+  }
+
+  /**
+   * 방 메타데이터 파싱
+   */
+  private parseRoomMetadata(metadata: string | undefined): {
+    title: string;
+    description: string;
+    createdBy: string;
+  } {
+    if (!metadata) {
+      return { title: '', description: '', createdBy: '' };
+    }
+    try {
+      return JSON.parse(metadata);
+    } catch {
+      return { title: '', description: '', createdBy: '' };
+    }
+  }
+
   async createRoom(createRoomDto: CreateRoomDto) {
     const {
       userName,
-      roomTitle = `Room-${Date.now()}`,
+      roomTitle,
       description = '',
       maxParticipants = 20
     } = createRoomDto;
 
     try {
       this.logger.log(`Creating room via LiveKit: ${this.livekitUrl}`);
+
+      // 고유한 방 이름(ID) 생성
+      const roomName = this.generateRoomName();
+
+      // 메타데이터에 표시용 정보 저장
+      const metadata = JSON.stringify({
+        title: roomTitle,
+        description: description,
+        createdBy: userName,
+      });
+
       // LiveKit에 방 생성
       const room = await this.roomService.createRoom({
-        name: roomTitle,
+        name: roomName,
+        metadata: metadata,
         emptyTimeout: 300,
         maxParticipants: maxParticipants,
         agents: this.buildRoomAgentDispatch(),
@@ -94,8 +133,9 @@ export class LivekitService {
 
       return {
         roomId: room.sid,
+        roomName: room.name,
         roomUrl: `${wsUrl}/${room.name}`,
-        roomTitle: room.name,
+        roomTitle: roomTitle,
         description: description,
         maxParticipants: room.maxParticipants,
         userName: userName,
@@ -194,14 +234,18 @@ export class LivekitService {
     try {
       const rooms = await this.roomService.listRooms();
 
-      const formattedRooms = rooms.map(room => ({
-        roomId: room.sid,
-        roomTitle: room.name,
-        description: '',
-        maxParticipants: room.maxParticipants,
-        createdBy: '',
-        createdAt: new Date(Number(room.creationTime) * 1000).toISOString(),
-      }));
+      const formattedRooms = rooms.map(room => {
+        const meta = this.parseRoomMetadata(room.metadata);
+        return {
+          roomId: room.sid,
+          roomName: room.name,
+          roomTitle: meta.title || room.name,
+          description: meta.description,
+          maxParticipants: room.maxParticipants,
+          createdBy: meta.createdBy,
+          createdAt: new Date(Number(room.creationTime) * 1000).toISOString(),
+        };
+      });
 
       return {
         rooms: formattedRooms,
@@ -264,12 +308,15 @@ export class LivekitService {
         throw new Error('Room not found');
       }
 
+      const meta = this.parseRoomMetadata(room.metadata);
+
       return {
         roomId: room.sid,
-        roomTitle: room.name,
-        description: '',
+        roomName: room.name,
+        roomTitle: meta.title || room.name,
+        description: meta.description,
         maxParticipants: room.maxParticipants,
-        createdBy: '',
+        createdBy: meta.createdBy,
         createdAt: new Date(Number(room.creationTime) * 1000).toISOString(),
       };
     } catch (error) {
