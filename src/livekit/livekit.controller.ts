@@ -157,6 +157,27 @@ export class LivekitController {
     }
   }
 
+  // 중간 보고서 요청
+  @Post(':roomId/report')
+  async requestReport(@Param('roomId') roomId: string) {
+    const normalizedRoomId = roomId.trim();
+    if (!normalizedRoomId) {
+      return { status: 'fail', roomId: '', message: 'roomId가 필요합니다.' };
+    }
+
+    try {
+      const result = await this.livekitService.requestReport(normalizedRoomId);
+      return {
+        status: result.success ? 'success' : 'fail',
+        roomId: normalizedRoomId,
+        message: result.message,
+        report: result.report,
+      };
+    } catch (error) {
+      return { status: 'fail', roomId: normalizedRoomId, message: error.message };
+    }
+  }
+
   // 오디오 파일로 STT 테스트 (마이크 없이 테스트용)
   @Post('stt-test')
   @UseInterceptors(FileInterceptor('audio'))

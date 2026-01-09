@@ -9,6 +9,20 @@ interface PendingRequest {
     startTime: number;
 }
 
+interface PendingStatement {
+    text: string;
+    speaker: string;
+    timestamp: number;
+    retryCount: number;
+}
+
+interface PendingReportRequest {
+    resolve: (value: any) => void;
+    reject: (reason: any) => void;
+    timer: NodeJS.Timeout;
+    startTime: number;
+}
+
 interface ConnectionContext {
     ws: WebSocket;
     pendingRequests: Map<string, PendingRequest>;
@@ -26,6 +40,16 @@ export class RagClientService implements OnModuleDestroy {
     private readonly REQUEST_TIMEOUT = 30000; // 30초
     private readonly RECONNECT_DELAY = 10000; // 10초 (3초→10초로 증가)
     private readonly MAX_RECONNECT_ATTEMPTS = 3; // 최대 3회 재시도
+    private readonly MAX_STATEMENT_RETRY = 3; // 발언 전송 최대 재시도 횟수
+    private readonly STATEMENT_BUFFER_MAX_SIZE = 100; // 버퍼 최대 크기
+    private readonly STATEMENT_BUFFER_MAX_AGE = 60000; // 버퍼 최대 보관 시간 (1분)
+
+    // 발언 버퍼: 연결 안 됐을 때 발언 임시 저장
+    private statementBuffers: Map<string, PendingStatement[]> = new Map();
+
+    // 중간 보고서 요청 대기: roomId → PendingReportRequest
+    private pendingReportRequests: Map<string, PendingReportRequest> = new Map();
+    private readonly REPORT_TIMEOUT = 60000; // 보고서 생성 타임아웃 (60초)
 
     constructor(private configService: ConfigService) { }
 
@@ -78,6 +102,10 @@ export class RagClientService implements OnModuleDestroy {
                     this.logger.log(`[RAG 연결 성공] ${roomId}`);
                     this.logger.log(`현재 활성 연결 수: ${this.connections.size}`);
                     this.logger.log(`========================================\n`);
+
+                    // 연결 성공 시 버퍼에 있는 발언들 전송
+                    this.flushStatementBuffer(roomId);
+
                     resolve();
                 });
 
@@ -146,6 +174,25 @@ export class RagClientService implements OnModuleDestroy {
                 this.logger.log(`[RAG 저장 완료] ${roomId} - 화자: ${message.speaker}, 내용: "${message.text}"`);
             } else if (messageType === 'document_processed') {
                 this.logger.log(`[RAG 문서 처리 완료] ${roomId} - 파일: ${message.file}, 청크: ${message.chunks}개`);
+            } else if (messageType === 'meeting_report') {
+                // 중간 보고서 결과 수신
+                const pendingReport = this.pendingReportRequests.get(roomId);
+                if (pendingReport) {
+                    const latency = Date.now() - pendingReport.startTime;
+                    this.logger.log(`[RAG 중간 보고서 수신] ${roomId} - ${latency}ms`);
+
+                    clearTimeout(pendingReport.timer);
+                    this.pendingReportRequests.delete(roomId);
+                    pendingReport.resolve({
+                        success: message.status === 'success',
+                        status: message.status,
+                        meetingTitle: message.meeting_title,
+                        summaryType: message.summary_type,
+                        reportContent: message.report_content,
+                    });
+                } else {
+                    this.logger.log(`[RAG 중간 보고서] ${roomId} - 대기 중인 요청 없음 (비동기 수신)`);
+                }
             } else {
                 this.logger.log(`[RAG 메시지] ${roomId} - 타입: ${messageType}`);
             }
@@ -196,11 +243,12 @@ export class RagClientService implements OnModuleDestroy {
     }
 
     /**
-     * 일반 발언 전송 (statement)
+     * 일반 발언 전송 (statement) - 버퍼링 및 재시도 지원
      */
-    async sendStatement(roomId: string, text: string, speaker: string): Promise<void> {
+    async sendStatement(roomId: string, text: string, speaker: string, retryCount: number = 0): Promise<void> {
+        // 연결 안 됐으면 버퍼에 저장
         if (!this.isConnected(roomId)) {
-            this.logger.warn(`[RAG 스킵] WebSocket 연결 안 됨: ${roomId} (statement)`);
+            this.addToStatementBuffer(roomId, text, speaker);
             return;
         }
 
@@ -212,8 +260,98 @@ export class RagClientService implements OnModuleDestroy {
             confidence: 1.0,
         };
 
-        this.logger.log(`[RAG 발언 전송] ${roomId} - 화자: ${speaker}, "${text.substring(0, 30)}..."`);
-        context.ws.send(JSON.stringify(message));
+        try {
+            context.ws.send(JSON.stringify(message));
+            this.logger.log(`[RAG 발언 전송] ${roomId} - 화자: ${speaker}, "${text.substring(0, 30)}..."`);
+        } catch (error: any) {
+            this.logger.error(`[RAG 발언 전송 실패] ${roomId}: ${error.message}`);
+
+            // 재시도 로직
+            if (retryCount < this.MAX_STATEMENT_RETRY) {
+                this.logger.log(`[RAG 발언 재시도] ${roomId} - ${retryCount + 1}/${this.MAX_STATEMENT_RETRY}`);
+                // 잠시 대기 후 재시도 (exponential backoff)
+                const delay = Math.min(1000 * Math.pow(2, retryCount), 5000);
+                setTimeout(() => {
+                    this.sendStatement(roomId, text, speaker, retryCount + 1);
+                }, delay);
+            } else {
+                // 최대 재시도 초과 시 버퍼에 저장
+                this.logger.warn(`[RAG 발언 재시도 초과] ${roomId} - 버퍼에 저장`);
+                this.addToStatementBuffer(roomId, text, speaker);
+            }
+        }
+    }
+
+    /**
+     * 발언을 버퍼에 추가
+     */
+    private addToStatementBuffer(roomId: string, text: string, speaker: string): void {
+        let buffer = this.statementBuffers.get(roomId);
+        if (!buffer) {
+            buffer = [];
+            this.statementBuffers.set(roomId, buffer);
+        }
+
+        // 버퍼 크기 제한 체크
+        if (buffer.length >= this.STATEMENT_BUFFER_MAX_SIZE) {
+            // 가장 오래된 것 제거
+            const removed = buffer.shift();
+            this.logger.warn(`[RAG 버퍼 오버플로우] ${roomId} - 오래된 발언 제거: "${removed?.text.substring(0, 20)}..."`);
+        }
+
+        buffer.push({
+            text,
+            speaker,
+            timestamp: Date.now(),
+            retryCount: 0,
+        });
+
+        this.logger.log(`[RAG 버퍼 저장] ${roomId} - 버퍼 크기: ${buffer.length}, 화자: ${speaker}, "${text.substring(0, 30)}..."`);
+    }
+
+    /**
+     * 버퍼에 있는 발언들 전송 (연결 성공 시 호출)
+     */
+    private async flushStatementBuffer(roomId: string): Promise<void> {
+        const buffer = this.statementBuffers.get(roomId);
+        if (!buffer || buffer.length === 0) {
+            return;
+        }
+
+        const now = Date.now();
+        const validStatements: PendingStatement[] = [];
+
+        // 만료되지 않은 발언만 필터링
+        for (const stmt of buffer) {
+            if (now - stmt.timestamp <= this.STATEMENT_BUFFER_MAX_AGE) {
+                validStatements.push(stmt);
+            } else {
+                this.logger.warn(`[RAG 버퍼 만료] ${roomId} - 발언 삭제 (${Math.round((now - stmt.timestamp) / 1000)}초 경과): "${stmt.text.substring(0, 20)}..."`);
+            }
+        }
+
+        if (validStatements.length === 0) {
+            this.statementBuffers.delete(roomId);
+            return;
+        }
+
+        this.logger.log(`[RAG 버퍼 플러시] ${roomId} - ${validStatements.length}개 발언 전송 시작`);
+
+        // 버퍼 비우기
+        this.statementBuffers.delete(roomId);
+
+        // 순차적으로 전송 (순서 보장)
+        for (const stmt of validStatements) {
+            try {
+                await this.sendStatement(roomId, stmt.text, stmt.speaker, stmt.retryCount);
+                // 전송 간 약간의 딜레이 (Rate Limit 방지)
+                await new Promise(resolve => setTimeout(resolve, 100));
+            } catch (error: any) {
+                this.logger.error(`[RAG 버퍼 플러시 실패] ${roomId}: ${error.message}`);
+            }
+        }
+
+        this.logger.log(`[RAG 버퍼 플러시 완료] ${roomId}`);
     }
 
     /**
@@ -289,10 +427,26 @@ export class RagClientService implements OnModuleDestroy {
         }
         context.pendingRequests.clear();
 
+        // 대기 중인 보고서 요청도 거부
+        const pendingReport = this.pendingReportRequests.get(roomId);
+        if (pendingReport) {
+            clearTimeout(pendingReport.timer);
+            this.pendingReportRequests.delete(roomId);
+            pendingReport.reject(new Error('회의가 종료되었습니다.'));
+            this.logger.warn(`[RAG 보고서 요청 취소] ${roomId} - 연결 종료로 인해 취소됨`);
+        }
+
         // WebSocket 종료
         this.logger.log(`[RAG 연결 해제] ${roomId}`);
         context.ws.close(1000, 'Client disconnect');
         this.connections.delete(roomId);
+
+        // 버퍼 정리 (연결 해제 시 남은 발언은 유실됨을 경고)
+        const buffer = this.statementBuffers.get(roomId);
+        if (buffer && buffer.length > 0) {
+            this.logger.warn(`[RAG 버퍼 정리] ${roomId} - ${buffer.length}개 발언 유실`);
+            this.statementBuffers.delete(roomId);
+        }
 
         this.logger.log(`현재 활성 연결 수: ${this.connections.size}`);
     }
@@ -301,7 +455,7 @@ export class RagClientService implements OnModuleDestroy {
      * 모듈 종료 시 모든 연결 정리
      */
     async onModuleDestroy() {
-        this.logger.log(`[RAG 모듈 종료] 모든 연결 해제 중... (연결: ${this.connections.size}개, 재연결 대기: ${this.reconnectTimers.size}개)`);
+        this.logger.log(`[RAG 모듈 종료] 모든 연결 해제 중... (연결: ${this.connections.size}개, 재연결 대기: ${this.reconnectTimers.size}개, 버퍼: ${this.statementBuffers.size}개)`);
 
         // 모든 재연결 타이머 취소
         for (const timer of this.reconnectTimers.values()) {
@@ -309,6 +463,16 @@ export class RagClientService implements OnModuleDestroy {
         }
         this.reconnectTimers.clear();
         this.reconnectAttemptCounts.clear();
+
+        // 모든 버퍼 정리
+        let totalBufferedStatements = 0;
+        for (const [roomId, buffer] of this.statementBuffers.entries()) {
+            totalBufferedStatements += buffer.length;
+        }
+        if (totalBufferedStatements > 0) {
+            this.logger.warn(`[RAG 모듈 종료] ${totalBufferedStatements}개 버퍼된 발언 유실`);
+        }
+        this.statementBuffers.clear();
 
         // 모든 연결 해제
         const disconnectPromises = Array.from(this.connections.keys()).map(roomId =>
@@ -332,10 +496,32 @@ export class RagClientService implements OnModuleDestroy {
     /**
      * 전체 연결 현황 반환
      */
-    getAllConnectionsStatus(): { total: number; clients: string[] } {
+    getAllConnectionsStatus(): { total: number; clients: string[]; bufferedStatements: number } {
+        let totalBuffered = 0;
+        for (const buffer of this.statementBuffers.values()) {
+            totalBuffered += buffer.length;
+        }
+
         return {
             total: this.connections.size,
             clients: Array.from(this.connections.keys()),
+            bufferedStatements: totalBuffered,
+        };
+    }
+
+    /**
+     * 특정 방의 버퍼 상태 반환
+     */
+    getBufferStatus(roomId: string): { buffered: number; oldest?: number } {
+        const buffer = this.statementBuffers.get(roomId);
+        if (!buffer || buffer.length === 0) {
+            return { buffered: 0 };
+        }
+
+        const oldest = buffer[0]?.timestamp;
+        return {
+            buffered: buffer.length,
+            oldest: oldest ? Date.now() - oldest : undefined,
         };
     }
 
@@ -378,6 +564,70 @@ export class RagClientService implements OnModuleDestroy {
             return { success: true, message: response.data };
         } catch (error: any) {
             this.logger.error(`[RAG 회의 시작 실패] ${roomName}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
+
+    /**
+     * 중간 보고서 요청 (HTTP POST 후 WebSocket 결과 대기)
+     * POST /meetings/{roomId}/report → WebSocket으로 결과 수신
+     */
+    async requestReport(roomId: string): Promise<{ success: boolean; message?: string; report?: any }> {
+        // WebSocket 연결 확인
+        if (!this.isConnected(roomId)) {
+            this.logger.error(`[RAG 중간 보고서] WebSocket 연결 안 됨: ${roomId}`);
+            return { success: false, message: 'WebSocket 연결이 없습니다.' };
+        }
+
+        // 이미 대기 중인 요청이 있으면 거부
+        if (this.pendingReportRequests.has(roomId)) {
+            this.logger.warn(`[RAG 중간 보고서] 이미 요청 진행 중: ${roomId}`);
+            return { success: false, message: '이미 보고서 생성 요청이 진행 중입니다.' };
+        }
+
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/report`;
+
+        this.logger.log(`[RAG 중간 보고서] POST ${endpoint} (결과는 WebSocket 대기)`);
+
+        const startTime = Date.now();
+
+        // WebSocket 결과 대기 Promise 생성
+        const resultPromise = new Promise<any>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this.pendingReportRequests.delete(roomId);
+                const elapsed = Date.now() - startTime;
+                this.logger.error(`[RAG 중간 보고서 타임아웃] ${roomId} - ${elapsed}ms`);
+                reject(new Error('보고서 생성 타임아웃'));
+            }, this.REPORT_TIMEOUT);
+
+            this.pendingReportRequests.set(roomId, {
+                resolve,
+                reject,
+                timer,
+                startTime,
+            });
+        });
+
+        try {
+            // HTTP POST 요청 (큐에 작업 추가)
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint);
+            this.logger.log(`[RAG 중간 보고서 요청 전송] ${roomId} - 큐 상태: ${response.data?.status}`);
+
+            // WebSocket에서 결과 대기
+            const result = await resultPromise;
+            this.logger.log(`[RAG 중간 보고서 완료] ${roomId}`);
+
+            return {
+                success: result.success,
+                message: result.success ? '보고서 생성 완료' : '보고서 생성 실패',
+                report: result,
+            };
+        } catch (error: any) {
+            // 타임아웃 또는 HTTP 요청 실패
+            this.pendingReportRequests.delete(roomId);
+            this.logger.error(`[RAG 중간 보고서 실패] ${roomId}: ${error.message}`);
             return { success: false, message: error.message };
         }
     }

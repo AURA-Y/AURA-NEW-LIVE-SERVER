@@ -44,7 +44,7 @@ interface RoomContext {
     currentRequestId: number;
     botState: BotState;
     lastInteractionTime: number;
-    lastSttTime: number;
+    lastSttTimeByUser: Map<string, number>;  // 사용자별 STT 쿨다운
     lastResponseTime: number;
     lastSpeechTime: number;
     speakingStartTime: number;
@@ -333,7 +333,7 @@ export class VoiceBotService {
                 currentRequestId: 0,
                 botState: BotState.SLEEP,
                 lastInteractionTime: Date.now(),
-                lastSttTime: 0,
+                lastSttTimeByUser: new Map(),
                 lastResponseTime: 0,
                 lastSpeechTime: 0,
                 speakingStartTime: 0,
@@ -794,12 +794,17 @@ JSON 배열만 출력:`;
                 voiceCount = 0;
 
                 if (fullDecibel > MIN_DECIBEL_THRESHOLD - 5) {
-                    if (context && Date.now() - context.lastSttTime < STT_COOLDOWN_MS) {
+                    // 봇 context 없으면 처리 스킵
+                    if (!context) {
                         continue;
                     }
-                    if (context) {
-                        context.lastSttTime = Date.now();
+
+                    // 사용자별 STT 쿨다운 체크
+                    const userLastSttTime = context.lastSttTimeByUser.get(userId) || 0;
+                    if (Date.now() - userLastSttTime < STT_COOLDOWN_MS) {
+                        continue;
                     }
+                    context.lastSttTimeByUser.set(userId, Date.now());
 
                     this.processAndRespond(roomId, fullAudio, userId).catch(err => {
                         this.logger.error(`[처리 에러] ${err.message}`);
@@ -811,14 +816,39 @@ JSON 배열만 출력:`;
 
     /**
      * 음성 처리 메인 로직
-     * STT → Intent 분석 → (LLM 교정) → 검색/응답 → TTS
+     * STT → RAG 임베딩 → Intent 분석 → (LLM 교정) → 검색/응답 → TTS
      */
     private async processAndRespond(roomId: string, audioBuffer: Buffer, userId: string) {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
 
+        // ================================================
+        // 1. STT (음성 → 텍스트) - 항상 수행 (isPublishing과 무관)
+        // ================================================
+        const sttStart = Date.now();
+        let transcript: string;
+        try {
+            transcript = await this.sttService.transcribeFromBufferStream(audioBuffer, 'live-audio.pcm');
+        } catch (err) {
+            this.logger.error(`[STT 에러] ${err.message}`);
+            return;
+        }
+        this.logger.log(`[1.STT] ${Date.now() - sttStart}ms - "${transcript}" (${userId})`);
+
+        if (!transcript.trim()) {
+            this.logger.log(`[스킵] 빈 STT 결과`);
+            return;
+        }
+
+        // ★ RAG로 발언 전송 (비동기, 논블로킹 - 회의록/임베딩용)
+        // 모든 참가자의 발화를 기록 (봇 응답 여부와 무관)
+        this.sendToRagForEmbedding(roomId, transcript, userId);
+
+        // ================================================
+        // 2. 봇 응답 여부 체크 (여기서부터 isPublishing 보호)
+        // ================================================
         if (context.isPublishing) {
-            this.logger.log(`[스킵] 이미 처리 중 (isPublishing=true)`);
+            this.logger.log(`[스킵] 이미 응답 중 (STT/RAG는 완료됨)`);
             return;
         }
 
@@ -841,25 +871,10 @@ JSON 배열만 출력:`;
         }
         const startTime = Date.now();
 
-        this.logger.log(`\n========== [음성 처리] ${userId} ==========`);
+        this.logger.log(`\n========== [봇 응답 처리] ${userId} ==========`);
 
         try {
             context.isPublishing = true;
-
-            // ================================================
-            // 1. STT (음성 → 텍스트) ~300ms
-            // ================================================
-            const sttStart = Date.now();
-            const transcript = await this.sttService.transcribeFromBufferStream(audioBuffer, 'live-audio.pcm');
-            this.logger.log(`[1.STT] ${Date.now() - sttStart}ms - "${transcript}"`);
-
-            if (context.currentRequestId !== requestId) {
-                return;
-            }
-            if (!transcript.trim()) {
-                this.logger.log(`[스킵] 빈 STT 결과`);
-                return;
-            }
 
             // Intent 분석
             const intentForContext = this.intentClassifier.classify(transcript);
@@ -1855,6 +1870,59 @@ ${boardSummary}
         }
 
         return parts.join(' | ');
+    }
+
+    // ============================================================
+    // RAG 임베딩 전송 (회의록용)
+    // ============================================================
+
+    /**
+     * STT 결과를 RAG 서버로 전송 (임베딩용)
+     * - 비동기, 논블로킹 (fire-and-forget)
+     * - 짧은 추임새나 무의미한 텍스트는 필터링
+     */
+    private sendToRagForEmbedding(roomId: string, text: string, speaker: string): void {
+        // 너무 짧은 텍스트 필터링 (3글자 이하)
+        if (text.trim().length <= 3) {
+            return;
+        }
+
+        // 추임새 단어 목록 (단독으로 쓰일 때만 의미 없는 단어들)
+        const fillerWords = new Set([
+            '음', '어', '아', '네', '응', '예', '오케이', '그래', '하하',
+            '뭐', '에', '으', '아아', '어어', '음음', '으으', '에에',
+            '네네', '응응', '예예', 'ㅋㅋ', 'ㅋㅋㅋ', '흠', '허', '헐'
+        ]);
+
+        // 공백/구두점으로 단어 분리
+        const words = text.trim()
+            .split(/[\s,.\?\!…]+/)
+            .filter(w => w.length > 0);
+
+        // 추임새가 아닌 단어가 있는지 체크
+        const meaningfulWords = words.filter(word => !fillerWords.has(word.toLowerCase()));
+
+        // 의미 있는 단어가 하나도 없으면 스킵
+        if (meaningfulWords.length === 0) {
+            this.logger.debug(`[RAG 임베딩 스킵] 추임새만 있음: "${text}"`);
+            return;
+        }
+
+        // 의미 있는 단어가 있어도 총 글자수가 너무 적으면 스킵
+        const meaningfulText = meaningfulWords.join('');
+        if (meaningfulText.length <= 2) {
+            this.logger.debug(`[RAG 임베딩 스킵] 의미 있는 내용 부족: "${text}"`);
+            return;
+        }
+
+        // 비동기로 RAG에 전송 (응답 대기 없음)
+        this.ragClient.sendStatement(roomId, text, speaker)
+            .then(() => {
+                this.logger.debug(`[RAG 임베딩] 전송 완료: "${text.substring(0, 30)}..." by ${speaker}`);
+            })
+            .catch(err => {
+                this.logger.warn(`[RAG 임베딩 실패] ${err.message}`);
+            });
     }
 
     private summarizeDddBoard(boardState: Array<{ type: string; content: string }>): string {
