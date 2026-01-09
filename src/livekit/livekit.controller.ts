@@ -1,12 +1,11 @@
-import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query, Inject } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { LivekitService } from './livekit.service';
 import { VoiceBotService } from './voice-bot.service';
 import { SttService } from '../stt/stt.service';
-import { LlmService } from '../llm/llm.service'; //통합 검색
+import { LlmService } from '../llm/llm.service';
 import { TtsService } from '../tts/tts.service';
-import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { EmbedFilesDto } from './dto/embed-files.dto';
@@ -17,36 +16,22 @@ export class LivekitController {
     private readonly livekitService: LivekitService,
     private readonly voiceBotService: VoiceBotService,
     private readonly sttService: SttService,
-    private readonly llmService: LlmService, //통합 검색
+    private readonly llmService: LlmService,
     private readonly ttsService: TtsService,
-    @Inject(RAG_CLIENT) private readonly ragClient: IRagClient,
   ) { }
 
   // AI 음성 봇 시작
-  @Post('voice-bot/:roomName')
-  async startVoiceBot(@Param('roomName') roomName: string) {
-    const normalizedRoomName = roomName.trim();
-    console.log(`[AI 봇 요청] 방: ${normalizedRoomName}`);
+  @Post('voice-bot/:roomId')
+  async startVoiceBot(@Param('roomId') roomId: string) {
+    const normalizedRoomId = roomId.trim();
+    console.log(`[AI 봇 요청] 방: ${normalizedRoomId}`);
 
     try {
-      if (this.voiceBotService.isActive(normalizedRoomName)) {
-        await this.voiceBotService.stopBot(normalizedRoomName);
-      }
-      await this.livekitService.removeBots(normalizedRoomName);
-
-      // 봇 전용 토큰 생성
-      const { token } = await this.livekitService.joinRoom({
-        userName: `ai-bot-${Math.floor(Math.random() * 1000)}`,
-        roomName: normalizedRoomName,
-      }, true);
-
-      // 봇 시작
-      await this.voiceBotService.startBot(normalizedRoomName, token);
-
+      await this.livekitService.startBotForRoom(normalizedRoomId);
       return {
         success: true,
-        message: `AI 봇이 방 '${normalizedRoomName}'에 입장했습니다.`,
-        roomName: normalizedRoomName,
+        message: `AI 봇이 방 '${normalizedRoomId}'에 입장했습니다.`,
+        roomId: normalizedRoomId,
       };
     } catch (error) {
       throw new HttpException(`AI 봇 시작 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
@@ -54,25 +39,25 @@ export class LivekitController {
   }
 
   // AI 음성 봇 종료
-  @Delete('voice-bot/:roomName')
-  async stopVoiceBot(@Param('roomName') roomName: string) {
-    const normalizedRoomName = roomName.trim();
-    await this.voiceBotService.stopBot(normalizedRoomName);
-    return { success: true, message: `AI 봇이 방 '${normalizedRoomName}'에서 퇴장했습니다.` };
+  @Delete('voice-bot/:roomId')
+  async stopVoiceBot(@Param('roomId') roomId: string) {
+    const normalizedRoomId = roomId.trim();
+    await this.livekitService.stopBotForRoom(normalizedRoomId);
+    return { success: true, message: `AI 봇이 방 '${normalizedRoomId}'에서 퇴장했습니다.` };
   }
 
   // AI 봇 상태 확인
-  @Get('voice-bot/:roomName/status')
-  async getVoiceBotStatus(@Param('roomName') roomName: string) {
-    const normalizedRoomName = roomName.trim();
-    const isActive = this.voiceBotService.isActive(normalizedRoomName);
-    return { roomName: normalizedRoomName, active: isActive };
+  @Get('voice-bot/:roomId/status')
+  async getVoiceBotStatus(@Param('roomId') roomId: string) {
+    const normalizedRoomId = roomId.trim();
+    const isActive = this.livekitService.isBotActive(normalizedRoomId);
+    return { roomId: normalizedRoomId, active: isActive };
   }
 
   // Vision 캡처 응답 수신 (DataChannel 64KB 제한 우회용)
-  @Post('voice-bot/:roomName/vision-capture')
+  @Post('voice-bot/:roomId/vision-capture')
   async receiveVisionCapture(
-    @Param('roomName') roomName: string,
+    @Param('roomId') roomId: string,
     @Body() body: {
       requestId: number;
       imageBase64: string;
@@ -82,11 +67,11 @@ export class LivekitController {
       screenHeight: number;
     }
   ) {
-    const normalizedRoomName = roomName.trim();
-    console.log(`[Vision HTTP] 캡처 수신 - room: ${normalizedRoomName}, requestId: ${body.requestId}, 크기: ${(body.imageBase64?.length / 1024).toFixed(1)}KB`);
+    const normalizedRoomId = roomId.trim();
+    console.log(`[Vision HTTP] 캡처 수신 - room: ${normalizedRoomId}, requestId: ${body.requestId}, 크기: ${(body.imageBase64?.length / 1024).toFixed(1)}KB`);
 
     try {
-      await this.voiceBotService.handleVisionCaptureFromHttp(normalizedRoomName, {
+      await this.voiceBotService.handleVisionCaptureFromHttp(normalizedRoomId, {
         type: 'vision_capture_response',
         requestId: body.requestId,
         imageBase64: body.imageBase64,
@@ -107,28 +92,15 @@ export class LivekitController {
   @Post('create')
   async createRoom(@Body() createRoomDto: CreateRoomDto) {
     const result = await this.livekitService.createRoom(createRoomDto);
-    const normalizedRoomTitle = result.roomTitle.trim();
+    const roomId = result.roomId;
 
     // 방 생성 시 자동으로 Voice Bot 시작 (응답 지연 방지를 위해 비동기 처리)
-    try {
-      if (this.voiceBotService.isActive(normalizedRoomTitle)) {
-        await this.voiceBotService.stopBot(normalizedRoomTitle);
-      }
-      await this.livekitService.removeBots(normalizedRoomTitle);
-      const { token } = await this.livekitService.joinRoom({
-        userName: `ai-bot-${Math.floor(Math.random() * 1000)}`,
-        roomName: normalizedRoomTitle,
-      }, true);
-
-      void this.voiceBotService.startBot(normalizedRoomTitle, token).then(() => {
-        console.log(`[자동 봇 시작] 방 '${normalizedRoomTitle}'에 봇이 자동으로 입장했습니다.`);
-      }).catch((error) => {
-        console.error(`[자동 봇 시작 실패] ${error.message}`);
-      });
-    } catch (error) {
+    void this.livekitService.startBotForRoom(roomId).then(() => {
+      console.log(`[자동 봇 시작] 방 '${roomId}' (${result.roomTitle})에 봇이 입장했습니다.`);
+    }).catch((error) => {
       console.error(`[자동 봇 시작 실패] ${error.message}`);
       // 봇 시작 실패해도 방 생성은 성공으로 처리
-    }
+    });
 
     return result;
   }
@@ -136,6 +108,23 @@ export class LivekitController {
   @Post('join')
   async joinRoom(@Body() joinRoomDto: JoinRoomDto) {
     return this.livekitService.joinRoom(joinRoomDto);
+  }
+
+  @Post('embed-files')
+  async embedFiles(@Body() embedFilesDto: EmbedFilesDto) {
+    const { roomId, files, topic, description } = embedFilesDto;
+
+    try {
+      const result = await this.livekitService.embedFiles(roomId, files, topic, description);
+      return {
+        success: result.success,
+        roomId,
+        message: result.message || '임베딩 요청 완료',
+        files,
+      };
+    } catch (error) {
+      throw new HttpException(`파일 임베딩 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
   @Get(':roomId')
@@ -146,6 +135,26 @@ export class LivekitController {
   @Delete(':roomId')
   async deleteRoom(@Param('roomId') roomId: string) {
     return this.livekitService.deleteRoom(roomId);
+  }
+
+  // 회의 종료 (봇 정리 + RAG 요약 요청)
+  @Post('end-meeting')
+  async endMeeting(@Body('roomName') roomName: string) {
+    const roomId = roomName?.trim();
+    if (!roomId) {
+      return { status: 'fail', roomName: '' };
+    }
+
+    try {
+      const result = await this.livekitService.endMeeting(roomId);
+      return {
+        status: result.success ? 'success' : 'fail',
+        roomName: roomId,
+        ragResponse: result.message,
+      };
+    } catch (error) {
+      return { status: 'fail', roomName: roomId };
+    }
   }
 
   // 오디오 파일로 STT 테스트 (마이크 없이 테스트용)

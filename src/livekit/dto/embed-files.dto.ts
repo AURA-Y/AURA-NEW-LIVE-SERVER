@@ -14,7 +14,7 @@ class FileReference {
 export class EmbedFilesDto {
   @IsString()
   @IsNotEmpty()
-  roomName: string;
+  roomId: string;
 
   @IsArray()
   @ValidateNested({ each: true })
