@@ -354,17 +354,33 @@ ${transcript}
   }
 
   /**
-   * 다이어그램 설명 요청
+   * 다이어그램 설명 요청 (LLM + TTS)
    * POST /mcp/explain-diagram
    */
   @Post('explain-diagram')
   async explainDiagram(@Body() dto: ExplainDiagramDto) {
     this.logger.log(`[Explain Diagram] type: ${dto.diagramType}, room: ${dto.roomId}`);
 
-    // 향후 LLM 연동으로 설명 생성 가능
-    return {
-      success: true,
-      explanation: `${dto.diagramType} 다이어그램이 생성되었습니다.`,
-    };
+    try {
+      const prompt = `다음 ${dto.diagramType} 다이어그램을 간단하게 설명해주세요. 2-3문장으로 핵심만 설명하세요.
+
+다이어그램 코드:
+${dto.mermaidCode}
+
+설명:`;
+
+      const explanation = await this.llmService.sendMessagePure(prompt, 300);
+
+      return {
+        success: true,
+        explanation: explanation.trim(),
+      };
+    } catch (error) {
+      this.logger.error(`[Explain Diagram] Error: ${error.message}`);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
   }
 }
