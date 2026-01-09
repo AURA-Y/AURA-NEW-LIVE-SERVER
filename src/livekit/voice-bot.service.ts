@@ -35,6 +35,13 @@ interface DDDElement {
     content: string;
 }
 
+// 대화 히스토리 타입
+interface ConversationTurn {
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: number;
+}
+
 interface RoomContext {
     room: Room;
     audioSource: AudioSource;
@@ -70,6 +77,11 @@ interface RoomContext {
     isDddProcessing: boolean;
     lastDddText: string;
     shutdownTimeout?: NodeJS.Timeout;
+    // ★ 대화 메모리 및 팔로업 윈도우
+    conversationHistory: ConversationTurn[];  // 최근 대화 히스토리
+    isInFollowUpWindow: boolean;              // 팔로업 윈도우 활성 여부
+    followUpExpiresAt: number;                // 팔로업 윈도우 만료 시간
+    lastBotQuestion: string | null;           // 마지막 봇 질문 (컨텍스트용)
 }
 
 @Injectable()
@@ -80,6 +92,11 @@ export class VoiceBotService {
 
     private readonly STOP_WORDS = ['멈춰', '그만', '스톱', '중지'];
     private readonly ARMED_TIMEOUT_MS = 30000;
+
+    // ★ 대화 메모리 및 팔로업 관련 상수
+    private readonly FOLLOW_UP_WINDOW_MS = 15000;     // 질문 후 15초간 웨이크워드 없이 응답 가능
+    private readonly MAX_CONVERSATION_TURNS = 10;     // 최근 10턴까지 기억
+    private readonly CONVERSATION_EXPIRE_MS = 300000; // 5분 지나면 대화 리셋
 
     constructor(
         private configService: ConfigService,
@@ -351,6 +368,11 @@ export class VoiceBotService {
                 lastEventStormEnd: 0,
                 isDddProcessing: false,
                 lastDddText: '',
+                // ★ 대화 메모리 및 팔로업 초기화
+                conversationHistory: [],
+                isInFollowUpWindow: false,
+                followUpExpiresAt: 0,
+                lastBotQuestion: null,
             };
             this.activeRooms.set(roomId, context);
 
@@ -656,9 +678,9 @@ JSON 배열만 출력:`;
         let silenceCount = 0;
         let voiceCount = 0;
 
-        const SILENCE_THRESHOLD = 50;  // 35→30 (더 빠른 발화 감지)
-        const MIN_AUDIO_LENGTH = 16000;  // 최소 1초
-        const MAX_AUDIO_LENGTH = 64000;  // 최대 4초 (긴 발화 중간에 끊기)
+        const SILENCE_THRESHOLD = 50;  // 무음 프레임 수 (~500ms)
+        const MIN_AUDIO_LENGTH = 16000;  // 최소 0.5초 (16000/32000)
+        const MAX_AUDIO_LENGTH = 192000;  // 최대 6초 (192000/32000) - 긴 문장 완전 인식
         const MIN_VOICE_FRAMES = 8;
         const BARGE_IN_DECIBEL_THRESHOLD = -20;
         const STRONG_VOICE_THRESHOLD = -24;
@@ -773,12 +795,15 @@ JSON 배열만 출력:`;
 
             // 발화 종료 감지 → STT 요청
             const totalLength = audioBuffer.reduce((sum, b) => sum + b.length, 0);
-            const shouldProcess =
-                (silenceCount > SILENCE_THRESHOLD && totalLength > MIN_AUDIO_LENGTH) ||  // 발화 종료
-                (totalLength > MAX_AUDIO_LENGTH);  // 최대 버퍼 도달 (긴 발화 중간 처리)
+            const triggeredBySilence = silenceCount > SILENCE_THRESHOLD && totalLength > MIN_AUDIO_LENGTH;
+            const triggeredByMaxLength = totalLength > MAX_AUDIO_LENGTH;
+            const shouldProcess = triggeredBySilence || triggeredByMaxLength;
 
             if (shouldProcess && totalLength > MIN_AUDIO_LENGTH) {
                 const fullAudio = Buffer.concat(audioBuffer);
+                const audioSec = (fullAudio.length / 32000).toFixed(2);
+                const triggerReason = triggeredByMaxLength ? '⚠️MAX_LENGTH' : '✅SILENCE';
+                this.logger.log(`[VAD] ${triggerReason} | 오디오: ${audioSec}초 (${fullAudio.length} bytes)`);
 
                 const fullSamples = new Int16Array(fullAudio.buffer.slice(
                     fullAudio.byteOffset,

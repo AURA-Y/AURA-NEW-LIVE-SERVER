@@ -115,6 +115,25 @@ export class SearchService {
     // hybrid 검색이 필요한 카테고리
     private readonly HYBRID_CATEGORIES = ['팝업', '전시', '영화'];
 
+    // LLM이 직접 답할 수 있는 패턴 (검색 불필요)
+    private readonly LLM_ANSWERABLE_PATTERNS = [
+        /노래.*(추천|알려|뭐|좋아)/,
+        /음악.*(추천|알려|뭐|좋아)/,
+        /책.*(추천|알려|뭐)/,
+        /드라마.*(추천|알려)/,
+        /게임.*(추천|알려)/,
+        /운동.*(추천|알려|방법)/,
+        /어떻게.*생각/,
+        /.*에 대해.*어떻게/,
+        /.*란\s*뭐/,
+        /.*가\s*뭐야/,
+        /.*이\s*뭐야/,
+        /뭐.*할까/,
+        /심심한데/,
+        /재밌는\s*(거|것|이야기)/,
+        /농담|유머|웃긴/,
+    ];
+
     // 지역명 목록
     private readonly LOCATIONS = [
         '서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종',
@@ -142,6 +161,16 @@ export class SearchService {
     }> {
         const base = this.normalizeSearchQuery(rawQuery) || rawQuery.trim();
         const lowerBase = base.toLowerCase();
+
+        // 0. LLM이 직접 답할 수 있는 질문인지 체크 (검색 불필요)
+        const hasLocation = this.LOCATIONS.some(loc => lowerBase.includes(loc.toLowerCase()));
+        if (!hasLocation) {
+            const isLlmAnswerable = this.LLM_ANSWERABLE_PATTERNS.some(p => p.test(lowerBase));
+            if (isLlmAnswerable) {
+                this.logger.log(`[검색 계획] LLM 직접 응답 가능 → 검색 스킵: "${base}"`);
+                return { query: '', cacheKey: '', searchType: 'none', category: null };
+            }
+        }
 
         // 1. 카테고리 매칭
         let matchedCategory: string | null = null;
