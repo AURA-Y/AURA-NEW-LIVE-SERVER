@@ -417,4 +417,16 @@ export class LivekitService {
 
     return result;
   }
+
+  /**
+   * 중간 보고서 요청
+   */
+  async requestReport(roomId: string): Promise<{ success: boolean; message?: string; report?: any }> {
+    this.logger.log(`[중간 보고서 요청] roomId: ${roomId}`);
+
+    const result = await this.ragClient.requestReport(roomId);
+    this.logger.log(`[중간 보고서] RAG 응답: ${result.message}`);
+
+    return result;
+  }
 }
