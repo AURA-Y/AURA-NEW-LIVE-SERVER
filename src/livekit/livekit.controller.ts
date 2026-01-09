@@ -22,6 +22,62 @@ export class LivekitController {
     @Inject(RAG_CLIENT) private readonly ragClient: IRagClient,
   ) { }
 
+  private async resolveRagRoomId(params: {
+    roomId?: string;
+    roomName?: string;
+    roomTitle?: string;
+    topic?: string;
+  }): Promise<string> {
+    const roomId = params.roomId?.trim();
+    const roomName = params.roomName?.trim();
+    const roomTitle = params.roomTitle?.trim();
+    const topic = params.topic?.trim();
+    const fallback = roomId || roomName || roomTitle || topic;
+
+    if (!fallback) {
+      throw new HttpException('roomId or roomName is required', HttpStatus.BAD_REQUEST);
+    }
+
+    if (roomId) {
+      return roomId;
+    }
+
+    try {
+      const { rooms } = await this.livekitService.listRooms();
+      const match = rooms.find(
+        (room) =>
+          room.roomName === roomName ||
+          room.roomTitle === roomTitle ||
+          room.roomTitle === roomName ||
+          room.roomName === roomTitle ||
+          (topic && (room.roomTitle === topic || room.roomName === topic)) ||
+          room.roomId === roomName ||
+          room.roomId === roomTitle ||
+          (topic && room.roomId === topic)
+      );
+      if (match?.roomId) {
+        return match.roomId;
+      }
+    } catch (error) {
+      console.warn(`[resolveRagRoomId] LiveKit lookup failed: ${error.message}`);
+    }
+
+    return fallback;
+  }
+
+  private resolveMeetingTitle(params: {
+    topic?: string;
+    roomTitle?: string;
+    roomName?: string;
+  }): string {
+    return (
+      params.topic?.trim() ||
+      params.roomTitle?.trim() ||
+      params.roomName?.trim() ||
+      ''
+    );
+  }
+
   // AI 음성 봇 시작
   @Post('voice-bot/:roomName')
   async startVoiceBot(@Param('roomName') roomName: string) {
@@ -103,6 +159,42 @@ export class LivekitController {
     }
   }
 
+
+  @Post('embed-files')
+  async embedFiles(@Body() body: EmbedFilesDto) {
+    const resolvedRoomId = await this.resolveRagRoomId(body);
+    const meetingTitle = this.resolveMeetingTitle(body) || resolvedRoomId;
+    const payload = {
+      room_name: meetingTitle,
+      description: body.description || meetingTitle,
+      files: body.files || [],
+      topic: body.topic,
+    };
+
+    const result = await this.ragClient.startMeeting(resolvedRoomId, payload);
+
+    return {
+      success: result.success,
+      roomId: resolvedRoomId,
+      roomName: meetingTitle,
+      message: result.message || '',
+      files: body.files || [],
+    };
+  }
+
+  @Post('end-meeting')
+  async endMeeting(@Body() body: { roomName?: string; roomId?: string; roomTitle?: string; topic?: string }) {
+    const resolvedRoomId = await this.resolveRagRoomId(body);
+    const meetingTitle = this.resolveMeetingTitle(body) || resolvedRoomId;
+    const result = await this.ragClient.endMeeting(resolvedRoomId);
+
+    return {
+      status: result.success ? 'success' : 'fail',
+      roomId: resolvedRoomId,
+      roomName: meetingTitle,
+      message: result.message || '',
+    };
+  }
 
   @Post('create')
   async createRoom(@Body() createRoomDto: CreateRoomDto) {

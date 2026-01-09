@@ -13,17 +13,26 @@ class FileReference {
 
 export class EmbedFilesDto {
   @IsString()
-  @IsNotEmpty()
-  roomName: string;
-
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => FileReference)
-  files: FileReference[];
+  @IsOptional()
+  roomName?: string;
 
   @IsString()
-  @IsNotEmpty()
-  topic: string;
+  @IsOptional()
+  roomId?: string;
+
+  @IsString()
+  @IsOptional()
+  roomTitle?: string;
+
+  @IsArray()
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => FileReference)
+  files?: FileReference[];
+
+  @IsString()
+  @IsOptional()
+  topic?: string;
 
   @IsString()
   @IsOptional()
