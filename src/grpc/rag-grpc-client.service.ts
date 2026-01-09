@@ -35,9 +35,15 @@ export class RagGrpcClientService implements OnModuleInit, OnModuleDestroy {
 
     /**
      * 모듈 초기화 시 gRPC 클라이언트 생성
+     * RAG_CLIENT_TYPE이 'grpc'인 경우에만 초기화
      */
     async onModuleInit() {
-        await this.initGrpcClient();
+        const clientType = this.configService.get<string>('RAG_CLIENT_TYPE') || 'websocket';
+        if (clientType === 'grpc') {
+            await this.initGrpcClient();
+        } else {
+            this.logger.log('[gRPC] RAG_CLIENT_TYPE이 grpc가 아님, 초기화 스킵');
+        }
     }
 
     /**

@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, forwardRef, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   AccessToken,
@@ -9,6 +9,7 @@ import {
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { VoiceBotService } from './voice-bot.service';
+import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 
 @Injectable()
 export class LivekitService {
@@ -24,6 +25,8 @@ export class LivekitService {
     private configService: ConfigService,
     @Inject(forwardRef(() => VoiceBotService))
     private voiceBotService: VoiceBotService,
+    @Inject(RAG_CLIENT)
+    private ragClient: IRagClient,
   ) {
     this.livekitUrl = this.configService.get<string>('LIVEKIT_URL');
     this.apiKey = this.configService.get<string>('LIVEKIT_API_KEY');
@@ -132,8 +135,7 @@ export class LivekitService {
       // 방 생성 시 AI 봇은 사용자가 입장할 때 자동 시작됨 (joinRoom에서 처리)
 
       return {
-        roomId: room.sid,
-        roomName: room.name,
+        roomId: room.name,
         roomUrl: `${wsUrl}/${room.name}`,
         roomTitle: roomTitle,
         description: description,
@@ -156,48 +158,26 @@ export class LivekitService {
     this.logger.log(`Join request: roomId=${roomId}, roomName=${roomName}, user=${userName}`);
 
     try {
-      let finalRoomName = roomName;
+      // roomId 우선, roomName은 하위호환용
+      const finalRoomId = roomId || roomName;
 
-      // roomId(SID)가 제공된 경우
-      if (roomId) {
-        const allRooms = await this.roomService.listRooms();
-        // 1. SID로 먼저 찾아봄
-        let room = allRooms.find(r => r.sid === roomId);
-
-        // 2. 못 찾았다면 이름으로도 찾아봄 (프론트에서 이름을 ID로 보낼 수 있음)
-        if (!room) {
-          room = allRooms.find(r => r.name === roomId);
-        }
-
-        if (!room) {
-          // 그래도 없는데 roomName도 없다면 에러
-          if (!finalRoomName) {
-            this.logger.error(`Room not found for ID: ${roomId}`);
-            throw new Error('Room not found');
-          }
-        } else {
-          finalRoomName = room.name;
-        }
+      if (!finalRoomId) {
+        throw new Error('roomId is required');
       }
 
-
-      if (!finalRoomName) {
-        throw new Error('Either roomId or roomName must be provided');
+      // 방 존재 여부 확인
+      const allRooms = await this.roomService.listRooms();
+      const room = allRooms.find(r => r.name === finalRoomId);
+      if (!room) {
+        this.logger.error(`Room not found: ${finalRoomId}`);
+        throw new Error('Room not found');
       }
+
       this.logger.log(`Joining room via LiveKit: ${this.livekitUrl}`);
-      await this.ensureAgentDispatch(finalRoomName);
-      this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${finalRoomName}`);
-      const token = await this.generateTokenForUser(finalRoomName, userName, isBot);
+      await this.ensureAgentDispatch(finalRoomId);
+      this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${finalRoomId}`);
+      const token = await this.generateTokenForUser(finalRoomId, userName, isBot);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
-
-      // 봇은 방 생성 시에만 시작 (join 시에는 봇 시작하지 않음)
-      // 이유: join할 때마다 봇을 시작하면 중복 생성 문제 발생
-      // if (!isBot && !this.voiceBotService.isActive(finalRoomName)) {
-      //   this.logger.log(`[봇 재시작] 방에 봇이 없어서 자동 시작: ${finalRoomName}`);
-      //   this.startBotForRoom(finalRoomName).catch(err => {
-      //     this.logger.error(`[봇 재시작 실패] ${err.message}`);
-      //   });
-      // }
 
       return {
         token: token,
@@ -212,24 +192,6 @@ export class LivekitService {
     }
   }
 
-  /**
-   * 방에 AI 봇 자동 시작
-   */
-  private async startBotForRoom(roomName: string): Promise<void> {
-    try {
-      // 봇용 토큰 생성
-      const botName = `ai-bot-${Math.floor(Math.random() * 1000)}`;
-      const botToken = await this.generateTokenForUser(roomName, botName, true);
-
-      // 봇 시작
-      await this.voiceBotService.startBot(roomName, botToken);
-      this.logger.log(`[자동 봇 시작 완료] ${roomName}`);
-    } catch (error) {
-      this.logger.error(`[자동 봇 시작 실패] ${error.message}`);
-      throw error;
-    }
-  }
-
   async listRooms() {
     try {
       const rooms = await this.roomService.listRooms();
@@ -237,8 +199,7 @@ export class LivekitService {
       const formattedRooms = rooms.map(room => {
         const meta = this.parseRoomMetadata(room.metadata);
         return {
-          roomId: room.sid,
-          roomName: room.name,
+          roomId: room.name,
           roomTitle: meta.title || room.name,
           description: meta.description,
           maxParticipants: room.maxParticipants,
@@ -300,9 +261,9 @@ export class LivekitService {
 
   async getRoom(roomId: string) {
     try {
-      // 모든 방을 조회한 후 sid로 필터링
+      // roomName으로 검색 (roomId = roomName)
       const allRooms = await this.roomService.listRooms();
-      const room = allRooms.find(r => r.sid === roomId);
+      const room = allRooms.find(r => r.name === roomId);
 
       if (!room) {
         throw new Error('Room not found');
@@ -311,8 +272,7 @@ export class LivekitService {
       const meta = this.parseRoomMetadata(room.metadata);
 
       return {
-        roomId: room.sid,
-        roomName: room.name,
+        roomId: room.name,
         roomTitle: meta.title || room.name,
         description: meta.description,
         maxParticipants: room.maxParticipants,
@@ -328,14 +288,9 @@ export class LivekitService {
     try {
       this.logger.log(`Deleting room: ${roomId}`);
 
-      // roomId가 실제로는 room name일 수 있으므로 확인
+      // roomId = roomName으로 검색
       const allRooms = await this.roomService.listRooms();
-      let roomToDelete = allRooms.find(r => r.sid === roomId);
-
-      // SID로 못 찾으면 이름으로 찾기
-      if (!roomToDelete) {
-        roomToDelete = allRooms.find(r => r.name === roomId);
-      }
+      const roomToDelete = allRooms.find(r => r.name === roomId);
 
       if (!roomToDelete) {
         throw new Error('Room not found');
@@ -348,8 +303,7 @@ export class LivekitService {
 
       return {
         message: 'Room deleted successfully',
-        roomId: roomToDelete.sid,
-        roomName: roomToDelete.name,
+        roomId: roomToDelete.name,
       };
     } catch (error) {
       this.logger.error(`Failed to delete room: ${error.message}`);
@@ -384,5 +338,83 @@ export class LivekitService {
     }
 
     return await at.toJwt();
+  }
+
+  /**
+   * 방에 AI 봇 시작
+   */
+  async startBotForRoom(roomId: string): Promise<void> {
+    try {
+      // 기존 봇 정리
+      if (this.voiceBotService.isActive(roomId)) {
+        await this.voiceBotService.stopBot(roomId);
+      }
+      await this.removeBots(roomId);
+
+      // 봇용 토큰 생성
+      const botName = `ai-bot-${Math.floor(Math.random() * 1000)}`;
+      const botToken = await this.generateTokenForUser(roomId, botName, true);
+
+      // 봇 시작
+      await this.voiceBotService.startBot(roomId, botToken);
+      this.logger.log(`[봇 시작 완료] ${roomId}`);
+    } catch (error) {
+      this.logger.error(`[봇 시작 실패] ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * 방에서 AI 봇 종료
+   */
+  async stopBotForRoom(roomId: string): Promise<void> {
+    await this.voiceBotService.stopBot(roomId);
+    this.logger.log(`[봇 종료 완료] ${roomId}`);
+  }
+
+  /**
+   * 방의 AI 봇 활성 상태 확인
+   */
+  isBotActive(roomId: string): boolean {
+    return this.voiceBotService.isActive(roomId);
+  }
+
+  /**
+   * 파일 임베딩 요청 (RAG)
+   */
+  async embedFiles(
+    roomId: string,
+    files: { bucket: string; key: string }[],
+    topic: string,
+    description?: string,
+  ): Promise<{ success: boolean; message?: string }> {
+    this.logger.log(`[파일 임베딩] roomId: ${roomId}, topic: ${topic}, files: ${files.length}개`);
+
+    const result = await this.ragClient.startMeeting(roomId, {
+      room_name: topic,
+      description: description || '',
+      files,
+    });
+
+    return result;
+  }
+
+  /**
+   * 회의 종료 (봇 정리 + RAG 요약 요청)
+   */
+  async endMeeting(roomId: string): Promise<{ success: boolean; message?: string }> {
+    this.logger.log(`[회의 종료] roomId: ${roomId}`);
+
+    // 1. 봇 종료
+    if (this.isBotActive(roomId)) {
+      await this.stopBotForRoom(roomId);
+      this.logger.log(`[회의 종료] 봇 정리 완료`);
+    }
+
+    // 2. RAG 서버에 회의 종료 알림 (요약 생성 트리거)
+    const result = await this.ragClient.endMeeting(roomId);
+    this.logger.log(`[회의 종료] RAG 응답: ${result.message}`);
+
+    return result;
   }
 }

@@ -21,15 +21,15 @@ import { RAG_CLIENT } from './rag-client.interface';
         {
             provide: RAG_CLIENT,
             useFactory: (configService: ConfigService, wsClient: RagClientService, grpcClient: RagGrpcClientService) => {
-                const clientType = configService.get<string>('RAG_CLIENT_TYPE') || 'grpc';
+                const clientType = configService.get<string>('RAG_CLIENT_TYPE') || 'websocket';
 
-                if (clientType === 'websocket' || clientType === 'ws') {
-                    console.log('[RAG Module] WebSocket 클라이언트 사용');
-                    return wsClient;
+                if (clientType === 'grpc') {
+                    console.log('[RAG Module] gRPC 클라이언트 사용');
+                    return grpcClient;
                 }
 
-                console.log('[RAG Module] gRPC 클라이언트 사용');
-                return grpcClient;
+                console.log('[RAG Module] WebSocket 클라이언트 사용');
+                return wsClient;
             },
             inject: [ConfigService, RagClientService, RagGrpcClientService],
         },
