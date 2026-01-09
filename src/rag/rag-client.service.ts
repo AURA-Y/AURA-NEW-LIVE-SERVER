@@ -631,4 +631,75 @@ export class RagClientService implements OnModuleDestroy {
             return { success: false, message: error.message };
         }
     }
+
+    // ============================================================
+    // 시연용 목업 데이터 주입 메서드
+    // ============================================================
+
+    /**
+     * 목업 대화 데이터 주입 (시연용)
+     * RAG 버퍼에 가짜 발언들을 추가하여 플로우차트 생성 테스트 가능
+     */
+    injectMockStatements(roomId: string, utterances: Array<{ speaker: string; text: string }>): { success: boolean; injected: number } {
+        this.logger.log(`\n========== [목업 데이터 주입] ==========`);
+        this.logger.log(`Room ID: ${roomId}`);
+        this.logger.log(`발언 수: ${utterances.length}개`);
+
+        let buffer = this.statementBuffers.get(roomId);
+        if (!buffer) {
+            buffer = [];
+            this.statementBuffers.set(roomId, buffer);
+        }
+
+        for (const utterance of utterances) {
+            buffer.push({
+                text: utterance.text,
+                speaker: utterance.speaker,
+                timestamp: Date.now(),
+                retryCount: 0,
+            });
+            this.logger.log(`  [+] ${utterance.speaker}: "${utterance.text.substring(0, 50)}..."`);
+        }
+
+        this.logger.log(`[목업 주입 완료] 총 버퍼 크기: ${buffer.length}`);
+        return { success: true, injected: utterances.length };
+    }
+
+    /**
+     * 현재 버퍼 내용 조회 (디버깅/시연용)
+     */
+    getBufferContent(roomId: string): Array<{ speaker: string; text: string; timestamp: number }> {
+        const buffer = this.statementBuffers.get(roomId);
+        if (!buffer || buffer.length === 0) {
+            return [];
+        }
+
+        return buffer.map(stmt => ({
+            speaker: stmt.speaker,
+            text: stmt.text,
+            timestamp: stmt.timestamp,
+        }));
+    }
+
+    /**
+     * 버퍼 내용을 포맷된 트랜스크립트로 반환 (플로우차트 생성용)
+     */
+    getFormattedTranscript(roomId: string): string {
+        const buffer = this.statementBuffers.get(roomId);
+        if (!buffer || buffer.length === 0) {
+            return '';
+        }
+
+        return buffer
+            .map(stmt => `${stmt.speaker}: ${stmt.text}`)
+            .join('\n');
+    }
+
+    /**
+     * 버퍼 초기화 (시연 리셋용)
+     */
+    clearBuffer(roomId: string): void {
+        this.statementBuffers.delete(roomId);
+        this.logger.log(`[버퍼 초기화] ${roomId}`);
+    }
 }
