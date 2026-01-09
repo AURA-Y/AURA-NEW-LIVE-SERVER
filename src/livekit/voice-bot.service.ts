@@ -20,6 +20,8 @@ import { TtsService } from '../tts/tts.service';
 import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { IntentClassifierService } from '../intent/intent-classifier.service';
 import { VisionService, VisionContext } from '../vision/vision.service';
+import { AgentRouterService } from '../agent/agent-router.service';
+import { OpinionService } from '../agent/evidence';
 
 enum BotState {
     SLEEP = 'SLEEP',
@@ -34,6 +36,7 @@ interface ConversationTurn {
     role: 'user' | 'assistant';
     content: string;
     timestamp: number;
+    speaker?: string;  // 발화자 ID (user인 경우)
 }
 
 interface RoomContext {
@@ -67,6 +70,14 @@ interface RoomContext {
     isInFollowUpWindow: boolean;              // 팔로업 윈도우 활성 여부
     followUpExpiresAt: number;                // 팔로업 윈도우 만료 시간
     lastBotQuestion: string | null;           // 마지막 봇 질문 (컨텍스트용)
+    // Event Storm 모드
+    eventStormModeActive: boolean;
+    eventStormInitiator: string | null;
+    eventStormOpenTime: number;
+    lastEventStormStart: number;
+    lastEventStormEnd: number;
+    isDddProcessing: boolean;
+    lastDddText: string;
     // Flowchart 모드
     flowchartModeActive: boolean;
     flowchartInitiator: string | null;
@@ -99,7 +110,7 @@ export class VoiceBotService {
 
     // ★ 대화 메모리 및 팔로업 관련 상수
     private readonly FOLLOW_UP_WINDOW_MS = 15000;     // 질문 후 15초간 웨이크워드 없이 응답 가능
-    private readonly MAX_CONVERSATION_TURNS = 10;     // 최근 10턴까지 기억
+    private readonly MAX_CONVERSATION_TURNS = 30;     // 최근 30턴까지 기억
     private readonly CONVERSATION_EXPIRE_MS = 300000; // 5분 지나면 대화 리셋
 
     constructor(
@@ -110,6 +121,8 @@ export class VoiceBotService {
         @Inject(RAG_CLIENT) private ragClient: IRagClient,
         private intentClassifier: IntentClassifierService,
         private visionService: VisionService,
+        private agentRouter: AgentRouterService,
+        private opinionService: OpinionService,
     ) { }
 
     async startBot(roomId: string, botToken: string): Promise<void> {
@@ -1411,6 +1424,20 @@ ${edgesDesc}
             // ================================================
             if (context.botState === BotState.SLEEP) {
                 if (!shouldRespond) {
+                    // ★ AI 의견 제시 체크 (검증된 근거가 있을 때만)
+                    const opinionResult = await this.checkAndOfferOpinion(
+                        roomId,
+                        context,
+                        requestId,
+                        processedText,
+                        userId
+                    );
+
+                    if (opinionResult) {
+                        // 의견 제시됨 - 종료
+                        return;
+                    }
+
                     this.logger.log(`[SLEEP] 웨이크워드 없음 - 무시`);
                     return;
                 }
@@ -1476,7 +1503,25 @@ ${edgesDesc}
                 context.lastInteractionTime = Date.now();
 
                 // ============================================
-                // 8. 검색 키워드 준비
+                // 7.5 Agent 모드 판단 (패턴 매칭 실패 시 LLM 라우팅)
+                // ============================================
+                const useAgentMode = this.shouldUseAgentMode(processedText, intentAnalysis);
+
+                if (useAgentMode) {
+                    this.logger.log(`[Agent 모드] LLM 라우팅 시작`);
+                    await this.processWithAgent(
+                        context,
+                        roomId,
+                        requestId,
+                        processedText,
+                        userId,
+                        startTime
+                    );
+                    return;
+                }
+
+                // ============================================
+                // 8. 검색 키워드 준비 (기존 패턴 매칭 로직)
                 // ============================================
                 let finalSearchKeyword = searchKeyword;
                 let finalCategory = category;
@@ -1687,6 +1732,225 @@ ${edgesDesc}
         context.shouldInterrupt = false;
 
         await this.publishAudio(roomId, context.audioSource, pcmAudio);
+    }
+
+    // ============================================================
+    // Agent Mode Methods (지능형 라우팅)
+    // ============================================================
+
+    /**
+     * Agent 모드 사용 여부 판단
+     * 패턴 매칭으로 명확히 분류되지 않는 경우 LLM 라우팅 사용
+     */
+    private shouldUseAgentMode(
+        text: string,
+        intentAnalysis: ReturnType<IntentClassifierService['classify']>
+    ): boolean {
+        // 1. 애매한 패턴 먼저 체크 (최우선)
+        // 예: "저번에 그거 어떻게 됐어?", "전에 했던 얘기 맞냐?", "뭐라고 했더라?"
+        const ambiguousPatterns = [
+            /전에|아까|방금|이전|지난번|저번/,  // 시간 참조 (저번 추가)
+            /그거|그게|이거|저거/,               // 대명사 (뭐는 너무 광범위해서 제외)
+            /했(던|었|는)|말(했|한)/,           // 과거 참조
+            /뭐라고|뭐라|뭔가/,                  // 불명확한 질문
+        ];
+
+        const hasAmbiguousPattern = ambiguousPatterns.some(p => p.test(text));
+
+        if (hasAmbiguousPattern) {
+            this.logger.log(`[Agent 판단] 애매한 패턴 감지: "${text}" → Agent 모드`);
+            return true;
+        }
+
+        // 2. 명확한 카테고리가 있으면 기존 로직 사용
+        if (intentAnalysis.category && [
+            '날씨', '맛집', '카페', '술집', '뉴스', '주식', '스포츠'
+        ].includes(intentAnalysis.category)) {
+            return false;
+        }
+
+        // 3. 명확한 명령어 패턴이 있으면 기존 로직 사용
+        if (intentAnalysis.hasCommandWord) {
+            return false;
+        }
+
+        // 4. 검색 키워드가 명확하면 기존 로직 사용
+        if (intentAnalysis.extractedKeyword && intentAnalysis.extractedKeyword.length >= 3) {
+            return false;
+        }
+
+        // 5. 카테고리도 없고 키워드도 없는 질문 → Agent 모드
+        if (!intentAnalysis.category && !intentAnalysis.extractedKeyword) {
+            this.logger.debug(`[Agent 판단] 카테고리/키워드 없음: "${text}"`);
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Agent 모드 처리
+     * LLM Function Calling으로 적절한 도구 선택 후 실행
+     */
+    private async processWithAgent(
+        context: RoomContext,
+        roomId: string,
+        requestId: number,
+        processedText: string,
+        userId: string,
+        startTime: number
+    ): Promise<void> {
+        try {
+            // 1. 대화 히스토리 준비
+            const conversationHistory = context.conversationHistory || [];
+
+            // 2. Agent 판단 (어떤 도구를 사용할지)
+            const decision = await this.agentRouter.decide(
+                processedText,
+                conversationHistory,
+                { title: roomId }
+            );
+
+            this.logger.log(`[Agent] Tool: ${decision.tool}, Params: ${JSON.stringify(decision.params)}`);
+
+            // 3. 도구 실행
+            const toolResult = await this.agentRouter.executeTool(
+                decision,
+                roomId,
+                processedText
+            );
+
+            // 4. 최종 응답 생성
+            const response = await this.agentRouter.generateResponse(
+                processedText,
+                decision,
+                toolResult,
+                conversationHistory
+            );
+
+            if (context.currentRequestId !== requestId) {
+                this.logger.log(`[Agent] 요청 취소됨 (requestId 변경)`);
+                return;
+            }
+
+            // 5. 대화 히스토리 업데이트
+            this.updateConversationHistory(context, processedText, response, userId);
+
+            // 6. DataChannel 전송 (검색 결과가 있으면)
+            if (toolResult.searchResults && toolResult.searchResults.length > 0) {
+                const searchMessage = {
+                    type: 'search_answer',
+                    text: response,
+                    category: decision.tool === 'search_local' ? '장소' : '검색',
+                    results: toolResult.searchResults,
+                };
+
+                const encoder = new TextEncoder();
+                await context.room.localParticipant.publishData(
+                    encoder.encode(JSON.stringify(searchMessage)),
+                    { reliable: true }
+                );
+                this.logger.log(`[Agent] DataChannel 전송 (${toolResult.searchResults.length}개 결과)`);
+            }
+
+            // 7. TTS 발화
+            context.shouldInterrupt = false;
+            context.botState = BotState.SPEAKING;
+            await this.speakAndPublish(context, roomId, requestId, response);
+
+            // 8. 응답 완료 → SLEEP
+            context.botState = BotState.SLEEP;
+            context.activeUserId = null;
+            context.lastResponseTime = Date.now();
+
+            this.logger.log(`[Agent 완료] 총 ${Date.now() - startTime}ms`);
+
+        } catch (error) {
+            this.logger.error(`[Agent 에러] ${error.message}`, error.stack);
+            // 에러 시 간단한 응답
+            context.botState = BotState.SPEAKING;
+            await this.speakAndPublish(context, roomId, requestId, '죄송해요, 잠시 문제가 생겼어요.');
+            context.botState = BotState.SLEEP;
+            context.activeUserId = null;
+        }
+    }
+
+    /**
+     * 대화 히스토리 업데이트
+     */
+    private updateConversationHistory(
+        context: RoomContext,
+        userMessage: string,
+        botResponse: string,
+        userId: string
+    ): void {
+        const now = Date.now();
+
+        // 오래된 대화 제거 (5분 이상)
+        context.conversationHistory = context.conversationHistory.filter(
+            turn => now - turn.timestamp < this.CONVERSATION_EXPIRE_MS
+        );
+
+        // 의미 있는 발화만 저장 (추임새, 빈 텍스트 필터링)
+        const cleanedUserMessage = this.cleanForHistory(userMessage);
+        const cleanedBotResponse = this.cleanForHistory(botResponse);
+
+        // 사용자 발화가 의미있으면 추가
+        if (cleanedUserMessage && cleanedUserMessage.length >= 3) {
+            context.conversationHistory.push({
+                role: 'user',
+                content: cleanedUserMessage,
+                timestamp: now,
+                speaker: userId,
+            });
+        } else {
+            this.logger.debug(`[대화 히스토리] 사용자 발화 스킵 (짧거나 추임새): "${userMessage}"`);
+        }
+
+        // 봇 응답이 의미있으면 추가
+        if (cleanedBotResponse && cleanedBotResponse.length >= 3) {
+            context.conversationHistory.push({
+                role: 'assistant',
+                content: cleanedBotResponse,
+                timestamp: now,
+            });
+        }
+
+        // 최대 턴 수 유지
+        if (context.conversationHistory.length > this.MAX_CONVERSATION_TURNS * 2) {
+            context.conversationHistory = context.conversationHistory.slice(-this.MAX_CONVERSATION_TURNS * 2);
+        }
+
+        this.logger.debug(`[대화 히스토리] ${context.conversationHistory.length}턴 저장`);
+    }
+
+    /**
+     * 히스토리 저장용 텍스트 정제
+     * 추임새, 빈 텍스트, 웨이크워드만 있는 발화 필터링
+     */
+    private cleanForHistory(text: string): string {
+        if (!text) return '';
+
+        // 1. 웨이크워드 제거
+        let cleaned = text
+            .replace(/^(아우라야?|헤이\s*아우라|오케이\s*아우라)\s*/gi, '')
+            .trim();
+
+        // 2. 추임새만 있는지 체크
+        const fillerPatterns = [
+            /^(음+|어+|아+|으+|에+|응+|네+|예+|야+)[\.\?\!]*$/,  // 단독 추임새
+            /^(음+|어+|아+|으+)[\s\.\,]*$/,                      // 추임새 + 공백/구두점
+            /^(그+|저+|이+)[\s\.\,]*$/,                          // 지시사만
+            /^[\.\?\!\,\s]+$/,                                   // 구두점만
+        ];
+
+        for (const pattern of fillerPatterns) {
+            if (pattern.test(cleaned)) {
+                return '';  // 추임새만 있으면 빈 문자열 반환
+            }
+        }
+
+        return cleaned;
     }
 
     private startArmedTimeoutChecker(roomId: string): void {
@@ -2171,6 +2435,89 @@ ${edgesDesc}
         }
 
         return briefing;
+    }
+
+    /**
+     * AI 의견 제시 체크 및 발화
+     * 검증된 근거(Evidence)가 있을 때만 의견 제시
+     *
+     * @returns true if opinion was offered, false otherwise
+     */
+    private async checkAndOfferOpinion(
+        roomId: string,
+        context: RoomContext,
+        requestId: number,
+        currentText: string,
+        userId: string,
+    ): Promise<boolean> {
+        // 의견 제시 비활성화 확인
+        if (!this.opinionService.isEnabled()) {
+            return false;
+        }
+
+        // 최근 대화 히스토리를 컨텍스트로 사용
+        const conversationContext = this.buildConversationContext(context.conversationHistory, currentText);
+
+        // 텍스트가 너무 짧으면 스킵
+        if (conversationContext.length < 20) {
+            return false;
+        }
+
+        try {
+            const result = await this.opinionService.analyzeAndRespond(
+                roomId,
+                conversationContext,
+                userId,
+            );
+
+            if (!result.shouldSpeak || !result.response) {
+                this.logger.debug(`[AI 의견] 제시 조건 미충족: ${result.silenceReason || 'unknown'}`);
+                return false;
+            }
+
+            this.logger.log(`[AI 의견 제시] 신뢰도: ${result.confidence}%, 토픽: ${result.evidence?.topic}`);
+
+            // 의견 제시 발화
+            context.botState = BotState.SPEAKING;
+            await this.speakAndPublish(context, roomId, requestId, result.response);
+            context.botState = BotState.SLEEP;  // 의견 제시 후 다시 SLEEP으로
+            context.lastResponseTime = Date.now();
+
+            // DataChannel로 Evidence 정보 전송 (UI에서 출처 링크 표시용)
+            if (result.evidence) {
+                const evidenceMessage = this.opinionService.formatForDataChannel(result.evidence);
+                const encoder = new TextEncoder();
+                await context.room.localParticipant.publishData(
+                    encoder.encode(JSON.stringify(evidenceMessage)),
+                    { reliable: true }
+                );
+                this.logger.log(`[DataChannel] Evidence 정보 전송: ${result.evidence.sourceName}`);
+            }
+
+            return true;
+        } catch (error) {
+            this.logger.error(`[AI 의견] 에러: ${error.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * 대화 히스토리를 텍스트로 변환
+     */
+    private buildConversationContext(history: ConversationTurn[], currentText: string): string {
+        // 최근 5턴의 대화를 컨텍스트로 사용
+        const recentHistory = history.slice(-5);
+
+        let context = '';
+        for (const turn of recentHistory) {
+            const role = turn.role === 'user' ? '참여자' : '아우라';
+            context += `${role}: ${turn.content}\n`;
+        }
+
+        // 현재 발화 추가
+        context += `참여자: ${currentText}`;
+
+        return context;
     }
 
     /**

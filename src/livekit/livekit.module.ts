@@ -8,9 +8,10 @@ import { TtsModule } from '../tts/tts.module';
 import { RagModule } from '../rag/rag.module';
 import { IntentModule } from '../intent/intent.module';
 import { VisionModule } from '../vision/vision.module';
+import { AgentModule } from '../agent/agent.module';
 
 @Module({
-  imports: [SttModule, LlmModule, TtsModule, IntentModule, RagModule, VisionModule],
+  imports: [SttModule, LlmModule, TtsModule, IntentModule, RagModule, VisionModule, AgentModule],
 
   controllers: [LivekitController, ApiController],
   providers: [LivekitService, VoiceBotService],

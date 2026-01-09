@@ -1,9 +1,17 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import WebSocket from 'ws';
+import { RagQuestionResponse } from './rag-client.interface';
 
 interface PendingRequest {
     resolve: (value: string) => void;
+    reject: (reason: any) => void;
+    timer: NodeJS.Timeout;
+    startTime: number;
+}
+
+interface PendingRequestWithSources {
+    resolve: (value: RagQuestionResponse) => void;
     reject: (reason: any) => void;
     timer: NodeJS.Timeout;
     startTime: number;
@@ -26,6 +34,7 @@ interface PendingReportRequest {
 interface ConnectionContext {
     ws: WebSocket;
     pendingRequests: Map<string, PendingRequest>;
+    pendingRequestsWithSources: Map<string, PendingRequestWithSources>;
     reconnectTimer: NodeJS.Timeout | null;
     reconnectAttempts: number;
 }
@@ -91,6 +100,7 @@ export class RagClientService implements OnModuleDestroy {
                     const context: ConnectionContext = {
                         ws,
                         pendingRequests: new Map(),
+                        pendingRequestsWithSources: new Map(),
                         reconnectTimer: null,
                         reconnectAttempts: 0,
                     };
@@ -161,8 +171,25 @@ export class RagClientService implements OnModuleDestroy {
             if (messageType === 'answer') {
                 const questionText = message.text;
                 const answer = message.answer || '';
+                const sources = message.sources || [];
 
-                if (pending) {
+                // sources 요청 확인 (우선)
+                const pendingWithSources = context.pendingRequestsWithSources.get(questionText);
+                if (pendingWithSources) {
+                    const latency = Date.now() - pendingWithSources.startTime;
+                    this.logger.log(`[RAG 답변+출처] ${roomId} - "${questionText}" → "${answer.substring(0, 50)}..." (sources: ${sources.length}개, ${latency}ms)`);
+
+                    clearTimeout(pendingWithSources.timer);
+                    context.pendingRequestsWithSources.delete(questionText);
+                    pendingWithSources.resolve({
+                        answer,
+                        sources: sources.map((s: any) => ({
+                            text: s.text || '',
+                            speaker: s.speaker || null,
+                        })),
+                    });
+                } else if (pending) {
+                    // 일반 요청 (기존 로직)
                     const latency = Date.now() - pending.startTime;
                     this.logger.log(`[RAG 답변] ${roomId} - "${questionText}" → "${answer.substring(0, 50)}..." (${latency}ms)`);
 
@@ -376,6 +403,44 @@ export class RagClientService implements OnModuleDestroy {
             }, this.REQUEST_TIMEOUT);
 
             context.pendingRequests.set(text, {
+                resolve,
+                reject,
+                timer,
+                startTime,
+            });
+
+            const message = {
+                type: 'question',
+                text,
+                confidence: 1.0,
+            };
+
+            context.ws.send(JSON.stringify(message));
+        });
+    }
+
+    /**
+     * 질문 전송 및 응답 대기 (sources 포함 - 팩트체크용)
+     */
+    async sendQuestionWithSources(roomId: string, text: string): Promise<import('./rag-client.interface').RagQuestionResponse> {
+        if (!this.isConnected(roomId)) {
+            this.logger.error(`[RAG 에러] WebSocket 연결 안 됨: ${roomId} (question+sources)`);
+            throw new Error(`RAG WebSocket not connected for: ${roomId}`);
+        }
+
+        const context = this.connections.get(roomId)!;
+        const startTime = Date.now();
+        this.logger.log(`[RAG 질문+출처 요청] ${roomId} - "${text.substring(0, 50)}..."`);
+
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                context.pendingRequestsWithSources.delete(text);
+                const latency = Date.now() - startTime;
+                this.logger.error(`[RAG 타임아웃] ${roomId} - ${this.REQUEST_TIMEOUT / 1000}초 초과 (총 ${latency}ms)`);
+                reject(new Error('RAG request timeout'));
+            }, this.REQUEST_TIMEOUT);
+
+            context.pendingRequestsWithSources.set(text, {
                 resolve,
                 reject,
                 timer,

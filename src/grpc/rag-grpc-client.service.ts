@@ -291,6 +291,19 @@ export class RagGrpcClientService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
+     * 질문 전송 및 응답 대기 (sources 포함 - 팩트체크용)
+     * gRPC에서는 sources를 아직 지원하지 않으므로 빈 배열 반환
+     */
+    async sendQuestionWithSources(roomId: string, text: string): Promise<import('../rag/rag-client.interface').RagQuestionResponse> {
+        // gRPC는 현재 sources를 반환하지 않으므로, 기본 sendQuestion 호출 후 빈 sources 반환
+        const answer = await this.sendQuestion(roomId, text);
+        return {
+            answer,
+            sources: [], // gRPC proto에 sources 추가 필요
+        };
+    }
+
+    /**
      * 세션 연결 상태 확인 (특정 roomId)
      */
     isConnected(roomId: string): boolean {
