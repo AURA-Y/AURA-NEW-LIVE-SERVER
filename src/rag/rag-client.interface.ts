@@ -52,6 +52,30 @@ export interface IRagClient {
      * 중간 보고서 요청
      */
     requestReport(roomId: string): Promise<{ success: boolean; message?: string }>;
+
+    // ============================================================
+    // 시연용 목업 데이터 메서드
+    // ============================================================
+
+    /**
+     * 목업 대화 데이터 주입 (시연용)
+     */
+    injectMockStatements(roomId: string, utterances: Array<{ speaker: string; text: string }>): { success: boolean; injected: number };
+
+    /**
+     * 현재 버퍼 내용 조회 (디버깅용)
+     */
+    getBufferContent(roomId: string): Array<{ speaker: string; text: string; timestamp: number }>;
+
+    /**
+     * 버퍼 내용을 포맷된 트랜스크립트로 반환
+     */
+    getFormattedTranscript(roomId: string): string;
+
+    /**
+     * 버퍼 초기화 (시연 리셋용)
+     */
+    clearBuffer(roomId: string): void;
 }
 
 /**
