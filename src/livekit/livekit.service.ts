@@ -104,11 +104,16 @@ export class LivekitService {
       maxParticipants = 20
     } = createRoomDto;
 
+    const startTime = Date.now();
+    const log = (msg: string) => this.logger.log(`[createRoom +${Date.now() - startTime}ms] ${msg}`);
+
     try {
-      this.logger.log(`Creating room via LiveKit: ${this.livekitUrl}`);
+      log(`시작 - user: ${userName}, title: ${roomTitle}`);
+      log(`LiveKit URL: ${this.livekitUrl}`);
 
       // 고유한 방 이름(ID) 생성
       const roomName = this.generateRoomName();
+      log(`방 이름 생성: ${roomName}`);
 
       // 메타데이터에 표시용 정보 저장
       const metadata = JSON.stringify({
@@ -116,8 +121,10 @@ export class LivekitService {
         description: description,
         createdBy: userName,
       });
+      log(`메타데이터 준비 완료`);
 
       // LiveKit에 방 생성
+      log(`>>> LiveKit roomService.createRoom() 호출 시작...`);
       const room = await this.roomService.createRoom({
         name: roomName,
         metadata: metadata,
@@ -125,14 +132,22 @@ export class LivekitService {
         maxParticipants: maxParticipants,
         agents: this.buildRoomAgentDispatch(),
       });
+      log(`<<< LiveKit roomService.createRoom() 완료`);
 
-      await this.ensureAgentDispatch(room.name);
+      // Agent Dispatch는 비동기로 처리 (응답 지연 방지)
+      log(`Agent dispatch 비동기 시작`);
+      void this.ensureAgentDispatch(room.name).catch((err) => {
+        this.logger.warn(`[createRoom] Agent dispatch 실패 (무시): ${err.message}`);
+      });
 
       // 생성자를 위한 토큰 자동 발급
+      log(`>>> 토큰 생성 시작...`);
       const token = await this.generateTokenForUser(room.name, userName);
+      log(`<<< 토큰 생성 완료`);
+
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
 
-      // 방 생성 시 AI 봇은 사용자가 입장할 때 자동 시작됨 (joinRoom에서 처리)
+      log(`✅ 완료 - roomId: ${room.name}`);
 
       return {
         roomId: room.name,
@@ -145,9 +160,9 @@ export class LivekitService {
         livekitUrl: wsUrl,
       };
     } catch (error) {
-      this.logger.error(`Create room failed: ${error.message}`);
+      log(`❌ 에러: ${error.message}`);
       if (error.cause) {
-        this.logger.error(`Create room cause: ${error.cause}`);
+        log(`❌ 원인: ${error.cause}`);
       }
       throw new Error(`Failed to create room: ${error.message}`);
     }

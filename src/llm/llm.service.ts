@@ -21,10 +21,10 @@ export class LlmService {
     private readonly MIN_REQUEST_INTERVAL = 1500;
     private readonly MAX_RETRIES = 3;
 
-    // sendMessagePure용 rate limiting (DDD 분석 등)
+    // sendMessagePure용 rate limiting (다이어그램 생성 등)
     private lastPureRequestTime = 0;
-    private isPureProcessing = false;
-    private readonly PURE_MIN_INTERVAL = 1000; // 1초
+    private pureRequestQueue: Promise<any> = Promise.resolve();
+    private readonly PURE_MIN_INTERVAL = 300; // 0.3초로 단축 (병렬 처리 허용)
     private readonly PURE_MAX_RETRIES = 2;
 
     constructor(
@@ -114,29 +114,17 @@ export class LlmService {
 
     /**
      * 순수 LLM 호출 (검색 없이)
-     * DDD 분석 등 검색이 필요 없는 LLM 작업에 사용
      */
     async sendMessagePure(prompt: string, maxTokens = 500): Promise<string> {
-        // 동시 요청 방지
-        while (this.isPureProcessing) {
-            await this.sleep(100);
-        }
-
-        // 쿨다운 체크
+        // 최소 간격만 유지하고 병렬 요청 허용 (다이어그램 생성 속도 개선)
         const now = Date.now();
         const timeSinceLastRequest = now - this.lastPureRequestTime;
         if (timeSinceLastRequest < this.PURE_MIN_INTERVAL) {
             await this.sleep(this.PURE_MIN_INTERVAL - timeSinceLastRequest);
         }
-
-        this.isPureProcessing = true;
         this.lastPureRequestTime = Date.now();
 
-        try {
-            return await this.sendMessagePureWithRetry(prompt, maxTokens, 0);
-        } finally {
-            this.isPureProcessing = false;
-        }
+        return await this.sendMessagePureWithRetry(prompt, maxTokens, 0);
     }
 
     /**
@@ -175,6 +163,35 @@ export class LlmService {
 
             this.logger.error(`[LLM Pure 호출 에러] ${error.message}`);
             throw error;
+        }
+    }
+
+    /**
+     * 컨텍스트 기반 응답 생성
+     * 플로우차트 등 현재 화면 상태에 대해 질문에 답변
+     */
+    async answerWithContext(
+        question: string,
+        contextStr: string,
+        mode: string = '컨텍스트'
+    ): Promise<string> {
+        const prompt = `당신은 회의 지원 AI 아우라입니다. 현재 ${mode} 화면에 대해 사용자의 질문에 답변해주세요.
+
+${contextStr}
+
+사용자 질문: "${question}"
+
+응답 가이드:
+- 현재 화면에 보이는 내용을 기반으로 답변하세요
+- 화면에 없는 정보는 추측하지 마세요
+- 음성으로 읽기 좋게 자연스럽게 작성하세요`;
+
+        try {
+            const response = await this.sendMessagePure(prompt, 300);
+            return response || `${mode}에 대해 말씀해주세요.`;
+        } catch (error) {
+            this.logger.error(`[answerWithContext] 에러: ${error.message}`);
+            return `죄송합니다. ${mode} 분석 중 오류가 발생했습니다.`;
         }
     }
 
@@ -448,7 +465,7 @@ ${searchResults.map(r => r.content || r.title).join('\n').slice(0, 500)}`;
 - "~입니다" ❌ → "~요", "~예요", "~있어요" ✅
 
 ## 좋은 예시
-- "아 거기면 스타벅스 강남점 괜찮아요! 테헤란로 152에 있어요. 경로 보내줄게요~"
+- "거기면 스타벅스 강남점 괜찮아요! 테헤란로 152에 있어요. 경로 보내줄게요~"
 - "블루보틀 성수점 추천해요, 서울숲로 14길이에요. 경로 보내줄게요~"
 
 ## 나쁜 예시 (정보 누락 ❌)
@@ -471,7 +488,7 @@ ${JSON.stringify(searchResults[0])}`;
 ${hasLocation ? '- 마지막에 "경로 보내줄게요~" 추가' : ''}
 
 ## 예시
-- "아 [이름] ${matchedCategory} 하고 있어요! [장소]에서요. 경로 보내줄게요~"
+- "[이름] ${matchedCategory} 하고 있어요! [장소]에서요. 경로 보내줄게요~"
 - "[이름] ${matchedCategory} 괜찮대요, [기간]까지래요"
 
 ## 검색 결과
@@ -612,7 +629,7 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
         const address = result.roadAddress || result.address || '';
         const newsHighlight = (result as any).newsHighlight;
 
-        let response = `아 ${title} 괜찮아요!`;
+        let response = `${title} 괜찮아요!`;
         if (newsHighlight) {
             response += ` ${newsHighlight}까지래요.`;
         }

@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query, Inject } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { LivekitService } from './livekit.service';
@@ -9,6 +9,7 @@ import { TtsService } from '../tts/tts.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { EmbedFilesDto } from './dto/embed-files.dto';
+import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 
 @Controller('room')
 export class LivekitController {
@@ -18,6 +19,7 @@ export class LivekitController {
     private readonly sttService: SttService,
     private readonly llmService: LlmService,
     private readonly ttsService: TtsService,
+    @Inject(RAG_CLIENT) private readonly ragClient: IRagClient,
   ) { }
 
   // AI 음성 봇 시작
@@ -91,10 +93,17 @@ export class LivekitController {
 
   @Post('create')
   async createRoom(@Body() createRoomDto: CreateRoomDto) {
+    const reqStart = Date.now();
+    console.log(`\n========== [POST /room/create] 요청 시작 ==========`);
+    console.log(`[+0ms] 요청 데이터:`, JSON.stringify(createRoomDto));
+
     const result = await this.livekitService.createRoom(createRoomDto);
+    console.log(`[+${Date.now() - reqStart}ms] livekitService.createRoom() 완료`);
+
     const roomId = result.roomId;
 
     // 방 생성 시 자동으로 Voice Bot 시작 (응답 지연 방지를 위해 비동기 처리)
+    console.log(`[+${Date.now() - reqStart}ms] Voice Bot 비동기 시작`);
     void this.livekitService.startBotForRoom(roomId).then(() => {
       console.log(`[자동 봇 시작] 방 '${roomId}' (${result.roomTitle})에 봇이 입장했습니다.`);
     }).catch((error) => {
@@ -102,6 +111,8 @@ export class LivekitController {
       // 봇 시작 실패해도 방 생성은 성공으로 처리
     });
 
+    console.log(`[+${Date.now() - reqStart}ms] ✅ 응답 반환`);
+    console.log(`========== [POST /room/create] 완료 ==========\n`);
     return result;
   }
 
@@ -126,6 +137,171 @@ export class LivekitController {
       throw new HttpException(`파일 임베딩 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
+
+  // ============================================================
+  // 시연용 목업 데이터 엔드포인트 (/:roomId 와일드카드보다 먼저 정의)
+  // ============================================================
+
+  /**
+   * 실시간 대화 데이터 주입 (플로우차트 생성 테스트용)
+   * POST /room/mock/conversation
+   */
+  @Post('mock/conversation')
+  async injectMockConversation(
+    @Body() body: {
+      roomId: string;
+      utterances: Array<{ speaker: string; text: string }>;
+    }
+  ) {
+    const { roomId, utterances } = body;
+
+    if (!roomId || !utterances || utterances.length === 0) {
+      throw new HttpException('roomId와 utterances 배열이 필요합니다.', HttpStatus.BAD_REQUEST);
+    }
+
+    console.log(`\n========== [목업 대화 주입] ==========`);
+    console.log(`Room ID: ${roomId}`);
+    console.log(`발언 수: ${utterances.length}개`);
+
+    try {
+      // RAG 버퍼에 목업 데이터 주입
+      const result = this.ragClient.injectMockStatements(roomId, utterances);
+
+      return {
+        success: result.success,
+        roomId,
+        injected: result.injected,
+        message: `${result.injected}개의 발언이 RAG 버퍼에 주입되었습니다.`,
+      };
+    } catch (error) {
+      console.error(`[목업 대화 주입 실패] ${error.message}`);
+      throw new HttpException(`목업 데이터 주입 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * 이전 회의 데이터 주입 (브리핑 테스트용)
+   * POST /room/mock/previous-meeting
+   */
+  @Post('mock/previous-meeting')
+  async injectPreviousMeeting(
+    @Body() body: {
+      roomId: string;
+      meetingTitle: string;
+      summary: string;
+      keyDecisions: string[];
+      actionItems: string[];
+      date: string;
+    }
+  ) {
+    const { roomId, meetingTitle, summary, keyDecisions, actionItems, date } = body;
+
+    if (!roomId || !meetingTitle || !summary) {
+      throw new HttpException('roomId, meetingTitle, summary가 필요합니다.', HttpStatus.BAD_REQUEST);
+    }
+
+    console.log(`\n========== [이전 회의 데이터 주입] ==========`);
+    console.log(`Room ID: ${roomId}`);
+    console.log(`회의 제목: ${meetingTitle}`);
+    console.log(`날짜: ${date}`);
+
+    try {
+      // Voice Bot의 Room Context에 이전 회의 데이터 설정
+      const result = this.voiceBotService.setPreviousMeetingContext(roomId, {
+        meetingTitle,
+        summary,
+        keyDecisions: keyDecisions || [],
+        actionItems: actionItems || [],
+        date: date || new Date().toISOString().split('T')[0],
+      });
+
+      if (!result.success) {
+        throw new HttpException(`방을 찾을 수 없습니다: ${roomId}. 먼저 방에 봇이 입장해야 합니다.`, HttpStatus.NOT_FOUND);
+      }
+
+      return {
+        success: true,
+        roomId,
+        message: `이전 회의 "${meetingTitle}" 컨텍스트가 설정되었습니다.`,
+      };
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      console.error(`[이전 회의 주입 실패] ${error.message}`);
+      throw new HttpException(`이전 회의 데이터 주입 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * 현재 버퍼 내용 조회 (디버깅용)
+   * GET /room/mock/buffer/:roomId
+   */
+  @Get('mock/buffer/:roomId')
+  async getMockBufferContent(@Param('roomId') roomId: string) {
+    const content = this.ragClient.getBufferContent(roomId);
+    const formatted = this.ragClient.getFormattedTranscript(roomId);
+
+    return {
+      roomId,
+      statements: content,
+      count: content.length,
+      formattedTranscript: formatted,
+    };
+  }
+
+  /**
+   * 버퍼 초기화 (시연 리셋용)
+   * DELETE /room/mock/buffer/:roomId
+   */
+  @Delete('mock/buffer/:roomId')
+  async clearMockBuffer(@Param('roomId') roomId: string) {
+    this.ragClient.clearBuffer(roomId);
+    return {
+      success: true,
+      roomId,
+      message: '버퍼가 초기화되었습니다.',
+    };
+  }
+
+  /**
+   * 이전 회의 컨텍스트 조회 (디버깅용)
+   * GET /room/mock/previous-meeting/:roomId
+   */
+  @Get('mock/previous-meeting/:roomId')
+  async getMockPreviousMeetingContext(@Param('roomId') roomId: string) {
+    const context = this.voiceBotService.getPreviousMeetingContext(roomId);
+
+    if (!context) {
+      return {
+        roomId,
+        hasContext: false,
+        message: '이전 회의 컨텍스트가 없습니다.',
+      };
+    }
+
+    return {
+      roomId,
+      hasContext: true,
+      context,
+      briefing: this.voiceBotService.formatPreviousMeetingBriefing(roomId),
+    };
+  }
+
+  /**
+   * 활성 방 목록 조회 (디버깅용)
+   * GET /room/mock/active-rooms
+   */
+  @Get('mock/active-rooms')
+  async getActiveRooms() {
+    const rooms = this.voiceBotService.getActiveRoomIds();
+    return {
+      count: rooms.length,
+      rooms,
+    };
+  }
+
+  // ============================================================
+  // 일반 라우트 (와일드카드는 맨 아래에)
+  // ============================================================
 
   @Get(':roomId')
   async getRoom(@Param('roomId') roomId: string) {

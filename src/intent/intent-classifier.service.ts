@@ -6,7 +6,7 @@ export interface IntentAnalysis {
     isBotRelated: boolean;
     isVisionIntent: boolean;  // 화면 공유 Vision 관련 의도
     isIdeaBoardIntent: boolean;  // 아이디어 보드 열기 의도
-    isDddBoardIntent: boolean;   // DDD 이벤트 스토밍 보드 열기 의도
+    isFlowchartIntent: boolean;  // Flowchart 보드 열기 의도
     confidence: number;
     matchedPatterns: string[];
     normalizedText: string;
@@ -255,16 +255,26 @@ export class IntentClassifierService {
     ];
 
     // =====================================================
-    // DDD 이벤트 스토밍 보드 열기 패턴
+    // Flowchart/설계 보드 열기 패턴
     // =====================================================
-    private readonly DDD_BOARD_PATTERNS: RegExp[] = [
-        /(ddd|디디디)\s*(모드|보드)?\s*(열어|시작|켜|오픈|해|해줘|하자)/i,
-        /이벤트\s*스토밍\s*(열어|시작|켜|오픈|해|해줘|하자|켜줘|켜져)/,
-        // STT 오인식 패턴 (스토밍 → 소밍, 성인, 스토링 등)
-        /이벤트\s*(소밍|성인|스토링|스토민|소토밍|스토잉|스터밍)\s*(열어|시작|켜|오픈|해|해줘|하자|켜줘|켜져)/,
-        /도메인\s*(분석|설계|모델링)?\s*(시작|하자|해)/,
-        /(이벤트|도메인)\s*(분석|정리)?\s*(시작|하자|해)/,
-        /디디디\s*(해볼까|할까|하자|시작)/,
+    private readonly FLOWCHART_BOARD_PATTERNS: RegExp[] = [
+        // 설계 보드 패턴 (메인)
+        /설계\s*(보드|모드)?\s*(열어|시작|켜|오픈|해|해줘|하자|열어줘|켜줘)/,
+        /설계\s*(보드|모드)/,  // "설계 보드" 단독으로도 인식
+        // 다이어그램 패턴
+        /(다이어그램|diagram)\s*(보드|모드)?\s*(열어|시작|켜|오픈|해|해줘|하자|열어줘|켜줘|그려)/i,
+        /다이어그램\s*(그려|만들어|보여)/,
+        // 플로우차트 패턴
+        /(flowchart|플로우차트|플로차트|플로우 차트)\s*(모드|보드)?\s*(열어|시작|켜|오픈|해|해줘|하자)/i,
+        /(flow|플로우)\s*(보드|차트)?\s*(열어|시작|켜|오픈|해|해줘|하자)/i,
+        // STT 오인식 패턴
+        /(플로차트|프로차트|플러차트|플로우 차트)\s*(열어|시작|켜|오픈|해|해줘|하자|켜줘|켜져)/,
+        /순서도\s*(열어|시작|켜|오픈|해|해줘|하자|그려)/,
+        /(cdr|시디알|씨디알)\s*(분석|파싱)?\s*(시작|하자|해)/i,
+        // 구조도/흐름도 패턴
+        /(구조도|흐름도|시퀀스)\s*(그려|열어|시작|만들어|보여)/,
+        // 시스템 설계 패턴
+        /시스템\s*(설계|구조)\s*(보여|그려|열어|시작)/,
     ];
 
     // =====================================================
@@ -580,10 +590,10 @@ export class IntentClassifierService {
             return false;
         });
 
-        // 15. DDD 보드 열기 Intent 체크
-        const isDddBoardIntent = this.DDD_BOARD_PATTERNS.some(pattern => {
+        // 16. Flowchart 보드 열기 Intent 체크
+        const isFlowchartIntent = this.FLOWCHART_BOARD_PATTERNS.some(pattern => {
             if (pattern.test(lowerNormalized)) {
-                matchedPatterns.push(`DddBoard: ${pattern.source.substring(0, 20)}...`);
+                matchedPatterns.push(`Flowchart: ${pattern.source.substring(0, 20)}...`);
                 return true;
             }
             return false;
@@ -612,7 +622,7 @@ export class IntentClassifierService {
             isBotRelated,
             isVisionIntent,
             isIdeaBoardIntent,
-            isDddBoardIntent,
+            isFlowchartIntent,
             confidence,
             matchedPatterns,
             normalizedText,
@@ -628,7 +638,7 @@ export class IntentClassifierService {
             needsLlmCorrection,
         };
 
-        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, idea=${isIdeaBoardIntent}, ddd=${isDddBoardIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
+        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, idea=${isIdeaBoardIntent}, flowchart=${isFlowchartIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
 
         return result;
     }
