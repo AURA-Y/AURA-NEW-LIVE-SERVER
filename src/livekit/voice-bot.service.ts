@@ -65,6 +65,13 @@ interface RoomContext {
         edges: Array<{ from: string; to: string; label?: string }>;
         summary: string;
     };
+    // 설계 보드 모드 (다이어그램 관련 응답만 허용)
+    designModeActive: boolean;
+    designModeOpenTime: number;
+    pendingDiagramExplanation?: {
+        types: string[];
+        mermaidCodes: Record<string, string>;
+    };
 
     // 시연용 이전 회의 컨텍스트
     previousMeetingContext?: {
@@ -315,6 +322,42 @@ export class VoiceBotService {
                         context.flowchartModeActive = true;
                         this.logger.log(`[모드 변경] Flowchart 자동 활성화 (컨텍스트 수신)`);
                     }
+                } else if (message.type === 'DESIGN_BOARD_START') {
+                    // 설계 보드 열림 - 설계 모드 활성화
+                    if (context.designModeActive) {
+                        this.logger.debug(`[모드 변경] 설계 보드 START 무시 (이미 ON)`);
+                        return;
+                    }
+                    context.designModeActive = true;
+                    context.designModeOpenTime = now;
+                    this.logger.log(`[모드 변경] 설계 모드 ON by ${participant?.identity || 'unknown'}`);
+                } else if (message.type === 'DESIGN_BOARD_END') {
+                    // 설계 보드 닫힘 - 설계 모드 비활성화
+                    if (!context.designModeActive) {
+                        this.logger.debug(`[모드 변경] 설계 보드 END 무시 (이미 OFF)`);
+                        return;
+                    }
+                    // Grace period 체크
+                    const DESIGN_GRACE_PERIOD_MS = 1000;
+                    if (context.designModeOpenTime > 0 && now - context.designModeOpenTime < DESIGN_GRACE_PERIOD_MS) {
+                        this.logger.debug(`[모드 변경] 설계 보드 END 무시 (grace period)`);
+                        return;
+                    }
+                    context.designModeActive = false;
+                    context.designModeOpenTime = 0;
+                    context.pendingDiagramExplanation = undefined;
+                    this.logger.log(`[모드 변경] 설계 모드 OFF`);
+                } else if (message.type === 'DESIGN_BOARD_DIAGRAMS_GENERATED') {
+                    // 다이어그램 생성 완료 - 자동 설명 트리거
+                    this.logger.log(`[설계 모드] 다이어그램 생성 완료 - types: ${message.types?.join(', ')}`);
+                    if (context.designModeActive && message.types?.length > 0) {
+                        context.pendingDiagramExplanation = {
+                            types: message.types,
+                            mermaidCodes: message.mermaidCodes || {},
+                        };
+                        // 자동 설명 실행
+                        this.explainGeneratedDiagrams(roomId, message.types, message.mermaidCodes || {});
+                    }
                 }
             } catch (error) {
                 // JSON 파싱 실패는 무시 (다른 메시지일 수 있음)
@@ -361,6 +404,9 @@ export class VoiceBotService {
                 flowchartModeActive: false,
                 flowchartInitiator: null,
                 flowchartOpenTime: 0,
+                // 설계 모드 초기화
+                designModeActive: false,
+                designModeOpenTime: 0,
             };
             this.activeRooms.set(roomId, context);
 
@@ -1249,6 +1295,56 @@ ${edgesDesc}
                 return;
             }
 
+            // ★ 설계 모드일 때: 다이어그램 관련 질문만 응답
+            if (context.designModeActive && intentForContext.isCallIntent) {
+                const isDiagramQuestion = this.isDiagramRelatedQuestion(transcript);
+                this.logger.log(`[설계 모드] 질문 분석 - 다이어그램 관련: ${isDiagramQuestion}`);
+
+                if (isDiagramQuestion) {
+                    // 다이어그램 관련 질문 - 설계 보드 컨텍스트와 함께 응답
+                    this.logger.log(`[설계 모드] 다이어그램 질문 처리 - "${transcript.substring(0, 30)}..."`);
+
+                    context.botState = BotState.SPEAKING;
+
+                    // 다이어그램 컨텍스트 구성
+                    let diagramContext = '=== 현재 설계 보드 상태 ===\n';
+                    if (context.pendingDiagramExplanation) {
+                        const { types, mermaidCodes } = context.pendingDiagramExplanation;
+                        diagramContext += `생성된 다이어그램: ${types.join(', ')}\n\n`;
+                        for (const type of types) {
+                            if (mermaidCodes[type]) {
+                                diagramContext += `[${type}]\n${mermaidCodes[type].substring(0, 500)}\n\n`;
+                            }
+                        }
+                    }
+
+                    const response = await this.llmService.answerWithContext(
+                        transcript,
+                        diagramContext,
+                        '설계 다이어그램'
+                    );
+
+                    await this.speakAndPublish(context, roomId, requestId, response);
+                    context.botState = BotState.ARMED;
+                    context.lastResponseTime = Date.now();
+                    this.logger.log(`[설계 모드] 처리 완료`);
+                    return;
+                } else {
+                    // 다이어그램 관련 없는 질문 - 무시하고 안내
+                    this.logger.log(`[설계 모드] 비-다이어그램 질문 스킵 - "${transcript.substring(0, 30)}..."`);
+                    context.botState = BotState.SPEAKING;
+                    await this.speakAndPublish(
+                        context,
+                        roomId,
+                        requestId,
+                        '지금은 설계 보드가 열려 있어요. 다이어그램에 관한 질문을 해주시면 도와드릴게요.'
+                    );
+                    context.botState = BotState.ARMED;
+                    context.lastResponseTime = Date.now();
+                    return;
+                }
+            }
+
             // ★ 일반 모드 진입 로그
             this.logger.log(`[일반 모드] 검색/응답 처리 시작`);
 
@@ -2009,6 +2105,115 @@ ${edgesDesc}
         }
 
         return contextStr;
+    }
+
+    // ============================================================
+    // 설계 모드 - 다이어그램 자동 설명
+    // ============================================================
+
+    /**
+     * 생성된 다이어그램 자동 설명
+     * 설계 보드가 열리고 다이어그램이 생성되면 자동으로 TTS로 설명
+     */
+    private async explainGeneratedDiagrams(
+        roomId: string,
+        types: string[],
+        mermaidCodes: Record<string, string>
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context || !context.designModeActive) {
+            this.logger.log(`[설계 모드] 자동 설명 스킵 - 설계 모드 비활성`);
+            return;
+        }
+
+        if (context.isPublishing) {
+            this.logger.log(`[설계 모드] 자동 설명 스킵 - 이미 발화 중`);
+            return;
+        }
+
+        const requestId = Date.now();
+        context.currentRequestId = requestId;
+
+        this.logger.log(`[설계 모드] 다이어그램 자동 설명 시작 - ${types.join(', ')}`);
+
+        try {
+            context.isPublishing = true;
+            context.botState = BotState.SPEAKING;
+
+            // 각 다이어그램 타입에 대한 간단한 설명 생성
+            const typeLabels: Record<string, string> = {
+                flowchart: '플로우차트',
+                erd: 'ERD',
+                sequence: '시퀀스 다이어그램',
+                architecture: '아키텍처 다이어그램',
+            };
+
+            const generatedTypes = types.map(t => typeLabels[t] || t).join(', ');
+
+            // 첫 번째 다이어그램에 대해 간단한 설명 생성
+            let explanation = '';
+            const firstType = types[0];
+            const firstCode = mermaidCodes[firstType];
+
+            if (firstCode && firstCode.length > 0) {
+                // LLM을 사용해 다이어그램 내용 분석
+                const prompt = `다음 ${typeLabels[firstType] || firstType} 다이어그램을 2문장으로 아주 간결하게 설명해주세요. 기술적인 내용 위주로 말해주세요.
+
+다이어그램 코드:
+${firstCode.substring(0, 500)}
+
+설명:`;
+
+                explanation = await this.llmService.sendMessagePure(prompt, 150);
+            }
+
+            // TTS로 안내
+            let message = `회의 내용을 분석해서 ${generatedTypes}를 생성했어요.`;
+            if (explanation && explanation.trim()) {
+                message += ` ${explanation.trim()}`;
+            }
+            message += ` 다이어그램에 대해 더 궁금한 게 있으시면 질문해주세요.`;
+
+            await this.speakAndPublish(context, roomId, requestId, message);
+
+            context.botState = BotState.ARMED;
+            context.lastResponseTime = Date.now();
+
+            this.logger.log(`[설계 모드] 자동 설명 완료`);
+        } catch (error) {
+            this.logger.error(`[설계 모드] 자동 설명 실패: ${error.message}`);
+        } finally {
+            context.isPublishing = false;
+        }
+    }
+
+    /**
+     * 다이어그램 관련 질문인지 판단
+     */
+    private isDiagramRelatedQuestion(transcript: string): boolean {
+        const diagramKeywords = [
+            // 다이어그램 타입
+            '플로우차트', 'flowchart', '흐름도', '순서도',
+            'erd', '이알디', '엔티티', '테이블', '데이터베이스', 'db',
+            '시퀀스', 'sequence', '상호작용',
+            '아키텍처', 'architecture', '구조',
+            // 다이어그램 관련 질문
+            '다이어그램', '차트', '그림', '도표', '도식',
+            '설계', '모델', '스키마', '관계',
+            // 다이어그램 동작
+            '설명', '분석', '의미', '뜻', '내용',
+            '노드', '엣지', '연결', '화살표', '박스',
+            '프로세스', '단계', '흐름', '분기',
+            // 수정/편집 관련
+            '수정', '변경', '추가', '삭제', '편집',
+            // 질문 패턴
+            '이게 뭐야', '뭘 의미', '어떤 의미', '왜 이렇게',
+        ];
+
+        const normalizedTranscript = transcript.toLowerCase();
+        return diagramKeywords.some(keyword =>
+            normalizedTranscript.includes(keyword.toLowerCase())
+        );
     }
 
     // ============================================================

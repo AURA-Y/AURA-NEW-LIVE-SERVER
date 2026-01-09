@@ -8,6 +8,7 @@ import { Controller, Post, Body, Get, Param, Logger, Inject } from '@nestjs/comm
 import { McpService } from './mcp.service';
 import { ToolInput } from './types/tool.types';
 import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
+import { LlmService } from '../llm/llm.service';
 
 // 요청 DTO
 interface GenerateDiagramDto {
@@ -62,6 +63,7 @@ export class McpController {
   constructor(
     private readonly mcpService: McpService,
     @Inject(RAG_CLIENT) private readonly ragClient: IRagClient,
+    private readonly llmService: LlmService,
   ) {}
 
   /**
@@ -241,13 +243,50 @@ export class McpController {
   }
 
   /**
-   * 컨텍스트 기반 다이어그램 생성 (병렬 처리로 속도 개선)
+   * LLM이 트랜스크립트 분석해서 적합한 다이어그램 타입 결정
+   */
+  private async analyzeDiagramTypes(transcript: string): Promise<string[]> {
+    const prompt = `다음 회의 내용을 분석하여 어떤 다이어그램이 적합한지 판단해주세요.
+
+가능한 다이어그램 타입:
+- flowchart: 프로세스, 워크플로우, 순서, 단계가 있는 경우
+- erd: 엔티티, 테이블, 데이터 모델, 관계가 있는 경우
+- sequence: API 호출, 시스템 간 통신, 요청-응답 패턴이 있는 경우
+- architecture: 시스템 구조, 컴포넌트, 서비스 구성이 있는 경우
+
+회의 내용:
+${transcript}
+
+응답 형식 (JSON 배열만 출력):
+["flowchart", "erd"]
+
+주의:
+- 내용이 해당 다이어그램에 적합한 경우에만 포함
+- 빈 배열 가능 (적합한 다이어그램 없음)
+- 반드시 JSON 배열만 출력`;
+
+    try {
+      const response = await this.llmService.sendMessagePure(prompt, 200);
+      const jsonMatch = response.match(/\[.*\]/s);
+      if (jsonMatch) {
+        const types = JSON.parse(jsonMatch[0]) as string[];
+        const validTypes = ['flowchart', 'erd', 'sequence', 'architecture'];
+        return types.filter(t => validTypes.includes(t));
+      }
+    } catch (error) {
+      this.logger.warn(`[Diagram Type Analysis] 실패: ${error.message}`);
+    }
+    return [];
+  }
+
+  /**
+   * 컨텍스트 기반 다이어그램 생성 (LLM이 적합한 타입 자동 선택)
    * POST /mcp/diagram/generate-from-context
    */
   @Post('diagram/generate-from-context')
   async generateFromContext(@Body() dto: GenerateFromContextDto) {
     const startTime = Date.now();
-    this.logger.log(`[Generate From Context] room: ${dto.roomId}, types: ${dto.diagramTypes?.join(', ')}`);
+    this.logger.log(`[Generate From Context] room: ${dto.roomId}`);
 
     try {
       // 1. RAG 버퍼에서 트랜스크립트 가져오기
@@ -260,11 +299,28 @@ export class McpController {
         };
       }
 
-      const diagramTypes = dto.diagramTypes || ['flowchart', 'erd'];
+      // 2. LLM이 적합한 다이어그램 타입 분석 (dto.diagramTypes 무시하고 자동 분석)
+      const diagramTypes = await this.analyzeDiagramTypes(transcript);
+      this.logger.log(`[Generate From Context] LLM 분석 결과: ${diagramTypes.join(', ') || '없음'}`);
+
+      if (diagramTypes.length === 0) {
+        return {
+          success: true,
+          diagrams: {},
+          suggestedTypes: [],
+          context: {
+            roomId: dto.roomId,
+            transcript,
+            lastUpdated: new Date().toISOString(),
+          },
+          message: '현재 회의 내용으로는 다이어그램 생성에 적합한 내용이 부족합니다.',
+        };
+      }
+
       const diagrams: Record<string, string> = {};
 
-      // 2. 병렬로 다이어그램 생성 (속도 개선)
-      const generatePromises = diagramTypes.map(async (type) => {
+      // 3. 순차적으로 다이어그램 생성 (throttling 방지)
+      for (const type of diagramTypes) {
         const input: ToolInput = {
           transcript,
           context: { roomId: dto.roomId },
@@ -273,25 +329,17 @@ export class McpController {
         const result = await this.mcpService.generateDiagram(type, input);
 
         if (result.success && result.output?.markdown) {
-          return { type, mermaid: result.output.markdown };
-        }
-        return { type, mermaid: null };
-      });
-
-      const results = await Promise.all(generatePromises);
-
-      for (const { type, mermaid } of results) {
-        if (mermaid) {
-          diagrams[type] = mermaid;
+          diagrams[type] = result.output.markdown;
         }
       }
 
       const elapsed = Date.now() - startTime;
-      this.logger.log(`[Generate From Context] 완료 - ${elapsed}ms, 생성된 다이어그램: ${Object.keys(diagrams).join(', ')}`);
+      this.logger.log(`[Generate From Context] 완료 - ${elapsed}ms, 생성된 다이어그램: ${Object.keys(diagrams).join(', ') || '없음'}`);
 
       return {
         success: true,
         diagrams,
+        suggestedTypes: diagramTypes,
         context: {
           roomId: dto.roomId,
           transcript,
@@ -306,17 +354,33 @@ export class McpController {
   }
 
   /**
-   * 다이어그램 설명 요청
+   * 다이어그램 설명 요청 (LLM + TTS)
    * POST /mcp/explain-diagram
    */
   @Post('explain-diagram')
   async explainDiagram(@Body() dto: ExplainDiagramDto) {
     this.logger.log(`[Explain Diagram] type: ${dto.diagramType}, room: ${dto.roomId}`);
 
-    // 향후 LLM 연동으로 설명 생성 가능
-    return {
-      success: true,
-      explanation: `${dto.diagramType} 다이어그램이 생성되었습니다.`,
-    };
+    try {
+      const prompt = `다음 ${dto.diagramType} 다이어그램을 간단하게 설명해주세요. 2-3문장으로 핵심만 설명하세요.
+
+다이어그램 코드:
+${dto.mermaidCode}
+
+설명:`;
+
+      const explanation = await this.llmService.sendMessagePure(prompt, 300);
+
+      return {
+        success: true,
+        explanation: explanation.trim(),
+      };
+    } catch (error) {
+      this.logger.error(`[Explain Diagram] Error: ${error.message}`);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
   }
 }
