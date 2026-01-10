@@ -1,5 +1,7 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
     Room,
     RoomEvent,
@@ -1033,6 +1035,11 @@ ${edgesDesc}
         let silenceCount = 0;
         let voiceCount = 0;
 
+        // ★ Pre-buffer: 음성 감지 전 프레임 저장 (첫 음절 손실 방지)
+        const PRE_BUFFER_FRAMES = 15;  // ~150ms 선행 저장
+        let preBuffer: Buffer[] = [];
+        let isRecording = false;  // 실제 녹음 시작 여부
+
         const SILENCE_THRESHOLD = 50;  // 무음 프레임 수 (~500ms)
         const MIN_AUDIO_LENGTH = 16000;  // 최소 0.5초 (16000/32000)
         const MAX_AUDIO_LENGTH = 192000;  // 최대 6초 (192000/32000) - 긴 문장 완전 인식
@@ -1130,7 +1137,7 @@ ${edgesDesc}
                 continue;
             }
 
-            // VAD 처리
+            // VAD 처리 (Pre-buffer 적용)
             if (isVoice) {
                 voiceCount++;
                 if (context && voiceCount >= MIN_VOICE_FRAMES) {
@@ -1139,11 +1146,37 @@ ${edgesDesc}
                 if (decibel > STRONG_VOICE_THRESHOLD) {
                     silenceCount = 0;
                 }
+
+                // ★ 음성 시작 시 pre-buffer 포함
+                if (!isRecording && voiceCount >= 2) {
+                    isRecording = true;
+                    // pre-buffer의 모든 프레임을 audioBuffer 앞에 추가
+                    audioBuffer.push(...preBuffer);
+                    preBuffer = [];
+                }
+
                 audioBuffer.push(frameBuffer);
             } else if (avgAmplitude > 150 && decibel > -55) {
-                audioBuffer.push(frameBuffer);
+                // 약한 음성/전이 구간
+                if (isRecording) {
+                    audioBuffer.push(frameBuffer);
+                } else {
+                    // 녹음 전이면 pre-buffer에 저장
+                    preBuffer.push(frameBuffer);
+                    if (preBuffer.length > PRE_BUFFER_FRAMES) {
+                        preBuffer.shift();
+                    }
+                }
                 silenceCount++;
             } else {
+                // 무음 구간
+                if (!isRecording) {
+                    // 녹음 전이면 pre-buffer에 저장 (무음도 포함)
+                    preBuffer.push(frameBuffer);
+                    if (preBuffer.length > PRE_BUFFER_FRAMES) {
+                        preBuffer.shift();
+                    }
+                }
                 silenceCount++;
                 voiceCount = 0;
             }
@@ -1172,6 +1205,8 @@ ${edgesDesc}
                 audioBuffer = [];
                 silenceCount = 0;
                 voiceCount = 0;
+                isRecording = false;  // ★ 녹음 상태 리셋
+                preBuffer = [];       // ★ pre-buffer도 초기화
 
                 if (fullDecibel > MIN_DECIBEL_THRESHOLD - 5) {
                     // 봇 context 없으면 처리 스킵
@@ -1201,6 +1236,13 @@ ${edgesDesc}
     private async processAndRespond(roomId: string, audioBuffer: Buffer, userId: string) {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
+
+        // ================================================
+        // [DEBUG] 오디오 파일 저장 (품질 확인용)
+        // ================================================
+        if (process.env.DEBUG_SAVE_AUDIO === 'true') {
+            this.saveDebugAudio(audioBuffer, roomId);
+        }
 
         // ================================================
         // 1. STT (음성 → 텍스트) - 항상 수행 (isPublishing과 무관)
@@ -1951,6 +1993,63 @@ ${edgesDesc}
         }
 
         return cleaned;
+    }
+
+    /**
+     * [DEBUG] 오디오를 WAV 파일로 저장 (품질 확인용)
+     * 환경변수 DEBUG_SAVE_AUDIO=true 설정 시 활성화
+     * 저장 위치: ./debug_audio/
+     */
+    private saveDebugAudio(audioBuffer: Buffer, roomId: string): void {
+        try {
+            const debugDir = path.join(process.cwd(), 'debug_audio');
+            if (!fs.existsSync(debugDir)) {
+                fs.mkdirSync(debugDir, { recursive: true });
+            }
+
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const filename = `${roomId}_${timestamp}.wav`;
+            const filepath = path.join(debugDir, filename);
+
+            // WAV 헤더 생성 (16kHz, 16bit, mono)
+            const wavHeader = this.createWavHeader(audioBuffer.length, 16000, 1, 16);
+            const wavBuffer = Buffer.concat([wavHeader, audioBuffer]);
+
+            fs.writeFileSync(filepath, wavBuffer);
+            this.logger.log(`[DEBUG] 오디오 저장: ${filename} (${audioBuffer.length} bytes)`);
+        } catch (err) {
+            this.logger.error(`[DEBUG] 오디오 저장 실패: ${err.message}`);
+        }
+    }
+
+    /**
+     * WAV 파일 헤더 생성
+     */
+    private createWavHeader(dataLength: number, sampleRate: number, channels: number, bitsPerSample: number): Buffer {
+        const header = Buffer.alloc(44);
+        const byteRate = sampleRate * channels * (bitsPerSample / 8);
+        const blockAlign = channels * (bitsPerSample / 8);
+
+        // RIFF header
+        header.write('RIFF', 0);
+        header.writeUInt32LE(36 + dataLength, 4);
+        header.write('WAVE', 8);
+
+        // fmt subchunk
+        header.write('fmt ', 12);
+        header.writeUInt32LE(16, 16);           // Subchunk1Size (16 for PCM)
+        header.writeUInt16LE(1, 20);            // AudioFormat (1 = PCM)
+        header.writeUInt16LE(channels, 22);     // NumChannels
+        header.writeUInt32LE(sampleRate, 24);   // SampleRate
+        header.writeUInt32LE(byteRate, 28);     // ByteRate
+        header.writeUInt16LE(blockAlign, 32);   // BlockAlign
+        header.writeUInt16LE(bitsPerSample, 34);// BitsPerSample
+
+        // data subchunk
+        header.write('data', 36);
+        header.writeUInt32LE(dataLength, 40);
+
+        return header;
     }
 
     private startArmedTimeoutChecker(roomId: string): void {
