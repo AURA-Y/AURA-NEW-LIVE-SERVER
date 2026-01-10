@@ -399,12 +399,12 @@ export class RagGrpcClientService implements OnModuleInit, OnModuleDestroy {
 
     /**
      * 회의 종료 API 호출 (HTTP POST - gRPC에 없는 기능은 HTTP 유지)
-     * POST /meetings/{room_name}/end
+     * POST /meetings/{roomId}/end
      */
-    async endMeeting(roomName: string): Promise<{ success: boolean; message?: string }> {
+    async endMeeting(roomId: string): Promise<{ success: boolean; message?: string }> {
         // gRPC EndSession 사용
         try {
-            await this.disconnect(roomName);
+            await this.disconnect(roomId);
             return { success: true };
         } catch (error: any) {
             return { success: false, message: error.message };
@@ -415,23 +415,23 @@ export class RagGrpcClientService implements OnModuleInit, OnModuleDestroy {
      * 회의 시작 및 파일 임베딩 API 호출 (HTTP POST)
      * gRPC에서 지원하지 않는 파일 업로드는 HTTP 유지
      */
-    async startMeeting(roomName: string, payload: any): Promise<{ success: boolean; message?: string }> {
+    async startMeeting(roomId: string, payload: any): Promise<{ success: boolean; message?: string }> {
         const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://localhost:8000';
-        const endpoint = `${ragBaseUrl}/meetings/${roomName}/start`;
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/start`;
 
         this.logger.log(`[gRPC/HTTP 회의 시작] POST ${endpoint} - Payload: ${JSON.stringify(payload)}`);
 
         try {
             const axios = await import('axios');
             const response = await axios.default.post(endpoint, payload);
-            this.logger.log(`[gRPC/HTTP 회의 시작 성공] ${roomName} - 응답: ${JSON.stringify(response.data)}`);
+            this.logger.log(`[gRPC/HTTP 회의 시작 성공] ${roomId} - 응답: ${JSON.stringify(response.data)}`);
 
             // gRPC 세션도 생성
-            await this.connect(roomName);
+            await this.connect(roomId);
 
             return { success: true, message: response.data };
         } catch (error: any) {
-            this.logger.error(`[gRPC/HTTP 회의 시작 실패] ${roomName}: ${error.message}`);
+            this.logger.error(`[gRPC/HTTP 회의 시작 실패] ${roomId}: ${error.message}`);
             return { success: false, message: error.message };
         }
     }

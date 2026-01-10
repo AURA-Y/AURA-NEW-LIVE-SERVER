@@ -45,16 +45,16 @@ export class LivekitService {
     );
   }
 
-  private async ensureAgentDispatch(roomName: string) {
+  private async ensureAgentDispatch(roomId: string) {
     if (!this.agentName) return;
     try {
-      const dispatches = await this.agentDispatch.listDispatch(roomName);
+      const dispatches = await this.agentDispatch.listDispatch(roomId);
       const exists = dispatches.some(
         (dispatch) => dispatch.agentName === this.agentName,
       );
       if (exists) return;
-      await this.agentDispatch.createDispatch(roomName, this.agentName);
-      this.logger.log(`Agent dispatch created: ${roomName} (${this.agentName})`);
+      await this.agentDispatch.createDispatch(roomId, this.agentName);
+      this.logger.log(`Agent dispatch created: ${roomId} (${this.agentName})`);
     } catch (error) {
       this.logger.warn(`Failed to ensure agent dispatch: ${error.message}`);
     }
@@ -70,9 +70,9 @@ export class LivekitService {
   }
 
   /**
-   * 고유한 방 이름(ID) 생성
+   * 고유한 방 ID 생성
    */
-  private generateRoomName(): string {
+  private generateRoomId(): string {
     const timestamp = Date.now();
     const random = Math.random().toString(36).slice(2, 8);
     return `room-${timestamp}-${random}`;
@@ -82,24 +82,30 @@ export class LivekitService {
    * 방 메타데이터 파싱
    */
   private parseRoomMetadata(metadata: string | undefined): {
-    title: string;
+    topic: string;
     description: string;
     createdBy: string;
   } {
     if (!metadata) {
-      return { title: '', description: '', createdBy: '' };
+      return { topic: '', description: '', createdBy: '' };
     }
     try {
-      return JSON.parse(metadata);
+      const parsed = JSON.parse(metadata);
+      // title → topic 마이그레이션 지원
+      return {
+        topic: parsed.topic || parsed.title || '',
+        description: parsed.description || '',
+        createdBy: parsed.createdBy || '',
+      };
     } catch {
-      return { title: '', description: '', createdBy: '' };
+      return { topic: '', description: '', createdBy: '' };
     }
   }
 
   async createRoom(createRoomDto: CreateRoomDto) {
     const {
       userName,
-      roomTitle,
+      roomTopic,
       description = '',
       maxParticipants = 20
     } = createRoomDto;
@@ -108,16 +114,16 @@ export class LivekitService {
     const log = (msg: string) => this.logger.log(`[createRoom +${Date.now() - startTime}ms] ${msg}`);
 
     try {
-      log(`시작 - user: ${userName}, title: ${roomTitle}`);
+      log(`시작 - user: ${userName}, topic: ${roomTopic}`);
       log(`LiveKit URL: ${this.livekitUrl}`);
 
-      // 고유한 방 이름(ID) 생성
-      const roomName = this.generateRoomName();
-      log(`방 이름 생성: ${roomName}`);
+      // 고유한 방 ID 생성
+      const roomId = this.generateRoomId();
+      log(`방 ID 생성: ${roomId}`);
 
       // 메타데이터에 표시용 정보 저장
       const metadata = JSON.stringify({
-        title: roomTitle,
+        topic: roomTopic,
         description: description,
         createdBy: userName,
       });
@@ -126,7 +132,7 @@ export class LivekitService {
       // LiveKit에 방 생성
       log(`>>> LiveKit roomService.createRoom() 호출 시작...`);
       const room = await this.roomService.createRoom({
-        name: roomName,
+        name: roomId,
         metadata: metadata,
         emptyTimeout: 300,
         maxParticipants: maxParticipants,
@@ -152,7 +158,7 @@ export class LivekitService {
       return {
         roomId: room.name,
         roomUrl: `${wsUrl}/${room.name}`,
-        roomTitle: roomTitle,
+        roomTopic: roomTopic,
         description: description,
         maxParticipants: room.maxParticipants,
         userName: userName,
@@ -169,29 +175,26 @@ export class LivekitService {
   }
 
   async joinRoom(joinRoomDto: JoinRoomDto, isBot: boolean = false) {
-    const { roomId, roomName, userName } = joinRoomDto;
-    this.logger.log(`Join request: roomId=${roomId}, roomName=${roomName}, user=${userName}`);
+    const { roomId, userName } = joinRoomDto;
+    this.logger.log(`Join request: roomId=${roomId}, user=${userName}`);
 
     try {
-      // roomId 우선, roomName은 하위호환용
-      const finalRoomId = roomId || roomName;
-
-      if (!finalRoomId) {
+      if (!roomId) {
         throw new Error('roomId is required');
       }
 
       // 방 존재 여부 확인
       const allRooms = await this.roomService.listRooms();
-      const room = allRooms.find(r => r.name === finalRoomId);
+      const room = allRooms.find(r => r.name === roomId);
       if (!room) {
-        this.logger.error(`Room not found: ${finalRoomId}`);
+        this.logger.error(`Room not found: ${roomId}`);
         throw new Error('Room not found');
       }
 
       this.logger.log(`Joining room via LiveKit: ${this.livekitUrl}`);
-      await this.ensureAgentDispatch(finalRoomId);
-      this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${finalRoomId}`);
-      const token = await this.generateTokenForUser(finalRoomId, userName, isBot);
+      await this.ensureAgentDispatch(roomId);
+      this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${roomId}`);
+      const token = await this.generateTokenForUser(roomId, userName, isBot);
       const wsUrl = this.livekitUrl.replace('http://', 'ws://').replace('https://', 'wss://');
 
       return {
@@ -215,7 +218,7 @@ export class LivekitService {
         const meta = this.parseRoomMetadata(room.metadata);
         return {
           roomId: room.name,
-          roomTitle: meta.title || room.name,
+          roomTopic: meta.topic || room.name,
           description: meta.description,
           maxParticipants: room.maxParticipants,
           createdBy: meta.createdBy,
@@ -232,51 +235,50 @@ export class LivekitService {
     }
   }
 
-  async hasBotParticipant(roomName: string): Promise<boolean> {
+  async hasBotParticipant(roomId: string): Promise<boolean> {
     try {
       const participants = await (this.roomService as unknown as {
         listParticipants: (room: string) => Promise<{ identity: string }[]>;
-      }).listParticipants(roomName);
+      }).listParticipants(roomId);
       return participants.some((participant) => participant.identity.startsWith('ai-bot'));
     } catch (error) {
-      this.logger.warn(`Failed to list participants for ${roomName}: ${error.message}`);
+      this.logger.warn(`Failed to list participants for ${roomId}: ${error.message}`);
       return false;
     }
   }
 
-  async listBotIdentities(roomName: string): Promise<string[]> {
+  async listBotIdentities(roomId: string): Promise<string[]> {
     try {
       const participants = await (this.roomService as unknown as {
         listParticipants: (room: string) => Promise<{ identity: string }[]>;
-      }).listParticipants(roomName);
+      }).listParticipants(roomId);
       return participants
         .map((participant) => participant.identity)
         .filter((identity) => identity.startsWith('ai-bot'));
     } catch (error) {
-      this.logger.warn(`Failed to list participants for ${roomName}: ${error.message}`);
+      this.logger.warn(`Failed to list participants for ${roomId}: ${error.message}`);
       return [];
     }
   }
 
-  async removeBots(roomName: string): Promise<void> {
-    const botIdentities = await this.listBotIdentities(roomName);
+  async removeBots(roomId: string): Promise<void> {
+    const botIdentities = await this.listBotIdentities(roomId);
     if (botIdentities.length === 0) return;
 
     for (const identity of botIdentities) {
       try {
         await (this.roomService as unknown as {
           removeParticipant: (room: string, identity: string) => Promise<void>;
-        }).removeParticipant(roomName, identity);
-        this.logger.log(`Removed bot participant: ${roomName} (${identity})`);
+        }).removeParticipant(roomId, identity);
+        this.logger.log(`Removed bot participant: ${roomId} (${identity})`);
       } catch (error) {
-        this.logger.warn(`Failed to remove bot ${identity} from ${roomName}: ${error.message}`);
+        this.logger.warn(`Failed to remove bot ${identity} from ${roomId}: ${error.message}`);
       }
     }
   }
 
   async getRoom(roomId: string) {
     try {
-      // roomName으로 검색 (roomId = roomName)
       const allRooms = await this.roomService.listRooms();
       const room = allRooms.find(r => r.name === roomId);
 
@@ -288,7 +290,7 @@ export class LivekitService {
 
       return {
         roomId: room.name,
-        roomTitle: meta.title || room.name,
+        roomTopic: meta.topic || room.name,
         description: meta.description,
         maxParticipants: room.maxParticipants,
         createdBy: meta.createdBy,
@@ -303,7 +305,6 @@ export class LivekitService {
     try {
       this.logger.log(`Deleting room: ${roomId}`);
 
-      // roomId = roomName으로 검색
       const allRooms = await this.roomService.listRooms();
       const roomToDelete = allRooms.find(r => r.name === roomId);
 
@@ -326,7 +327,7 @@ export class LivekitService {
     }
   }
 
-  private async generateTokenForUser(roomName: string, userName: string, isBot: boolean = false): Promise<string> {
+  private async generateTokenForUser(roomId: string, userName: string, isBot: boolean = false): Promise<string> {
     const at = new AccessToken(this.apiKey, this.apiSecret, {
       identity: userName,
       ttl: '24h',
@@ -335,7 +336,7 @@ export class LivekitService {
     if (isBot) {
       // 봇: 발행 가능, 참여자로 표시
       at.addGrant({
-        room: roomName,
+        room: roomId,
         roomJoin: true,
         canPublish: true,
         canSubscribe: true,
@@ -344,7 +345,7 @@ export class LivekitService {
       });
     } else {
       at.addGrant({
-        room: roomName,
+        room: roomId,
         roomJoin: true,
         canPublish: true,
         canSubscribe: true,

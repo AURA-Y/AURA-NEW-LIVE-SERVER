@@ -766,12 +766,12 @@ ${processedContent}
      * CDR Flowchart 파싱 요청 처리 및 응답 전송
      */
     private async handleCDRFlowchartRequest(
-        roomName: string,
+        roomId: string,
         content: string,
         preserveExisting: boolean,
         requesterId: string
     ): Promise<void> {
-        const context = this.activeRooms.get(roomName);
+        const context = this.activeRooms.get(roomId);
         if (!context) return;
 
         this.logger.log(`[CDR→Flowchart] 요청 처리 from ${requesterId}: ${content.length}자`);
@@ -945,12 +945,12 @@ JSON만 출력:
      * CDR 종합 분석 요청 처리 (Domain Model + Flowchart + ER Diagram)
      */
     private async handleCDRAnalysisRequest(
-        roomName: string,
+        roomId: string,
         content: string,
         preserveExisting: boolean,
         requesterId: string
     ): Promise<void> {
-        const context = this.activeRooms.get(roomName);
+        const context = this.activeRooms.get(roomId);
         if (!context) return;
 
         this.logger.log(`[CDR 분석] 종합 분석 시작 from ${requesterId}: ${content.length}자`);
@@ -1048,13 +1048,13 @@ ${edgesDesc}
      * Skeleton 코드 생성 요청 처리
      */
     private async handleSkeletonCodeRequest(
-        roomName: string,
+        roomId: string,
         nodes: any[],
         edges: any[],
         language: string,
         requesterId: string
     ): Promise<void> {
-        const context = this.activeRooms.get(roomName);
+        const context = this.activeRooms.get(roomId);
         if (!context) return;
 
         this.logger.log(`[Skeleton] 요청 처리 from ${requesterId}: ${nodes.length}개 노드, ${language}`);

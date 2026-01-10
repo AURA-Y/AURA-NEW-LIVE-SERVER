@@ -592,32 +592,32 @@ export class RagClientService implements OnModuleDestroy {
 
     /**
      * 회의 종료 API 호출 (HTTP POST)
-     * POST /meetings/{room_name}/end
+     * POST /meetings/{roomId}/end
      */
-    async endMeeting(roomName: string): Promise<{ success: boolean; message?: string }> {
+    async endMeeting(roomId: string): Promise<{ success: boolean; message?: string }> {
         const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
-        const endpoint = `${ragBaseUrl}/meetings/${roomName}/end`;
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/end`;
 
         this.logger.log(`[RAG 회의 종료] POST ${endpoint}`);
 
         try {
             const axios = await import('axios');
             const response = await axios.default.post(endpoint);
-            this.logger.log(`[RAG 회의 종료 성공] ${roomName} - 응답: ${JSON.stringify(response.data)}`);
+            this.logger.log(`[RAG 회의 종료 성공] ${roomId} - 응답: ${JSON.stringify(response.data)}`);
             return { success: true, message: response.data };
         } catch (error: any) {
-            this.logger.error(`[RAG 회의 종료 실패] ${roomName}: ${error.message}`);
+            this.logger.error(`[RAG 회의 종료 실패] ${roomId}: ${error.message}`);
             return { success: false, message: error.message };
         }
     }
 
     /**
      * 회의 시작 및 파일 임베딩 API 호출 (HTTP POST)
-     * POST /meetings/{room_name}/start
+     * POST /meetings/{roomId}/start
      */
-    async startMeeting(roomName: string, payload: any): Promise<{ success: boolean; message?: string }> {
+    async startMeeting(roomId: string, payload: any): Promise<{ success: boolean; message?: string }> {
         const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
-        const endpoint = `${ragBaseUrl}/meetings/${roomName}/start`;
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/start`;
 
         this.logger.log(`[RAG 회의 시작] POST ${endpoint} - Payload: ${JSON.stringify(payload)}`);
 
@@ -625,10 +625,10 @@ export class RagClientService implements OnModuleDestroy {
             const axios = await import('axios');
             // Payload 구조: { description: string, files: { bucket: string; key: string }[] }
             const response = await axios.default.post(endpoint, payload);
-            this.logger.log(`[RAG 회의 시작 성공] ${roomName} - 응답: ${JSON.stringify(response.data)}`);
+            this.logger.log(`[RAG 회의 시작 성공] ${roomId} - 응답: ${JSON.stringify(response.data)}`);
             return { success: true, message: response.data };
         } catch (error: any) {
-            this.logger.error(`[RAG 회의 시작 실패] ${roomName}: ${error.message}`);
+            this.logger.error(`[RAG 회의 시작 실패] ${roomId}: ${error.message}`);
             return { success: false, message: error.message };
         }
     }

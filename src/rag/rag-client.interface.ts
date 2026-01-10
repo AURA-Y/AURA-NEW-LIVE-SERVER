@@ -58,12 +58,12 @@ export interface IRagClient {
     /**
      * 회의 종료
      */
-    endMeeting(roomName: string): Promise<{ success: boolean; message?: string }>;
+    endMeeting(roomId: string): Promise<{ success: boolean; message?: string }>;
 
     /**
      * 회의 시작
      */
-    startMeeting(roomName: string, payload: any): Promise<{ success: boolean; message?: string }>;
+    startMeeting(roomId: string, payload: any): Promise<{ success: boolean; message?: string }>;
 
     /**
      * 중간 보고서 요청
