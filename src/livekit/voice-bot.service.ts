@@ -81,6 +81,9 @@ interface RoomContext {
         actionItems: string[];
         date: string;
     };
+
+    // 클라이언트 준비 대기 (인삿말 타이밍 제어)
+    greetingDone: boolean;
 }
 
 @Injectable()
@@ -227,6 +230,16 @@ export class VoiceBotService {
                 }
 
                 const now = Date.now();
+
+                // 클라이언트 준비 완료 → 인삿말 시작
+                if (message.type === 'CLIENT_READY') {
+                    if (!context.greetingDone) {
+                        this.logger.log(`[CLIENT_READY] 클라이언트 준비 완료 - 인삿말 시작`);
+                        context.greetingDone = true;
+                        this.greetOnJoin(roomId);
+                    }
+                    return;
+                }
 
                 if (message.type === 'IDEA_MODE_START') {
                     // 이미 ON이면 무시
@@ -407,6 +420,8 @@ export class VoiceBotService {
                 // 설계 모드 초기화
                 designModeActive: false,
                 designModeOpenTime: 0,
+                // 인삿말 대기 (클라이언트 준비 완료 후 시작)
+                greetingDone: false,
             };
             this.activeRooms.set(roomId, context);
 
@@ -414,8 +429,8 @@ export class VoiceBotService {
 
             this.logger.log(`[봇 입장 성공] 참여자: ${room.remoteParticipants.size}명`);
 
-            // 입장 인사 (캘리브레이션 동안 TTS로 시간 벌기)
-            await this.greetOnJoin(roomId);
+            // 입장 인사는 클라이언트가 CLIENT_READY 메시지를 보낼 때까지 대기
+            this.logger.log(`[봇 입장] 클라이언트 준비 대기 중 (CLIENT_READY 메시지 대기)`);
 
             // 기존 참여자의 오디오 트랙 처리
             for (const participant of room.remoteParticipants.values()) {
@@ -1441,7 +1456,7 @@ ${edgesDesc}
 
                 // 음성 응답
                 context.botState = BotState.SPEAKING;
-                await this.speakAndPublish(context, roomId, requestId, "플로우차트 보드를 열었습니다. CDR 문서를 불러와서 분석해보세요!");
+                await this.speakAndPublish(context, roomId, requestId, "설계 보드를 열었습니다.");
                 context.botState = BotState.ARMED;
                 context.lastResponseTime = Date.now();
                 return;
