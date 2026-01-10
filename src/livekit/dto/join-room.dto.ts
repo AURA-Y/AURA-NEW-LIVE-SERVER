@@ -1,5 +1,4 @@
 export class JoinRoomDto {
-  roomId?: string;
-  roomName?: string;
+  roomId: string;
   userName: string;
 }

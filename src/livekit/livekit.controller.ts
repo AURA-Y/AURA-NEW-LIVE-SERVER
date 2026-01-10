@@ -105,7 +105,7 @@ export class LivekitController {
     // 방 생성 시 자동으로 Voice Bot 시작 (응답 지연 방지를 위해 비동기 처리)
     console.log(`[+${Date.now() - reqStart}ms] Voice Bot 비동기 시작`);
     void this.livekitService.startBotForRoom(roomId).then(() => {
-      console.log(`[자동 봇 시작] 방 '${roomId}' (${result.roomTitle})에 봇이 입장했습니다.`);
+      console.log(`[자동 봇 시작] 방 '${roomId}' (${result.roomTopic})에 봇이 입장했습니다.`);
     }).catch((error) => {
       console.error(`[자동 봇 시작 실패] ${error.message}`);
       // 봇 시작 실패해도 방 생성은 성공으로 처리
@@ -315,21 +315,21 @@ export class LivekitController {
 
   // 회의 종료 (봇 정리 + RAG 요약 요청)
   @Post('end-meeting')
-  async endMeeting(@Body('roomName') roomName: string) {
-    const roomId = roomName?.trim();
+  async endMeeting(@Body('roomId') roomIdParam: string) {
+    const roomId = roomIdParam?.trim();
     if (!roomId) {
-      return { status: 'fail', roomName: '' };
+      return { status: 'fail', roomId: '' };
     }
 
     try {
       const result = await this.livekitService.endMeeting(roomId);
       return {
         status: result.success ? 'success' : 'fail',
-        roomName: roomId,
+        roomId: roomId,
         ragResponse: result.message,
       };
     } catch (error) {
-      return { status: 'fail', roomName: roomId };
+      return { status: 'fail', roomId: roomId };
     }
   }
 

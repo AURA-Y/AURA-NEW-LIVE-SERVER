@@ -47,6 +47,8 @@ export class IntentClassifierService {
         '아우다', '아우다야',
         // 띄어쓰기 변형
         '아 우라', '아우 라', '아우라 야', '아 우 라',
+        // "라" 누락 변형 (STT 오인식)
+        '아우 야', '아우야', '아 야',
         // 헤이아우라 변형
         '헤이 아우라야', '해이아우라', '해이 아우라', '해 아우라',
         '헤이 아오라', '헤이 오우라', '헤이 아울라',
@@ -83,12 +85,36 @@ export class IntentClassifierService {
         { pattern: /아\s+우\s*라\s*(야|아)?/gi, replacement: '아우라야', label: 'space_aura' },
         { pattern: /아우\s+라\s*(야|아)?/gi, replacement: '아우라야', label: 'space_aura2' },
 
+        // === "라" 누락 (STT 오인식) ===
+        { pattern: /^아우\s*야/gi, replacement: '아우라야', label: 'missing_ra' },
+        { pattern: /^아\s*야/gi, replacement: '아우라야', label: 'missing_ura' },
+
         // === 어미 변형 ===
         { pattern: /아우라(아|여)(\s|$)/gi, replacement: '아우라야 ', label: 'auraa' },
         { pattern: /아우라\s*요/gi, replacement: '아우라야', label: 'aurayo' },
 
         // === 일반 오타 ===
         { pattern: /달씨/gi, replacement: '날씨', label: 'weather' },
+        { pattern: /너씨/gi, replacement: '날씨', label: 'weather2' },
+        { pattern: /날시/gi, replacement: '날씨', label: 'weather3' },
+
+        // === 축약형 → 확장형 (STT가 축약형으로 인식할 때) ===
+        { pattern: /그니까/gi, replacement: '그러니까', label: 'contraction1' },
+        { pattern: /긍까/gi, replacement: '그러니까', label: 'contraction2' },
+        { pattern: /근까/gi, replacement: '그러니까', label: 'contraction3' },
+        { pattern: /어케/gi, replacement: '어떻게', label: 'contraction4' },
+        { pattern: /어뜨케/gi, replacement: '어떻게', label: 'contraction5' },
+        { pattern: /이케/gi, replacement: '이렇게', label: 'contraction6' },
+        { pattern: /저케/gi, replacement: '저렇게', label: 'contraction7' },
+        { pattern: /그케/gi, replacement: '그렇게', label: 'contraction8' },
+
+        // === 발음 교정 ===
+        { pattern: /어떠게/gi, replacement: '어떻게', label: 'pron1' },
+        { pattern: /어떠케/gi, replacement: '어떻게', label: 'pron2' },
+        { pattern: /머라고/gi, replacement: '뭐라고', label: 'pron3' },
+        { pattern: /머래/gi, replacement: '뭐래', label: 'pron4' },
+        { pattern: /됬/gi, replacement: '됐', label: 'pron5' },
+        { pattern: /햇/gi, replacement: '했', label: 'pron6' },
     ];
 
     // =====================================================

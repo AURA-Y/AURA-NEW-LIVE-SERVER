@@ -40,7 +40,7 @@ curl -X POST http://AURA-LIVEKIT-backend-alb-2058678622.ap-northeast-2.elb.amazo
   -H "Content-Type: application/json" \
   -d '{
     "userName": "test-user",
-    "roomTitle": "My Room",
+    "roomTopic": "My Room",
     "description": "Test room description",
     "maxParticipants": 20
   }'
@@ -50,21 +50,21 @@ curl -X POST http://AURA-LIVEKIT-backend-alb-2058678622.ap-northeast-2.elb.amazo
 | 필드 | 타입 | 필수 | 기본값 | 설명 |
 |------|------|------|--------|------|
 | `userName` | string | ✅ | - | 방 생성자의 사용자 이름 (토큰 identity로 사용됨) |
-| `roomTitle` | string | ❌ | `Room-{timestamp}` | 방 제목 |
+| `roomTopic` | string | ❌ | `새 회의` | 회의 주제 |
 | `description` | string | ❌ | `""` | 방 설명 |
 | `maxParticipants` | number | ❌ | `20` | 최대 참가자 수 |
 
 #### Response (Success - 200)
 ```json
 {
-  "roomId": "RM_dSbCDo6CDPQU",
-  "roomUrl": "ws://AURA-LIVEKIT-backend-alb-2058678622.ap-northeast-2.elb.amazonaws.com/test-room",
-  "roomTitle": "My Room",
+  "roomId": "room-1736598234-x7k2m9",
+  "roomUrl": "wss://livekit.aura.ai.kr/room-1736598234-x7k2m9",
+  "roomTopic": "My Room",
   "description": "Test room description",
   "maxParticipants": 20,
   "userName": "test-user",
   "token": "eyJhbGciOiJIUzI1NiJ9...",
-  "livekitUrl": "ws://AURA-LIVEKIT-backend-alb-2058678622.ap-northeast-2.elb.amazonaws.com"
+  "livekitUrl": "wss://livekit.aura.ai.kr"
 }
 ```
 
@@ -138,7 +138,7 @@ curl -X GET http://AURA-LIVEKIT-backend-alb-2058678622.ap-northeast-2.elb.amazon
 ```json
 {
   "roomId": "RM_dSbCDo6CDPQU",
-  "roomTitle": "test-room",
+  "roomTopic": "test-room",
   "description": "",
   "maxParticipants": 20,
   "createdBy": "",
@@ -173,7 +173,7 @@ curl -X GET http://AURA-LIVEKIT-backend-alb-2058678622.ap-northeast-2.elb.amazon
   "rooms": [
     {
       "roomId": "RM_dSbCDo6CDPQU",
-      "roomTitle": "test-room",
+      "roomTopic": "test-room",
       "description": "",
       "maxParticipants": 20,
       "createdBy": "",
@@ -291,7 +291,7 @@ LIVEKIT_API_SECRET=your-api-secret
 # 1. 방 생성
 RESPONSE=$(curl -s -X POST http://AURA-LIVEKIT-backend-alb-2058678622.ap-northeast-2.elb.amazonaws.com/api/room/create \
   -H "Content-Type: application/json" \
-  -d '{"userName":"host-user","roomTitle":"Test Room"}')
+  -d '{"userName":"host-user","roomTopic":"Test Room"}')
 
 echo $RESPONSE | python3 -m json.tool
 

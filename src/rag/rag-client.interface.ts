@@ -1,4 +1,15 @@
 /**
+ * RAG 질문 응답 (sources 포함)
+ */
+export interface RagQuestionResponse {
+    answer: string;
+    sources: Array<{
+        text: string;
+        speaker: string | null;
+    }>;
+}
+
+/**
  * RAG 클라이언트 공통 인터페이스
  * WebSocket과 gRPC 클라이언트 모두 이 인터페이스를 구현
  */
@@ -29,6 +40,12 @@ export interface IRagClient {
     sendQuestion(roomId: string, text: string): Promise<string>;
 
     /**
+     * 질문 전송 및 응답 대기 (sources 포함)
+     * 팩트체크용: 과거 발언 출처 포함
+     */
+    sendQuestionWithSources(roomId: string, text: string): Promise<RagQuestionResponse>;
+
+    /**
      * 연결 상태 반환
      */
     getConnectionStatus(roomId: string): { connected: boolean; roomId: string };
@@ -41,12 +58,12 @@ export interface IRagClient {
     /**
      * 회의 종료
      */
-    endMeeting(roomName: string): Promise<{ success: boolean; message?: string }>;
+    endMeeting(roomId: string): Promise<{ success: boolean; message?: string }>;
 
     /**
      * 회의 시작
      */
-    startMeeting(roomName: string, payload: any): Promise<{ success: boolean; message?: string }>;
+    startMeeting(roomId: string, payload: any): Promise<{ success: boolean; message?: string }>;
 
     /**
      * 중간 보고서 요청

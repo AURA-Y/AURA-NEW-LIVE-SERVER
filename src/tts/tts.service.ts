@@ -132,9 +132,48 @@ export class TtsService {
     }
 
     private normalizeSpeech(text: string): string {
+        // 마크다운 포맷 및 이모티콘 제거 (TTS가 읽지 않도록)
+        return this.stripMarkdown(text);
+    }
+
+    /**
+     * 마크다운 포맷 및 이모티콘 제거
+     * LLM 응답에 포함된 마크다운과 이모티콘을 TTS가 읽지 않도록 제거
+     */
+    private stripMarkdown(text: string): string {
         return text
-            .replace(/합니다(?=[\s\.\?\!]|$)/g, '해요')
-            .replace(/입니다(?=[\s\.\?\!]|$)/g, '이에요');
+            // Bold/Italic: ***text***, **text**, *text*
+            .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
+            // Strikethrough: ~~text~~
+            .replace(/~~([^~]+)~~/g, '$1')
+            // Inline code: `code`
+            .replace(/`([^`]+)`/g, '$1')
+            // Headers: # text, ## text, etc.
+            .replace(/^#{1,6}\s+/gm, '')
+            // Unordered list: - item, * item
+            .replace(/^[\-\*]\s+/gm, '')
+            // Ordered list: 1. item
+            .replace(/^\d+\.\s+/gm, '')
+            // Links: [text](url) → text
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+            // Images: ![alt](url) → remove entirely
+            .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+            // Blockquote: > text
+            .replace(/^>\s+/gm, '')
+            // Horizontal rule: ---, ***
+            .replace(/^[\-\*]{3,}$/gm, '')
+            // 이모티콘/이모지 제거 (Unicode emoji ranges)
+            .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')  // Miscellaneous Symbols, Emoticons, etc.
+            .replace(/[\u{2600}-\u{26FF}]/gu, '')    // Misc symbols
+            .replace(/[\u{2700}-\u{27BF}]/gu, '')    // Dingbats
+            .replace(/[\u{FE00}-\u{FE0F}]/gu, '')    // Variation Selectors
+            .replace(/[\u{1F000}-\u{1F02F}]/gu, '')  // Mahjong, Domino
+            .replace(/[\u{1F0A0}-\u{1F0FF}]/gu, '')  // Playing cards
+            // 텍스트 이모티콘 (❌, ✅, ✓, ✗ 등)
+            .replace(/[❌✅✓✗⭕️⚠️❗️❓]/g, '')
+            // Clean up multiple spaces
+            .replace(/\s{2,}/g, ' ')
+            .trim();
     }
 
     private escapeSsml(text: string): string {
