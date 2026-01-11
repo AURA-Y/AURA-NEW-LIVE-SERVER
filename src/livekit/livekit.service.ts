@@ -407,7 +407,7 @@ export class LivekitService {
     this.logger.log(`[파일 임베딩] roomId: ${roomId}, topic: ${topic}, files: ${files.length}개`);
 
     const result = await this.ragClient.startMeeting(roomId, {
-      room_name: topic,
+      roomTopic: topic,
       description: description || '',
       files,
     });
