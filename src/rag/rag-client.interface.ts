@@ -31,8 +31,9 @@ export interface IRagClient {
 
     /**
      * 발언 전송 (인덱싱)
+     * @param startTime 발언 시작 시간 (밀리초 timestamp, 동시발화 순서 보장용)
      */
-    sendStatement(roomId: string, text: string, speaker: string): Promise<void>;
+    sendStatement(roomId: string, text: string, speaker: string, startTime?: number | null): Promise<void>;
 
     /**
      * 질문 전송 및 응답 대기

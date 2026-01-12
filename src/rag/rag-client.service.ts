@@ -22,6 +22,7 @@ interface PendingStatement {
     speaker: string;
     timestamp: number;
     retryCount: number;
+    startTime?: number | null;  // ★ 발언 시작 시간 (동시발화 순서 보장용)
 }
 
 interface PendingReportRequest {
@@ -271,11 +272,12 @@ export class RagClientService implements OnModuleDestroy {
 
     /**
      * 일반 발언 전송 (statement) - 버퍼링 및 재시도 지원
+     * @param startTime 발언 시작 시간 (밀리초 timestamp, 동시발화 순서 보장용)
      */
-    async sendStatement(roomId: string, text: string, speaker: string, retryCount: number = 0): Promise<void> {
+    async sendStatement(roomId: string, text: string, speaker: string, startTime?: number | null, retryCount: number = 0): Promise<void> {
         // 연결 안 됐으면 버퍼에 저장
         if (!this.isConnected(roomId)) {
-            this.addToStatementBuffer(roomId, text, speaker);
+            this.addToStatementBuffer(roomId, text, speaker, startTime);
             return;
         }
 
@@ -285,6 +287,7 @@ export class RagClientService implements OnModuleDestroy {
             text,
             speaker,
             confidence: 1.0,
+            startTime: startTime ?? Date.now(),  // ★ 발언 시작 시간 (없으면 현재 시간)
         };
 
         try {
@@ -299,12 +302,12 @@ export class RagClientService implements OnModuleDestroy {
                 // 잠시 대기 후 재시도 (exponential backoff)
                 const delay = Math.min(1000 * Math.pow(2, retryCount), 5000);
                 setTimeout(() => {
-                    this.sendStatement(roomId, text, speaker, retryCount + 1);
+                    this.sendStatement(roomId, text, speaker, startTime, retryCount + 1);
                 }, delay);
             } else {
                 // 최대 재시도 초과 시 버퍼에 저장
                 this.logger.warn(`[RAG 발언 재시도 초과] ${roomId} - 버퍼에 저장`);
-                this.addToStatementBuffer(roomId, text, speaker);
+                this.addToStatementBuffer(roomId, text, speaker, startTime);
             }
         }
     }
@@ -312,7 +315,7 @@ export class RagClientService implements OnModuleDestroy {
     /**
      * 발언을 버퍼에 추가
      */
-    private addToStatementBuffer(roomId: string, text: string, speaker: string): void {
+    private addToStatementBuffer(roomId: string, text: string, speaker: string, startTime?: number | null): void {
         let buffer = this.statementBuffers.get(roomId);
         if (!buffer) {
             buffer = [];
@@ -331,6 +334,7 @@ export class RagClientService implements OnModuleDestroy {
             speaker,
             timestamp: Date.now(),
             retryCount: 0,
+            startTime,  // ★ 발언 시작 시간 저장
         });
 
         this.logger.log(`[RAG 버퍼 저장] ${roomId} - 버퍼 크기: ${buffer.length}, 화자: ${speaker}, "${text.substring(0, 30)}..."`);
@@ -370,7 +374,7 @@ export class RagClientService implements OnModuleDestroy {
         // 순차적으로 전송 (순서 보장)
         for (const stmt of validStatements) {
             try {
-                await this.sendStatement(roomId, stmt.text, stmt.speaker, stmt.retryCount);
+                await this.sendStatement(roomId, stmt.text, stmt.speaker, stmt.startTime, stmt.retryCount);
                 // 전송 간 약간의 딜레이 (Rate Limit 방지)
                 await new Promise(resolve => setTimeout(resolve, 100));
             } catch (error: any) {
