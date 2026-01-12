@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -24,6 +24,7 @@ import { IntentClassifierService } from '../intent/intent-classifier.service';
 import { VisionService, VisionContext } from '../vision/vision.service';
 import { AgentRouterService } from '../agent/agent-router.service';
 import { OpinionService } from '../agent/evidence';
+import type { LivekitService } from './livekit.service';
 
 enum BotState {
     SLEEP = 'SLEEP',
@@ -135,6 +136,8 @@ export class VoiceBotService {
         private visionService: VisionService,
         private agentRouter: AgentRouterService,
         private opinionService: OpinionService,
+        @Inject(forwardRef(() => require('./livekit.service').LivekitService))
+        private livekitService: LivekitService,
     ) { }
 
     async startBot(roomId: string, botToken: string): Promise<void> {
@@ -228,8 +231,8 @@ export class VoiceBotService {
                                 .filter(p => !p.identity.startsWith('ai-bot')).length;
 
                             if (currentHumanCount === 0) {
-                                this.logger.log(`[자동 퇴장 실행] 유예 시간 30초 경과`);
-                                this.stopBot(roomId);
+                                this.logger.log(`[자동 퇴장 실행] 유예 시간 30초 경과 - cleanup 포함`);
+                                this.stopBotWithCleanup(roomId);
                             } else {
                                 this.logger.log(`[자동 퇴장 취소] 셧다운 직전 인간 참여자 확인됨`);
                                 currentContext.shutdownTimeout = undefined;
@@ -2200,6 +2203,7 @@ ${edgesDesc}
         this.activeRooms.delete(roomId);
     }
 
+    // 봇만 종료 (요약할 때 사용 - cleanup 안 함)
     async stopBot(roomId: string): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (context) {
@@ -2212,10 +2216,24 @@ ${edgesDesc}
             await context.room.disconnect();
             this.activeRooms.delete(roomId);
             this.logger.log(`[봇 종료] ${roomId}`);
-
-            // REST API 호출하여 Room, RoomReport, File 삭제
-            await this.cleanupRoomInDatabase(roomId);
         }
+    }
+
+    // 봇 종료 + cleanup (참여자 없을 때 자동 종료 시 사용)
+    async stopBotWithCleanup(roomId: string): Promise<void> {
+        await this.stopBot(roomId);
+
+        // LiveKit 룸 삭제
+        try {
+            await this.livekitService.deleteRoom(roomId);
+            this.logger.log(`[LiveKit 룸 삭제 완료] ${roomId}`);
+        } catch (error) {
+            this.logger.error(`[LiveKit 룸 삭제 실패] ${roomId}: ${error.message}`);
+        }
+
+        // REST API 호출하여 Room, RoomReport, File 삭제
+        await this.cleanupRoomInDatabase(roomId);
+        this.logger.log(`[봇 종료 + DB 정리] ${roomId}`);
     }
 
     private async cleanupRoomInDatabase(roomId: string): Promise<void> {
