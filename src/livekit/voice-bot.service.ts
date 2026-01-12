@@ -2212,6 +2212,24 @@ ${edgesDesc}
             await context.room.disconnect();
             this.activeRooms.delete(roomId);
             this.logger.log(`[봇 종료] ${roomId}`);
+
+            // REST API 호출하여 Room, RoomReport, File 삭제
+            await this.cleanupRoomInDatabase(roomId);
+        }
+    }
+
+    private async cleanupRoomInDatabase(roomId: string): Promise<void> {
+        try {
+            const axios = await import('axios');
+            const backendUrl = process.env.BACKEND_API_URL || 'http://backend:3002';
+            const response = await axios.default.post(
+                `${backendUrl}/restapi/internal/room-cleanup`,
+                { roomId },
+                { timeout: 5000 }
+            );
+            this.logger.log(`[DB 정리 완료] roomId: ${roomId}, result: ${JSON.stringify(response.data)}`);
+        } catch (error) {
+            this.logger.error(`[DB 정리 실패] roomId: ${roomId}, error: ${error.message}`);
         }
     }
 
