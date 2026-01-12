@@ -1100,6 +1100,7 @@ ${edgesDesc}
         const PRE_BUFFER_FRAMES = 15;  // ~150ms 선행 저장
         let preBuffer: Buffer[] = [];
         let isRecording = false;  // 실제 녹음 시작 여부
+        let speechStartTime: number | null = null;  // ★ 발언 시작 시간 (동시발화 순서 보장용)
 
         const SILENCE_THRESHOLD = 50;  // 무음 프레임 수 (~500ms)
         const MIN_AUDIO_LENGTH = 16000;  // 최소 0.5초 (16000/32000)
@@ -1211,6 +1212,7 @@ ${edgesDesc}
                 // ★ 음성 시작 시 pre-buffer 포함
                 if (!isRecording && voiceCount >= 2) {
                     isRecording = true;
+                    speechStartTime = Date.now();  // ★ 발언 시작 시간 기록
                     // pre-buffer의 모든 프레임을 audioBuffer 앞에 추가
                     audioBuffer.push(...preBuffer);
                     preBuffer = [];
@@ -1263,10 +1265,14 @@ ${edgesDesc}
                 );
                 const fullDecibel = 20 * Math.log10(fullRms / 32768);
 
+                // ★ 발언 시작 시간 저장 (리셋 전에)
+                const capturedStartTime = speechStartTime;
+
                 audioBuffer = [];
                 silenceCount = 0;
                 voiceCount = 0;
                 isRecording = false;  // ★ 녹음 상태 리셋
+                speechStartTime = null;  // ★ 발언 시작 시간 리셋
                 preBuffer = [];       // ★ pre-buffer도 초기화
 
                 if (fullDecibel > MIN_DECIBEL_THRESHOLD - 5) {
@@ -1282,7 +1288,7 @@ ${edgesDesc}
                     }
                     context.lastSttTimeByUser.set(userId, Date.now());
 
-                    this.processAndRespond(roomId, fullAudio, userId).catch(err => {
+                    this.processAndRespond(roomId, fullAudio, userId, capturedStartTime).catch(err => {
                         this.logger.error(`[처리 에러] ${err.message}`);
                     });
                 }
@@ -1293,8 +1299,9 @@ ${edgesDesc}
     /**
      * 음성 처리 메인 로직
      * STT → RAG 임베딩 → Intent 분석 → (LLM 교정) → 검색/응답 → TTS
+     * @param startTime 발언 시작 시간 (동시발화 순서 보장용)
      */
-    private async processAndRespond(roomId: string, audioBuffer: Buffer, userId: string) {
+    private async processAndRespond(roomId: string, audioBuffer: Buffer, userId: string, startTime: number | null = null) {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
 
@@ -1325,7 +1332,7 @@ ${edgesDesc}
 
         // ★ RAG로 발언 전송 (비동기, 논블로킹 - 회의록/임베딩용)
         // 모든 참가자의 발화를 기록 (봇 응답 여부와 무관)
-        this.sendToRagForEmbedding(roomId, transcript, userId);
+        this.sendToRagForEmbedding(roomId, transcript, userId, startTime);
 
         // ================================================
         // 2. 봇 응답 여부 체크 (여기서부터 isPublishing 보호)
@@ -2634,8 +2641,9 @@ ${firstCode.substring(0, 500)}
      * STT 결과를 RAG 서버로 전송 (임베딩용)
      * - 비동기, 논블로킹 (fire-and-forget)
      * - 짧은 추임새나 무의미한 텍스트는 필터링
+     * @param startTime 발언 시작 시간 (동시발화 순서 보장용)
      */
-    private sendToRagForEmbedding(roomId: string, text: string, speaker: string): void {
+    private sendToRagForEmbedding(roomId: string, text: string, speaker: string, startTime: number | null = null): void {
         // 너무 짧은 텍스트 필터링 (3글자 이하)
         if (text.trim().length <= 3) {
             return;
@@ -2670,7 +2678,7 @@ ${firstCode.substring(0, 500)}
         }
 
         // 비동기로 RAG에 전송 (응답 대기 없음)
-        this.ragClient.sendStatement(roomId, text, speaker)
+        this.ragClient.sendStatement(roomId, text, speaker, startTime)
             .then(() => {
                 this.logger.debug(`[RAG 임베딩] 전송 완료: "${text.substring(0, 30)}..." by ${speaker}`);
             })
