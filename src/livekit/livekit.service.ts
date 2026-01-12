@@ -1,4 +1,4 @@
-import { Injectable, Logger, forwardRef, Inject } from '@nestjs/common';
+import { Injectable, Logger, forwardRef, Inject, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   AccessToken,
@@ -191,6 +191,13 @@ export class LivekitService {
         throw new Error('Room not found');
       }
 
+      // 참여자가 없는 방은 종료된 것으로 간주하고 입장 차단
+      const participantCount = room.numParticipants ?? 0;
+      if (participantCount <= 0) {
+        this.logger.warn(`Join blocked - room has no active participants: ${roomId}`);
+        throw new HttpException('참여자가 없어 종료된 회의입니다.', HttpStatus.GONE);
+      }
+
       this.logger.log(`Joining room via LiveKit: ${this.livekitUrl}`);
       await this.ensureAgentDispatch(roomId);
       this.logger.log(`Generating ${isBot ? 'BOT ' : ''}token for room: ${roomId}`);
@@ -202,11 +209,20 @@ export class LivekitService {
         url: wsUrl,
       };
     } catch (error) {
-      this.logger.error(`Join failed: ${error.message}`);
-      if (error.cause) {
-        this.logger.error(`Join cause: ${error.cause}`);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Join failed: ${message}`);
+      if ((error as any)?.cause) {
+        this.logger.error(`Join cause: ${(error as any).cause}`);
       }
-      throw new Error(`Failed to join room: ${error.message}`);
+
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      throw new HttpException(
+        `Failed to join room: ${message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
