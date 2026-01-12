@@ -1,10 +1,9 @@
-import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
-import { RagGrpcClientService } from './rag-grpc-client.service';
+// import { Module } from '@nestjs/common';
+// import { ConfigModule } from '@nestjs/config';
 
-@Module({
-    imports: [ConfigModule],
-    providers: [RagGrpcClientService],
-    exports: [RagGrpcClientService],
-})
-export class GrpcModule {}
+// @Module({
+//     imports: [ConfigModule],
+//     providers: [RagGrpcClientService],
+//     exports: [RagGrpcClientService],
+// })
+// export class GrpcModule {}
