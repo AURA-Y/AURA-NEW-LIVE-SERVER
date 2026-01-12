@@ -10,6 +10,10 @@ build/
 .env.local
 .env.*.local
 
+# Google Service Account (sensitive)
+google-service-account.json
+*-service-account.json
+
 # Logs
 *.log
 npm-debug.log*
