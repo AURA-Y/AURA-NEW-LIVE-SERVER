@@ -8,6 +8,10 @@
       {
         "include": "**/*.proto",
         "outDir": "dist"
+      },
+      {
+        "include": "llm/google-service-account.json",
+        "outDir": "dist"
       }
     ]
   }

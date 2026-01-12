@@ -24,6 +24,7 @@
     "axios": "^1.13.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.3",
+    "googleapis": "^170.0.0",
     "livekit-server-sdk": "^2.0.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.38.0",
     "reflect-metadata": "^0.1.13",

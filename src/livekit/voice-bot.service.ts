@@ -1359,7 +1359,7 @@ ${edgesDesc}
         if (!context.isVisionMode) {
             context.currentRequestId = requestId;
         }
-        const startTime = Date.now();
+        const responseStartTime = Date.now();
 
         this.logger.log(`\n========== [봇 응답 처리] ${userId} ==========`);
 
@@ -1788,7 +1788,7 @@ ${edgesDesc}
                 context.activeUserId = null;
                 context.lastResponseTime = Date.now();
 
-                this.logger.log(`========== [완료] 총 ${Date.now() - startTime}ms ==========\n`);
+                this.logger.log(`========== [완료] 총 ${Date.now() - responseStartTime}ms ==========\n`);
             }
 
         } catch (error) {

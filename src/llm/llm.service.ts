@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
+import { Injectable, Logger, Inject, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
     BedrockRuntimeClient,
@@ -7,9 +7,10 @@ import {
 import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { SearchService, SearchResult, SearchType } from './search.service';
 import { MapService } from './map.service';
+import { google, calendar_v3 } from 'googleapis';
 
 @Injectable()
-export class LlmService {
+export class LlmService implements OnModuleInit {
     private readonly logger = new Logger(LlmService.name);
     private bedrockClient: BedrockRuntimeClient;
     private readonly modelId = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
@@ -26,6 +27,28 @@ export class LlmService {
     private pureRequestQueue: Promise<any> = Promise.resolve();
     private readonly PURE_MIN_INTERVAL = 300; // 0.3초로 단축 (병렬 처리 허용)
     private readonly PURE_MAX_RETRIES = 2;
+
+    // Google Calendar
+    private calendar: calendar_v3.Calendar;
+    private readonly CALENDAR_ID: string;
+
+    // 캘린더 의도 패턴
+    private readonly CALENDAR_PATTERNS = [
+        /일정.*(?:잡아|추가|등록|넣어)/,
+        /(?:잡아|추가|등록|넣어).*일정/,
+        /캘린더.*(?:추가|등록|넣어)/,
+        /약속.*(?:잡아|추가)/,
+        /(\d+)월\s*(\d+)일.*(?:잡아|추가|등록|회의|미팅)/,
+        /(?:내일|모레|다음주).*(?:잡아|추가|등록|회의|미팅)/,
+    ];
+
+    // 상대 날짜
+    private readonly RELATIVE_DATES: Record<string, number> = {
+        '오늘': 0,
+        '내일': 1,
+        '모레': 2,
+        '글피': 3,
+    };
 
     constructor(
         private configService: ConfigService,
@@ -45,6 +68,35 @@ export class LlmService {
                 secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY'),
             },
         });
+
+        // Calendar ID 환경변수에서 로드
+        this.CALENDAR_ID = this.configService.get<string>('GOOGLE_CALENDAR_ID') ||
+            'd4faa91b83282cf8b377bb5ca7f586cd83959897fa544b3133f8e39c9cf42443@group.calendar.google.com';
+    }
+
+    onModuleInit() {
+        // Google Calendar 초기화
+        const privateKey = this.configService.get<string>('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY');
+        const serviceAccountEmail = 'aura-29@bamboo-climate-384705.iam.gserviceaccount.com';
+
+        if (!privateKey) {
+            this.logger.warn('[Calendar] GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY is not set');
+            return;
+        }
+
+        try {
+            const auth = new google.auth.JWT({
+                email: serviceAccountEmail,
+                // 환경변수에서 \n이 문자열로 들어오면 실제 줄바꿈으로 변환
+                key: privateKey.replace(/\\n/g, '\n'),
+                scopes: ['https://www.googleapis.com/auth/calendar'],
+            });
+
+            this.calendar = google.calendar({ version: 'v3', auth });
+            this.logger.log('[Calendar] Google Calendar service initialized (Service Account)');
+        } catch (error) {
+            this.logger.warn(`[Calendar] Failed to initialize: ${error.message}`);
+        }
     }
 
     // ============================================================
@@ -56,7 +108,13 @@ export class LlmService {
         searchDomain?: 'weather' | 'naver' | null,
         roomId?: string
     ): Promise<{ text: string; searchResults?: SearchResult[] }> {
-        // 회의록 관련 질문이고 roomId가 있으면 RAG 서버에 질문
+        // 1. 캘린더 의도 체크 (최우선)
+        if (this.isCalendarIntent(userMessage)) {
+            const calendarResult = await this.handleCalendarRequest(userMessage);
+            return { text: calendarResult };
+        }
+
+        // 2. 회의록 관련 질문이고 roomId가 있으면 RAG 서버에 질문
         const meetingKeywords = [
             '회의', '미팅', '액션', '액션아이템', '할 일', '할일', 'todo', 'action',
             '결정', '논의', '안건', '발언', '누가', '언제', '요약', '정리',
@@ -794,5 +852,200 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
 
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // ============================================================
+    // Calendar Functions
+    // ============================================================
+
+    /**
+     * 캘린더 관련 의도인지 확인
+     */
+    private isCalendarIntent(text: string): boolean {
+        for (const pattern of this.CALENDAR_PATTERNS) {
+            if (pattern.test(text)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 텍스트에서 날짜 추출 (YYYY-MM-DD 형식)
+     */
+    private extractDate(text: string): string | null {
+        const today = new Date();
+
+        // 상대 날짜 확인
+        for (const [keyword, days] of Object.entries(this.RELATIVE_DATES)) {
+            if (text.includes(keyword)) {
+                const target = new Date(today);
+                target.setDate(target.getDate() + days);
+                return this.formatDate(target);
+            }
+        }
+
+        // 다음주 처리
+        if (text.includes('다음주') || text.includes('다음 주')) {
+            const daysUntilMonday = (7 - today.getDay()) % 7 + 7;
+            const target = new Date(today);
+            target.setDate(target.getDate() + daysUntilMonday);
+            return this.formatDate(target);
+        }
+
+        // YYYY년 MM월 DD일
+        let match = text.match(/(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일/);
+        if (match) {
+            return `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+        }
+
+        // MM월 DD일 (올해로 가정)
+        match = text.match(/(\d{1,2})월\s*(\d{1,2})일/);
+        if (match) {
+            const month = parseInt(match[1]);
+            const day = parseInt(match[2]);
+            let year = today.getFullYear();
+            const target = new Date(year, month - 1, day);
+            if (target < today) {
+                year += 1;
+            }
+            return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+        }
+
+        return null;
+    }
+
+    /**
+     * 텍스트에서 시간 추출 (HH:mm 형식)
+     */
+    private extractTime(text: string): string | null {
+        // 오후 X시 Y분
+        let match = text.match(/오후\s*(\d{1,2})시\s*(\d{1,2})?분?/);
+        if (match) {
+            let hour = parseInt(match[1]);
+            if (hour < 12) hour += 12;
+            const minute = match[2] ? parseInt(match[2]) : 0;
+            return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+        }
+
+        // 오전 X시 Y분
+        match = text.match(/오전\s*(\d{1,2})시\s*(\d{1,2})?분?/);
+        if (match) {
+            const hour = parseInt(match[1]);
+            const minute = match[2] ? parseInt(match[2]) : 0;
+            return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+        }
+
+        // X시 Y분
+        match = text.match(/(\d{1,2})시\s*(\d{1,2})?분?/);
+        if (match) {
+            const hour = parseInt(match[1]);
+            const minute = match[2] ? parseInt(match[2]) : 0;
+            return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+        }
+
+        // HH:mm
+        match = text.match(/(\d{1,2}):(\d{2})/);
+        if (match) {
+            return `${match[1].padStart(2, '0')}:${match[2]}`;
+        }
+
+        return null;
+    }
+
+    /**
+     * 텍스트에서 일정 제목 추출
+     */
+    private extractTitle(text: string): string {
+        let cleaned = text;
+
+        // 날짜 관련 제거
+        cleaned = cleaned.replace(/\d{4}년\s*/g, '');
+        cleaned = cleaned.replace(/\d{1,2}월\s*\d{1,2}일/g, '');
+        cleaned = cleaned.replace(/오늘|내일|모레|다음주|다음 주/g, '');
+
+        // 시간 관련 제거
+        cleaned = cleaned.replace(/오전\s*\d{1,2}시\s*\d*분?/g, '');
+        cleaned = cleaned.replace(/오후\s*\d{1,2}시\s*\d*분?/g, '');
+        cleaned = cleaned.replace(/\d{1,2}시\s*\d*분?/g, '');
+        cleaned = cleaned.replace(/\d{1,2}:\d{2}/g, '');
+
+        // 액션 키워드 제거
+        cleaned = cleaned.replace(/일정\s*(?:잡아|추가|등록|넣어)(?:줘|줄래|줄 수 있어)?/g, '');
+        cleaned = cleaned.replace(/캘린더에?\s*(?:추가|등록|넣어)(?:줘)?/g, '');
+        cleaned = cleaned.replace(/(?:잡아|추가|등록|넣어)(?:줘)?/g, '');
+        cleaned = cleaned.replace(/에\s*$/g, '');
+
+        // 웨이크워드 제거
+        cleaned = cleaned.replace(/아우라야?|헤이\s*아우라/g, '');
+
+        cleaned = cleaned.trim();
+        return cleaned || '회의';
+    }
+
+    private formatDate(date: Date): string {
+        const year = date.getFullYear();
+        const month = (date.getMonth() + 1).toString().padStart(2, '0');
+        const day = date.getDate().toString().padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    /**
+     * 캘린더 요청 처리
+     */
+    private async handleCalendarRequest(text: string): Promise<string> {
+        if (!this.calendar) {
+            return '캘린더 서비스가 초기화되지 않았습니다.';
+        }
+
+        const date = this.extractDate(text);
+        if (!date) {
+            return '날짜를 인식하지 못했습니다. "1월 15일" 또는 "내일" 같은 형식으로 말씀해주세요.';
+        }
+
+        const time = this.extractTime(text);
+        const title = this.extractTitle(text);
+
+        this.logger.log(`[Calendar] 일정 추가: ${title} on ${date} ${time || '종일'}`);
+
+        try {
+            let start: calendar_v3.Schema$EventDateTime;
+            let end: calendar_v3.Schema$EventDateTime;
+
+            if (time) {
+                const startDateTime = `${date}T${time}:00`;
+                const endDate = new Date(`${date}T${time}:00`);
+                endDate.setMinutes(endDate.getMinutes() + 60); // 기본 1시간
+
+                start = { dateTime: startDateTime, timeZone: 'Asia/Seoul' };
+                end = { dateTime: endDate.toISOString().slice(0, 19), timeZone: 'Asia/Seoul' };
+            } else {
+                start = { date };
+                end = { date };
+            }
+
+            const response = await this.calendar.events.insert({
+                calendarId: this.CALENDAR_ID,
+                requestBody: {
+                    summary: title,
+                    description: 'AURA 회의 중 생성됨',
+                    start,
+                    end,
+                },
+            });
+
+            this.logger.log(`[Calendar] Event created: ${response.data.id}`);
+
+            // 날짜 포맷팅 (음성용)
+            const dateMatch = date.match(/(\d{4})-(\d{2})-(\d{2})/);
+            const dateStr = dateMatch ? `${parseInt(dateMatch[2])}월 ${parseInt(dateMatch[3])}일` : date;
+            const timeStr = time ? ` ${time}` : '';
+
+            return `네, "${title}" 일정을 ${dateStr}${timeStr}에 추가했습니다.`;
+
+        } catch (error) {
+            this.logger.error(`[Calendar] Failed to add event: ${error.message}`);
+            return `일정 추가에 실패했습니다: ${error.message}`;
+        }
     }
 }
