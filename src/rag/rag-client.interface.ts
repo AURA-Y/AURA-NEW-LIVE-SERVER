@@ -71,6 +71,16 @@ export interface IRagClient {
      */
     requestReport(roomId: string): Promise<{ success: boolean; message?: string }>;
 
+    /**
+     * URL 문서 로드 및 임베딩
+     */
+    loadUrl(roomId: string, url: string, title?: string): Promise<{ success: boolean; message?: string }>;
+
+    /**
+     * 텍스트 문서 로드 및 임베딩 (이전 회의록 등)
+     */
+    loadDocument(roomId: string, content: string, source: string, docType?: string): Promise<{ success: boolean; message?: string }>;
+
     // ============================================================
     // 시연용 목업 데이터 메서드
     // ============================================================

@@ -138,6 +138,71 @@ export class LivekitController {
     }
   }
 
+  @Post('embed-urls')
+  async embedUrls(@Body() body: { roomId: string; urls: string[] }) {
+    const { roomId, urls } = body;
+
+    if (!roomId || !urls || urls.length === 0) {
+      throw new HttpException('roomId와 urls 배열이 필요합니다.', HttpStatus.BAD_REQUEST);
+    }
+
+    console.log(`[URL 임베딩] roomId: ${roomId}, urls: ${urls.length}개`);
+
+    try {
+      const results = await Promise.all(
+        urls.map(url => this.ragClient.loadUrl(roomId, url))
+      );
+
+      const successCount = results.filter(r => r.success).length;
+      return {
+        success: successCount > 0,
+        roomId,
+        message: `${successCount}/${urls.length}개 URL 임베딩 요청 완료`,
+        urls,
+      };
+    } catch (error) {
+      throw new HttpException(`URL 임베딩 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post('embed-documents')
+  async embedDocuments(@Body() body: {
+    roomId: string;
+    documents: Array<{
+      content: string;
+      source: string;
+      docType?: string;
+    }>;
+  }) {
+    const { roomId, documents } = body;
+
+    if (!roomId || !documents || documents.length === 0) {
+      throw new HttpException('roomId와 documents 배열이 필요합니다.', HttpStatus.BAD_REQUEST);
+    }
+
+    console.log(`[문서 임베딩] roomId: ${roomId}, documents: ${documents.length}개`);
+
+    try {
+      const results = await Promise.all(
+        documents.map(doc =>
+          this.ragClient.loadDocument(roomId, doc.content, doc.source, doc.docType || 'previous_meeting')
+        )
+      );
+
+      const successCount = results.filter(r => r.success).length;
+      console.log(`[문서 임베딩 완료] ${successCount}/${documents.length}개 성공`);
+
+      return {
+        success: successCount > 0,
+        roomId,
+        message: `${successCount}/${documents.length}개 문서 임베딩 요청 완료`,
+        documentCount: documents.length,
+      };
+    } catch (error) {
+      throw new HttpException(`문서 임베딩 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   // ============================================================
   // 시연용 목업 데이터 엔드포인트 (/:roomId 와일드카드보다 먼저 정의)
   // ============================================================

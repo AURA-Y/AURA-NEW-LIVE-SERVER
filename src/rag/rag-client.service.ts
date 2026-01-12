@@ -771,4 +771,57 @@ export class RagClientService implements OnModuleDestroy {
         this.statementBuffers.delete(roomId);
         this.logger.log(`[버퍼 초기화] ${roomId}`);
     }
+
+    /**
+     * URL 문서 로드 및 임베딩 (HTTP POST)
+     * POST /documents/load-url
+     */
+    async loadUrl(roomId: string, url: string, title?: string): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/documents/load-url`;
+
+        this.logger.log(`[RAG URL 로드] POST ${endpoint} - roomId: ${roomId}, url: ${url}`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint, {
+                roomId,
+                url,
+                title: title || '',
+            });
+            this.logger.log(`[RAG URL 로드 성공] ${roomId} - ${url}`);
+            return { success: true, message: response.data?.message || 'URL 임베딩 요청 완료' };
+        } catch (error: any) {
+            this.logger.error(`[RAG URL 로드 실패] ${roomId}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
+
+    /**
+     * 텍스트 문서 로드 및 임베딩 (HTTP POST)
+     * POST /documents/load
+     * 이전 회의록 등 텍스트 문서를 임베딩할 때 사용
+     */
+    async loadDocument(roomId: string, content: string, source: string, docType: string = 'previous_meeting'): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/documents/load`;
+
+        this.logger.log(`[RAG 문서 로드] POST ${endpoint} - roomId: ${roomId}, source: ${source}, docType: ${docType}`);
+        this.logger.log(`[RAG 문서 로드] 내용 길이: ${content.length}자`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint, {
+                roomId,
+                content,
+                source,
+                docType,
+            });
+            this.logger.log(`[RAG 문서 로드 성공] ${roomId} - ${source}`);
+            return { success: true, message: response.data?.message || '문서 임베딩 요청 완료' };
+        } catch (error: any) {
+            this.logger.error(`[RAG 문서 로드 실패] ${roomId}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
 }
