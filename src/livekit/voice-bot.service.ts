@@ -403,6 +403,15 @@ export class VoiceBotService {
                         // 자동 설명 실행
                         this.explainGeneratedDiagrams(roomId, message.types, message.mermaidCodes || {});
                     }
+                } else if (message.type === 'PDF_QUESTION') {
+                    // PDF 텍스트 선택 후 AI 질문
+                    this.logger.log(`[PDF 질문] 수신 - question: "${message.question?.substring(0, 50)}...", context: ${message.context}`);
+                    this.handlePdfQuestion(
+                        roomId,
+                        message.question || '',
+                        message.context || '',
+                        participant?.identity || 'unknown'
+                    );
                 }
             } catch (error) {
                 // JSON 파싱 실패는 무시 (다른 메시지일 수 있음)
@@ -759,6 +768,91 @@ ${processedContent}
                 edges: [],
                 error: error.message,
             };
+        }
+    }
+
+    /**
+     * PDF 텍스트 선택 후 AI 질문 처리
+     */
+    private async handlePdfQuestion(
+        roomId: string,
+        question: string,
+        pdfContext: string,
+        requesterId: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        this.logger.log(`[PDF 질문] 처리 시작 from ${requesterId}: "${question.substring(0, 50)}..."`);
+
+        try {
+            // RAG 컨텍스트 조회 시도
+            let ragContext = '';
+            try {
+                if (this.ragClient.isConnected(roomId)) {
+                    const ragResult = await this.ragClient.sendQuestionWithSources(roomId, question);
+                    if (ragResult && ragResult.sources && ragResult.sources.length > 0) {
+                        ragContext = ragResult.sources.map((s) => `[${s.speaker || '발언자'}] ${s.text}`).join('\n\n');
+                        this.logger.log(`[PDF 질문] RAG 컨텍스트 ${ragResult.sources.length}개 조회됨`);
+                    }
+                }
+            } catch (ragError) {
+                this.logger.warn(`[PDF 질문] RAG 조회 실패: ${ragError.message}`);
+            }
+
+            // LLM에 질문 (PDF 컨텍스트 + RAG 컨텍스트 포함)
+            const fullContext = `
+=== PDF 선택 텍스트 ===
+${question}
+
+=== PDF 정보 ===
+${pdfContext}
+
+${ragContext ? `=== 관련 문서 내용 ===\n${ragContext}` : ''}
+`.trim();
+
+            const response = await this.llmService.answerWithContext(
+                `다음 PDF에서 선택한 텍스트에 대해 설명해주세요:\n\n"${question}"`,
+                fullContext,
+                'PDF 문서'
+            );
+
+            // DataChannel로 응답 전송 (search_answer 형식 사용)
+            const searchMessage = {
+                type: 'search_answer',
+                text: response,
+                category: 'PDF 분석',
+                minutes: [],
+                results: [],
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(searchMessage)),
+                { reliable: true }
+            );
+
+            this.logger.log(`[PDF 질문] 응답 전송 완료: ${response.substring(0, 50)}...`);
+
+            // TTS 읽기 비활성화 - 인라인 텍스트로만 표시
+
+        } catch (error) {
+            this.logger.error(`[PDF 질문] 처리 실패: ${error.message}`);
+
+            // 에러 응답 전송
+            const errorMessage = {
+                type: 'search_answer',
+                text: 'PDF 질문을 처리하는 중 오류가 발생했습니다. 다시 시도해주세요.',
+                category: 'PDF 분석',
+                minutes: [],
+                results: [],
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(errorMessage)),
+                { reliable: true }
+            );
         }
     }
 
@@ -1774,6 +1868,34 @@ ${edgesDesc}
                         { reliable: true }
                     );
                     this.logger.log(`[DataChannel] 검색 결과 전송 (${llmResult.searchResults.length}개)`);
+                }
+
+                // ============================================
+                // 10-1. DataChannel 전송 (RAG 문서 출처 → AI 문서 패널)
+                // ============================================
+                if (llmResult.ragSources && llmResult.ragSources.length > 0) {
+                    const documentMessage = {
+                        type: 'AI_DOCUMENT_SHOW',
+                        keyword: processedText.substring(0, 30),
+                        documents: llmResult.ragSources.map((source, idx) => ({
+                            id: `doc-${Date.now()}-${idx}`,
+                            pageNumber: idx + 1,
+                            content: source.text,
+                            sourceFile: source.speaker ? `${source.speaker}의 발언` : '회의 기록',
+                            relevance: `"${processedText.substring(0, 20)}..." 질문에 대한 관련 내용`,
+                            highlights: [{
+                                text: source.text.substring(0, 200),
+                                color: '#fef08a'
+                            }]
+                        }))
+                    };
+
+                    const encoder = new TextEncoder();
+                    await context.room.localParticipant.publishData(
+                        encoder.encode(JSON.stringify(documentMessage)),
+                        { reliable: true }
+                    );
+                    this.logger.log(`[DataChannel] AI 문서 패널 전송 (${llmResult.ragSources.length}개 출처)`);
                 }
 
                 // ============================================

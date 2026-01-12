@@ -107,21 +107,39 @@ export class LlmService implements OnModuleInit {
         userMessage: string,
         searchDomain?: 'weather' | 'naver' | null,
         roomId?: string
-    ): Promise<{ text: string; searchResults?: SearchResult[] }> {
+    ): Promise<{ text: string; searchResults?: SearchResult[]; ragSources?: Array<{ text: string; speaker?: string }> }> {
         // 1. 캘린더 의도 체크 (최우선)
         if (this.isCalendarIntent(userMessage)) {
             const calendarResult = await this.handleCalendarRequest(userMessage);
             return { text: calendarResult };
         }
 
-        // 2. 회의록 관련 질문이고 roomId가 있으면 RAG 서버에 질문
-        const meetingKeywords = [
+        // 2. 회의록/문서 관련 질문이고 roomId가 있으면 RAG 서버에 질문
+        // - 회의 관련 키워드
+        // - 문서/자료/학습 관련 키워드
+        // - 질문형 키워드 (문서에서 답변을 찾을 수 있는 질문)
+        const ragKeywords = [
+            // 회의 관련
             '회의', '미팅', '액션', '액션아이템', '할 일', '할일', 'todo', 'action',
             '결정', '논의', '안건', '발언', '누가', '언제', '요약', '정리',
+            // 문서/자료 관련
+            '문서', '자료', '페이지', '챕터', '장', '절', '내용', '설명',
+            // 학습/개념 관련
+            '개념', '정의', '뭐야', '뭔가요', '무엇', '어떻게', '왜', '이유',
+            '알려줘', '설명해', '가르쳐', '이해', '학습',
+            // CS/기술 관련 (CSAPP 등)
+            '메모리', '가상', '프로세스', '페이지', '주소', '캐시', '스택', '힙',
+            '포인터', '변수', '함수', '코드', '컴파일', '링커', '로더',
         ];
-        const isMeetingQuery = meetingKeywords.some(kw => userMessage.toLowerCase().includes(kw));
-        
-        if (isMeetingQuery && roomId) {
+        const isRagQuery = ragKeywords.some(kw => userMessage.toLowerCase().includes(kw));
+
+        // roomId가 있고 (RAG 키워드가 있거나 질문형 문장이면) RAG 시도
+        const isQuestionForm = userMessage.includes('?') ||
+                               userMessage.endsWith('요') ||
+                               userMessage.endsWith('까') ||
+                               userMessage.endsWith('줘');
+
+        if (roomId && (isRagQuery || isQuestionForm)) {
             const resolvedRoomId = await this.getRoomIdByTopic(roomId);
     
             try {
@@ -134,16 +152,24 @@ export class LlmService implements OnModuleInit {
                     }
                 }
 
-                if (!this.ragClient.isConnected(resolvedRoomId)) {
-                    this.logger.warn(`[RAG] 연결되지 않음: ${resolvedRoomId}`);
-                    return { text: '회의록 기능을 사용할 수 없습니다.' };
+                if (this.ragClient.isConnected(resolvedRoomId)) {
+                    this.logger.log(`[RAG 질문+출처] Room: ${resolvedRoomId}, 질문: "${userMessage}"`);
+
+                    // sources 포함해서 질문 (문서 패널 표시용)
+                    const ragResponse = await this.ragClient.sendQuestionWithSources(resolvedRoomId, userMessage);
+                    this.logger.log(`[RAG 응답] 답변: ${ragResponse.answer.substring(0, 50)}..., 출처: ${ragResponse.sources.length}개`);
+
+                    return {
+                        text: ragResponse.answer,
+                        ragSources: ragResponse.sources
+                    };
+                } else {
+                    this.logger.warn(`[RAG] 연결되지 않음: ${resolvedRoomId} - 일반 LLM으로 대체`);
+                    // RAG 연결 실패 시 아래 일반 LLM 로직으로 계속 진행
                 }
-                this.logger.log(`[RAG 질문] Room: ${resolvedRoomId}, 질문: "${userMessage}"`);
-                const ragAnswer = await this.ragClient.sendQuestion(resolvedRoomId, userMessage);
-                return { text: ragAnswer };
             } catch (error) {
-                this.logger.error(`[RAG 에러] ${error.message}`);
-                return { text: '회의록을 조회하는 중 오류가 발생했습니다.' };
+                this.logger.error(`[RAG 에러] ${error.message} - 일반 LLM으로 대체`);
+                // RAG 에러 시 아래 일반 LLM 로직으로 계속 진행
             }
         }
 
