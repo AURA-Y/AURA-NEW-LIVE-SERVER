@@ -24,6 +24,7 @@ import { IntentClassifierService } from '../intent/intent-classifier.service';
 import { VisionService, VisionContext } from '../vision/vision.service';
 import { AgentRouterService } from '../agent/agent-router.service';
 import { OpinionService } from '../agent/evidence';
+import { PerplexityService, PerplexityMessage } from '../perplexity';
 import type { LivekitService } from './livekit.service';
 
 enum BotState {
@@ -110,6 +111,10 @@ interface RoomContext {
 
     // 클라이언트 준비 대기 (인삿말 타이밍 제어)
     greetingDone: boolean;
+    // Perplexity 모드 (WFC 기반 흐름 제어)
+    perplexityModeActive: boolean;
+    // isPublishing 시작 시간 (타임아웃 감지용)
+    publishingStartTime: number;
 }
 
 @Injectable()
@@ -136,6 +141,7 @@ export class VoiceBotService {
         private visionService: VisionService,
         private agentRouter: AgentRouterService,
         private opinionService: OpinionService,
+        private perplexityService: PerplexityService,
         @Inject(forwardRef(() => require('./livekit.service').LivekitService))
         private livekitService: LivekitService,
     ) { }
@@ -406,6 +412,85 @@ export class VoiceBotService {
                         // 자동 설명 실행
                         this.explainGeneratedDiagrams(roomId, message.types, message.mermaidCodes || {});
                     }
+                } else if (message.type === 'PDF_QUESTION') {
+                    // PDF 텍스트 선택 후 AI 질문
+                    this.logger.log(`[PDF 질문] 수신 - question: "${message.question?.substring(0, 50)}...", context: ${message.context}`);
+                    this.handlePdfQuestion(
+                        roomId,
+                        message.question || '',
+                        message.context || '',
+                        participant?.identity || 'unknown'
+                    );
+                } else if (message.type === 'BOARD_TRANSFORM_REQUEST') {
+                    // 공유 보드 스케치 → 다이어그램 변환 요청
+                    this.logger.log(`[공유 보드 변환] 요청 수신 - 이미지 크기: ${(message.imageBase64?.length / 1024).toFixed(1)}KB`);
+                    this.handleBoardTransform(
+                        roomId,
+                        message.imageBase64 || '',
+                        participant?.identity || 'unknown'
+                    );
+                } else if (message.type === 'QUIZ_GENERATE_REQUEST') {
+                    // 스터디 퀴즈 생성 요청
+                    this.logger.log(`[스터디 퀴즈] 생성 요청 - 문제수: ${message.questionCount}, 유형: ${message.quizType}, QA히스토리: ${message.qaHistory?.length || 0}개`);
+                    this.handleQuizGenerate(
+                        roomId,
+                        message.questionCount || 5,
+                        message.quizType || 'mixed',
+                        message.qaHistory || [],
+                        participant?.identity || 'unknown'
+                    );
+                } else if (message.type === 'QUIZ_EVALUATE_REQUEST') {
+                    // 퀴즈 답변 평가 요청
+                    this.logger.log(`[스터디 퀴즈] 평가 요청 - 답변: "${message.userAnswer?.substring(0, 30)}..."`);
+                    this.handleQuizEvaluate(
+                        roomId,
+                        message.question,
+                        message.userAnswer || '',
+                        participant?.identity || 'unknown'
+                    );
+                }
+                // ============================================================
+                // Perplexity 모드 (WFC 기반 흐름 제어)
+                // ============================================================
+                else if (message.type === 'PERPLEXITY_START') {
+                    if (context.perplexityModeActive) {
+                        this.logger.debug(`[Perplexity] START 무시 (이미 ON)`);
+                        return;
+                    }
+                    context.perplexityModeActive = true;
+                    this.perplexityService.startSession(roomId);
+
+                    // 참여자 추가 (remoteParticipants + 메시지 발신자)
+                    const addedParticipants: string[] = [];
+                    room.remoteParticipants.forEach((p) => {
+                        if (!p.identity.includes('bot') && !p.identity.includes('agent')) {
+                            this.perplexityService.addParticipant(roomId, p.identity, p.name || p.identity);
+                            addedParticipants.push(p.identity);
+                        }
+                    });
+
+                    // 메시지 발신자도 추가 (중복 방지)
+                    if (participant && !addedParticipants.includes(participant.identity)) {
+                        if (!participant.identity.includes('bot') && !participant.identity.includes('agent')) {
+                            this.perplexityService.addParticipant(roomId, participant.identity, participant.name || participant.identity);
+                            addedParticipants.push(participant.identity);
+                        }
+                    }
+
+                    this.logger.log(`[Perplexity] 모드 ON by ${participant?.identity || 'unknown'} - 참여자: ${addedParticipants.join(', ')}`);
+                } else if (message.type === 'PERPLEXITY_END') {
+                    if (!context.perplexityModeActive) {
+                        this.logger.debug(`[Perplexity] END 무시 (이미 OFF)`);
+                        return;
+                    }
+                    context.perplexityModeActive = false;
+                    this.perplexityService.endSession(roomId);
+                    this.logger.log(`[Perplexity] 모드 OFF`);
+                } else if (message.type === 'ENTROPY_REPORT' || message.type === 'STATE_UPDATE') {
+                    // Perplexity 상태 업데이트 처리
+                    if (!context.perplexityModeActive) return;
+
+                    this.handlePerplexityMessage(roomId, message as PerplexityMessage, participant?.identity);
                 }
             } catch (error) {
                 // JSON 파싱 실패는 무시 (다른 메시지일 수 있음)
@@ -469,6 +554,10 @@ export class VoiceBotService {
                 designModeOpenTime: 0,
                 // 인삿말 대기 (클라이언트 준비 완료 후 시작)
                 greetingDone: false,
+                // Perplexity 모드 초기화
+                perplexityModeActive: false,
+                // isPublishing 타임아웃 감지용
+                publishingStartTime: 0,
             };
             this.activeRooms.set(roomId, context);
 
@@ -762,6 +851,565 @@ ${processedContent}
                 edges: [],
                 error: error.message,
             };
+        }
+    }
+
+    /**
+     * PDF 텍스트 선택 후 AI 질문 처리
+     */
+    private async handlePdfQuestion(
+        roomId: string,
+        question: string,
+        pdfContext: string,
+        requesterId: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        this.logger.log(`[PDF 질문] 처리 시작 from ${requesterId}: "${question.substring(0, 50)}..."`);
+
+        try {
+            // RAG 컨텍스트 조회 시도
+            let ragContext = '';
+            try {
+                if (this.ragClient.isConnected(roomId)) {
+                    const ragResult = await this.ragClient.sendQuestionWithSources(roomId, question);
+                    if (ragResult && ragResult.sources && ragResult.sources.length > 0) {
+                        ragContext = ragResult.sources.map((s) => `[${s.speaker || '발언자'}] ${s.text}`).join('\n\n');
+                        this.logger.log(`[PDF 질문] RAG 컨텍스트 ${ragResult.sources.length}개 조회됨`);
+                    }
+                }
+            } catch (ragError) {
+                this.logger.warn(`[PDF 질문] RAG 조회 실패: ${ragError.message}`);
+            }
+
+            // LLM에 질문 (PDF 컨텍스트 + RAG 컨텍스트 포함)
+            const fullContext = `
+=== PDF 선택 텍스트 ===
+${question}
+
+=== PDF 정보 ===
+${pdfContext}
+
+${ragContext ? `=== 관련 문서 내용 ===\n${ragContext}` : ''}
+`.trim();
+
+            const response = await this.llmService.answerWithContext(
+                `다음 PDF에서 선택한 텍스트에 대해 설명해주세요:\n\n"${question}"`,
+                fullContext,
+                'PDF 문서'
+            );
+
+            // DataChannel로 응답 전송 (search_answer 형식 사용)
+            const searchMessage = {
+                type: 'search_answer',
+                text: response,
+                category: 'PDF 분석',
+                minutes: [],
+                results: [],
+            };
+
+            const encoder = new TextEncoder();
+            // 질문한 사람에게만 응답 전송 (개인 학습용 - 방 전체 브로드캐스트 X)
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(searchMessage)),
+                { reliable: true, destination_identities: [requesterId] }
+            );
+
+            this.logger.log(`[PDF 질문] 응답 전송 완료 (to: ${requesterId}): ${response.substring(0, 50)}...`);
+
+            // TTS 읽기 비활성화 - 인라인 텍스트로만 표시
+
+        } catch (error) {
+            this.logger.error(`[PDF 질문] 처리 실패: ${error.message}`);
+
+            // 에러 응답 전송 (질문한 사람에게만) - 연결 끊김 방어
+            try {
+                if (context.room?.localParticipant) {
+                    const errorMessage = {
+                        type: 'search_answer',
+                        text: 'PDF 질문을 처리하는 중 오류가 발생했습니다. 다시 시도해주세요.',
+                        category: 'PDF 분석',
+                        minutes: [],
+                        results: [],
+                    };
+
+                    const encoder = new TextEncoder();
+                    await context.room.localParticipant.publishData(
+                        encoder.encode(JSON.stringify(errorMessage)),
+                        { reliable: true, destination_identities: [requesterId] }
+                    );
+                }
+            } catch (publishError) {
+                // 연결 끊김 등의 에러는 무시
+                this.logger.debug(`[PDF 질문] 에러 응답 전송 실패 (연결 끊김): ${publishError.message}`);
+            }
+        }
+    }
+
+    /**
+     * 공유 보드 스케치 → 다이어그램 변환 처리
+     */
+    private async handleBoardTransform(
+        roomId: string,
+        imageBase64: string,
+        requesterId: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        this.logger.log(`[공유 보드 변환] 처리 시작 from ${requesterId}`);
+
+        try {
+            // Vision Service로 스케치 분석
+            const sketchPrompt = `이 손그림/스케치를 분석하고 Mermaid 다이어그램 코드로 변환해주세요.
+
+## 분석 가이드:
+1. 그림에서 박스, 원, 화살표, 텍스트 등의 요소를 식별하세요
+2. 요소들 간의 관계(연결, 흐름)를 파악하세요
+3. 적절한 다이어그램 타입을 선택하세요:
+   - 흐름도(flowchart): 프로세스, 의사결정, 순서가 있는 경우
+   - 시퀀스(sequence): 시간순 상호작용, 메시지 교환
+   - 마인드맵(mindmap): 아이디어 정리, 계층 구조
+
+## 응답 형식 (JSON만 출력):
+{
+  "description": "그림에 대한 간단한 설명 (한국어)",
+  "diagramType": "flowchart | sequence | mindmap",
+  "mermaidCode": "실제 Mermaid 코드"
+}
+
+손글씨가 알아보기 어려우면 최대한 추측해서 변환하세요. 그림이 명확하지 않으면 기본 흐름도로 만들어주세요.`;
+
+            const visionResult = await this.visionService.analyzeScreenShare(
+                imageBase64,
+                sketchPrompt,
+                { screenWidth: 1920, screenHeight: 1080 }
+            );
+
+            this.logger.log(`[공유 보드 변환] Vision 응답: ${visionResult.text.substring(0, 100)}...`);
+
+            // JSON 파싱
+            let result = {
+                description: '그림을 분석했습니다.',
+                mermaidCode: '',
+            };
+
+            try {
+                const jsonMatch = visionResult.text.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    result.description = parsed.description || result.description;
+                    result.mermaidCode = parsed.mermaidCode || '';
+                }
+            } catch (parseError) {
+                this.logger.warn(`[공유 보드 변환] JSON 파싱 실패: ${parseError.message}`);
+                result.description = visionResult.text.slice(0, 200);
+            }
+
+            // 결과 전송 (모든 참가자에게)
+            const transformResult = {
+                type: 'BOARD_TRANSFORM_RESULT',
+                result: {
+                    description: result.description,
+                    mermaidCode: result.mermaidCode,
+                },
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(transformResult)),
+                { reliable: true }
+            );
+
+            this.logger.log(`[공유 보드 변환] 결과 전송 완료`);
+
+        } catch (error) {
+            this.logger.error(`[공유 보드 변환] 실패: ${error.message}`);
+
+            // 에러 응답 전송
+            const errorResult = {
+                type: 'BOARD_TRANSFORM_RESULT',
+                result: {
+                    description: '스케치 분석 중 오류가 발생했습니다. 다시 시도해주세요.',
+                    mermaidCode: '',
+                },
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(errorResult)),
+                { reliable: true }
+            );
+        }
+    }
+
+    /**
+     * 스터디 퀴즈 생성
+     */
+    private async handleQuizGenerate(
+        roomId: string,
+        questionCount: number,
+        quizType: 'multiple_choice' | 'short_answer' | 'ox' | 'mixed',
+        qaHistory: Array<{ question: string; answer: string; context?: string; timestamp?: number }>,
+        requesterId: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        this.logger.log(`[스터디 퀴즈] 생성 시작 - ${questionCount}문제, 유형: ${quizType}, QA히스토리: ${qaHistory.length}개`);
+
+        const encoder = new TextEncoder();
+
+        // 퀴즈 유형 설명
+        const typeInstructions = {
+            multiple_choice: '객관식 문제 (4개 선택지)',
+            short_answer: '주관식 단답형 문제',
+            ox: 'O/X 진위형 문제',
+            mixed: '객관식, 주관식, O/X를 골고루 섞어서',
+        };
+
+        // 퀴즈 생성 함수
+        const generateQuizFromContent = async (contentContext: string, source: string): Promise<any[]> => {
+            const prompt = `당신은 학습 퀴즈 출제 전문가입니다. 다음 내용을 바탕으로 ${questionCount}개의 퀴즈 문제를 생성해주세요.
+
+## 참고 내용
+${contentContext}
+
+## 퀴즈 유형
+${typeInstructions[quizType]}
+
+## 출력 형식 (JSON 배열만 출력)
+[
+  {
+    "id": 1,
+    "question": "문제 내용",
+    "type": "multiple_choice" | "short_answer" | "ox",
+    "options": ["선택지1", "선택지2", "선택지3", "선택지4"],
+    "correctAnswer": "정답",
+    "explanation": "정답 해설 (왜 이것이 정답인지)",
+    "relatedContent": "관련 내용 출처"
+  }
+]
+
+## 주의사항
+- 문제는 학습자의 이해도를 점검할 수 있도록 출제
+- 너무 쉽거나 너무 어렵지 않게 중간 난이도로
+- 해설은 학습에 도움이 되도록 상세하게
+- JSON만 출력하세요 (다른 텍스트 없이)`;
+
+            const response = await this.llmService.sendMessagePure(prompt, 2000);
+            this.logger.log(`[스터디 퀴즈] ${source} 기반 LLM 응답: ${response.substring(0, 100)}...`);
+
+            const jsonMatch = response.match(/\[[\s\S]*\]/);
+            if (jsonMatch) {
+                return JSON.parse(jsonMatch[0]);
+            }
+            throw new Error('JSON 파싱 실패');
+        };
+
+        try {
+            // 우선순위: 회의 내용 (RAG) -> PDF 임베딩 -> Q&A 히스토리
+            // 전략: Q&A 히스토리로 즉시 생성 + RAG 10초 타임아웃으로 병렬 시도
+
+            let qaBasedQuestions: any[] | null = null;
+            let ragBasedQuestions: any[] | null = null;
+
+            // Q&A 히스토리 기반 즉시 생성 (fallback)
+            const qaPromise = (async () => {
+                if (qaHistory.length > 0) {
+                    const qaContent = qaHistory.map((qa, idx) =>
+                        `### 질문 ${idx + 1}\nQ: ${qa.question}\nA: ${qa.answer}${qa.context ? `\n참고: ${qa.context.substring(0, 500)}` : ''}`
+                    ).join('\n\n');
+
+                    this.logger.log(`[스터디 퀴즈] Q&A 히스토리 기반 생성 시작`);
+                    return await generateQuizFromContent(
+                        `### 문서 Q&A 히스토리\n${qaContent.substring(0, 4000)}`,
+                        'Q&A히스토리'
+                    );
+                }
+                return null;
+            })();
+
+            // RAG 기반 생성 (10초 타임아웃)
+            const ragPromise = (async () => {
+                try {
+                    if (!this.ragClient.isConnected(roomId)) {
+                        this.logger.log(`[스터디 퀴즈] RAG 미연결`);
+                        return null;
+                    }
+
+                    // 10초 타임아웃
+                    const timeoutPromise = new Promise<null>((resolve) => {
+                        setTimeout(() => resolve(null), 10000);
+                    });
+
+                    const ragQueryPromise = (async () => {
+                        const ragResult = await this.ragClient.sendQuestionWithSources(
+                            roomId,
+                            '지금까지 회의에서 논의된 주요 내용과 PDF에서 다룬 핵심 개념을 알려줘'
+                        );
+
+                        if (ragResult && ragResult.sources && ragResult.sources.length > 0) {
+                            const meetingContext = ragResult.sources
+                                .map((s) => `[${s.speaker || '발언자'}] ${s.text}`)
+                                .join('\n\n');
+
+                            this.logger.log(`[스터디 퀴즈] RAG 컨텍스트 ${ragResult.sources.length}개 조회됨`);
+
+                            return await generateQuizFromContent(
+                                `### 회의 및 PDF 내용\n${meetingContext.substring(0, 4000)}`,
+                                'RAG'
+                            );
+                        }
+                        return null;
+                    })();
+
+                    return await Promise.race([ragQueryPromise, timeoutPromise]);
+                } catch (error) {
+                    this.logger.warn(`[스터디 퀴즈] RAG 조회 실패: ${error.message}`);
+                    return null;
+                }
+            })();
+
+            // 병렬 실행
+            const [qaResult, ragResult] = await Promise.all([qaPromise, ragPromise]);
+            qaBasedQuestions = qaResult;
+            ragBasedQuestions = ragResult;
+
+            // 결과 선택: RAG 우선, 없으면 Q&A 히스토리
+            let questions: any[] = [];
+            let source = '';
+
+            if (ragBasedQuestions && ragBasedQuestions.length > 0) {
+                questions = ragBasedQuestions;
+                source = 'RAG (회의 내용 + PDF)';
+                this.logger.log(`[스터디 퀴즈] RAG 기반 퀴즈 사용`);
+            } else if (qaBasedQuestions && qaBasedQuestions.length > 0) {
+                questions = qaBasedQuestions;
+                source = 'Q&A 히스토리';
+                this.logger.log(`[스터디 퀴즈] Q&A 히스토리 기반 퀴즈 사용`);
+            } else {
+                throw new Error('퀴즈 생성할 컨텐츠가 없습니다. 문서를 검색하거나 회의를 진행해주세요.');
+            }
+
+            // 결과 전송
+            const quizResult = {
+                type: 'QUIZ_GENERATE_RESULT',
+                questions,
+                source,
+            };
+
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(quizResult)),
+                { reliable: true }
+            );
+
+            this.logger.log(`[스터디 퀴즈] ${questions.length}개 문제 생성 완료 (출처: ${source})`);
+
+        } catch (error) {
+            this.logger.error(`[스터디 퀴즈] 생성 실패: ${error.message}`);
+
+            // 에러 응답
+            const errorResult = {
+                type: 'QUIZ_GENERATE_RESULT',
+                questions: [],
+                error: error.message || '퀴즈 생성 중 오류가 발생했습니다. 다시 시도해주세요.',
+            };
+
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(errorResult)),
+                { reliable: true }
+            );
+        }
+    }
+
+    /**
+     * 퀴즈 답변 평가 및 피드백 생성
+     */
+    private async handleQuizEvaluate(
+        roomId: string,
+        question: any,
+        userAnswer: string,
+        requesterId: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        this.logger.log(`[스터디 퀴즈] 평가 시작 - 질문: "${question?.question?.substring(0, 30)}...", 답변: "${userAnswer.substring(0, 30)}..."`);
+
+        try {
+            const prompt = `당신은 학습 피드백 전문가입니다. 다음 퀴즈 답변을 평가하고 피드백을 제공해주세요.
+
+## 문제
+${question?.question}
+
+## 문제 유형
+${question?.type === 'multiple_choice' ? '객관식' : question?.type === 'ox' ? 'O/X' : '주관식'}
+
+## 정답
+${question?.correctAnswer}
+
+## 학습자 답변
+${userAnswer}
+
+## 해설
+${question?.explanation}
+
+## 관련 내용
+${question?.relatedContent || '없음'}
+
+## 출력 형식 (JSON만 출력)
+{
+  "isCorrect": true/false,
+  "feedback": "학습자의 답변에 대한 구체적인 피드백 (맞았다면 칭찬과 추가 설명, 틀렸다면 왜 틀렸는지 분석)",
+  "studyGuide": "틀린 경우 어떤 부분을 다시 공부해야 하는지 구체적인 가이드 (맞은 경우는 심화 학습 제안)"
+}
+
+## 평가 기준
+- 객관식/O/X: 정확히 일치해야 정답
+- 주관식: 핵심 개념이 포함되어 있으면 정답으로 인정 (유연하게 평가)
+- 시간 초과나 답변 없음은 오답 처리`;
+
+            const response = await this.llmService.sendMessagePure(prompt, 500);
+
+            this.logger.log(`[스터디 퀴즈] 평가 응답: ${response.substring(0, 100)}...`);
+
+            // JSON 파싱
+            let evaluation = {
+                questionId: question?.id || 0,
+                userAnswer,
+                isCorrect: false,
+                feedback: '평가를 완료했습니다.',
+                studyGuide: '',
+            };
+
+            try {
+                const jsonMatch = response.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    evaluation.isCorrect = parsed.isCorrect || false;
+                    evaluation.feedback = parsed.feedback || evaluation.feedback;
+                    evaluation.studyGuide = parsed.studyGuide || '';
+                }
+            } catch (parseError) {
+                this.logger.warn(`[스터디 퀴즈] 평가 JSON 파싱 실패: ${parseError.message}`);
+                // 단순 비교로 폴백
+                evaluation.isCorrect = userAnswer.trim().toLowerCase() === question?.correctAnswer?.trim().toLowerCase();
+                evaluation.feedback = evaluation.isCorrect ? '정답입니다!' : `틀렸습니다. 정답은 "${question?.correctAnswer}"입니다.`;
+                evaluation.studyGuide = !evaluation.isCorrect ? question?.explanation || '' : '';
+            }
+
+            // 결과 전송
+            const evalResult = {
+                type: 'QUIZ_EVALUATE_RESULT',
+                evaluation,
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(evalResult)),
+                { reliable: true }
+            );
+
+            this.logger.log(`[스터디 퀴즈] 평가 완료 - 정답: ${evaluation.isCorrect}`);
+
+        } catch (error) {
+            this.logger.error(`[스터디 퀴즈] 평가 실패: ${error.message}`);
+
+            // 에러 응답 (단순 비교로 폴백)
+            const isCorrect = userAnswer.trim().toLowerCase() === question?.correctAnswer?.trim().toLowerCase();
+            const evalResult = {
+                type: 'QUIZ_EVALUATE_RESULT',
+                evaluation: {
+                    questionId: question?.id || 0,
+                    userAnswer,
+                    isCorrect,
+                    feedback: isCorrect ? '정답입니다!' : `틀렸습니다. 정답은 "${question?.correctAnswer}"입니다.`,
+                    studyGuide: !isCorrect ? (question?.explanation || '해당 내용을 다시 복습해보세요.') : '',
+                },
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(evalResult)),
+                { reliable: true }
+            );
+        }
+    }
+
+    /**
+     * Perplexity 메시지 처리 (WFC 기반 흐름 제어)
+     */
+    private async handlePerplexityMessage(
+        roomId: string,
+        message: PerplexityMessage,
+        senderId?: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context || !context.perplexityModeActive) return;
+
+        // TRANSCRIPT는 항상 저장 (AI 응답만 스킵)
+        const isSpeakingOrPublishing = context.botState === BotState.SPEAKING || context.isPublishing;
+
+        // TRANSCRIPT가 아닌 메시지는 말하는 중이면 스킵
+        if (isSpeakingOrPublishing && message.type !== 'TRANSCRIPT') {
+            this.logger.debug(`[Perplexity] 메시지 스킵 (발화 중): ${message.type}`);
+            return;
+        }
+
+        try {
+            // PerplexityService에 메시지 전달 (TRANSCRIPT는 항상 저장됨)
+            const result = await this.perplexityService.handleMessage(roomId, message);
+
+            // 말하는 중이면 AI 응답만 스킵
+            if (isSpeakingOrPublishing) {
+                this.logger.debug(`[Perplexity] AI 응답 스킵 (발화 중)`);
+                return;
+            }
+
+            if (result?.action) {
+                this.logger.log(`[Perplexity] 액션 생성: ${result.action.type}`);
+
+                // 액션 결과를 클라이언트에 브로드캐스트
+                const actionMessage = {
+                    type: 'ACTION',
+                    payload: result.action,
+                    senderId: 'ai-bot',
+                    timestamp: Date.now(),
+                };
+
+                const encoder = new TextEncoder();
+                await context.room.localParticipant.publishData(
+                    encoder.encode(JSON.stringify(actionMessage)),
+                    { reliable: true }
+                );
+
+                // AI 응답이 있으면 TTS로 말하기
+                if (result.response) {
+                    this.logger.log(`[Perplexity] AI 응답: "${result.response.substring(0, 50)}..."`);
+
+                    // ★ 상태 관리: isPublishing과 botState 설정
+                    const requestId = ++context.currentRequestId;
+                    context.isPublishing = true;
+                    context.publishingStartTime = Date.now();
+                    context.botState = BotState.SPEAKING;
+
+                    try {
+                        await this.speakAndPublish(context, roomId, requestId, result.response);
+                    } finally {
+                        // ★ 항상 상태 초기화 (requestId 체크 없이)
+                        context.isPublishing = false;
+                        context.publishingStartTime = 0;
+                        context.botState = BotState.SLEEP;
+                    }
+                }
+            }
+        } catch (error) {
+            this.logger.error(`[Perplexity] 메시지 처리 실패: ${error.message}`);
+            // 에러 시에도 상태 초기화
+            context.isPublishing = false;
+            context.publishingStartTime = 0;
         }
     }
 
@@ -1179,6 +1827,17 @@ ${edgesDesc}
                 }
             }
 
+            // ★ isPublishing 타임아웃 체크 (60초 이상 stuck 방지)
+            const PUBLISHING_TIMEOUT_MS = 60000;
+            if (context?.isPublishing && context.publishingStartTime > 0) {
+                const publishingDuration = Date.now() - context.publishingStartTime;
+                if (publishingDuration > PUBLISHING_TIMEOUT_MS) {
+                    this.logger.warn(`[오디오] isPublishing 타임아웃 (${(publishingDuration / 1000).toFixed(1)}초) - 강제 리셋`);
+                    context.isPublishing = false;
+                    context.publishingStartTime = 0;
+                }
+            }
+
             // 봇 발화 중 처리
             if (context?.isPublishing && context.botState !== BotState.SPEAKING) {
                 continue;
@@ -1338,6 +1997,46 @@ ${edgesDesc}
         this.sendToRagForEmbedding(roomId, transcript, userId, startTime);
 
         // ================================================
+        // ★ Perplexity 모드: isPublishing과 무관하게 TRANSCRIPT 항상 저장
+        // ================================================
+        if (context.perplexityModeActive && transcript.trim().length > 0) {
+            this.logger.debug(`[Perplexity] Transcript 저장 시도: "${transcript.substring(0, 30)}..."`);
+
+            const transcriptMessage: PerplexityMessage = {
+                type: 'TRANSCRIPT',
+                payload: {
+                    participantId: userId,
+                    text: transcript.trim(),
+                },
+                senderId: userId,
+                timestamp: Date.now(),
+            };
+
+            // PerplexityService에 직접 전달 (AI 응답은 isPublishing 체크에서 처리)
+            const transcriptResult = await this.perplexityService.handleMessage(roomId, transcriptMessage);
+
+            // AI 개입 응답이 있고, 현재 발화 중이 아니면 처리
+            if (transcriptResult?.response && !context.isPublishing && context.botState !== BotState.SPEAKING) {
+                this.logger.log(`[Perplexity] 텍스트 기반 AI 개입: ${transcriptResult.action?.type}`);
+                const requestId = Date.now();
+                context.currentRequestId = requestId;
+                context.isPublishing = true;
+                context.publishingStartTime = Date.now();
+                context.botState = BotState.SPEAKING;
+
+                try {
+                    await this.speakAndPublish(context, roomId, requestId, transcriptResult.response);
+                } finally {
+                    context.botState = BotState.ARMED;
+                    context.isPublishing = false;
+                    context.publishingStartTime = 0;
+                    context.lastResponseTime = Date.now();
+                }
+                return;
+            }
+        }
+
+        // ================================================
         // 2. 봇 응답 여부 체크 (여기서부터 isPublishing 보호)
         // ================================================
         if (context.isPublishing) {
@@ -1368,6 +2067,7 @@ ${edgesDesc}
 
         try {
             context.isPublishing = true;
+            context.publishingStartTime = Date.now();
 
             // Intent 분석
             const intentForContext = this.intentClassifier.classify(transcript);
@@ -1586,6 +2286,11 @@ ${edgesDesc}
             // 5. SLEEP 상태 처리
             // ================================================
             if (context.botState === BotState.SLEEP) {
+                // ★ Perplexity 모드에서는 웨이크워드 없으면 return (TRANSCRIPT는 이미 위에서 처리됨)
+                if (context.perplexityModeActive && !shouldRespond) {
+                    return;
+                }
+
                 if (!shouldRespond) {
                     // ★ AI 의견 제시 체크 (검증된 근거가 있을 때만)
                     const opinionResult = await this.checkAndOfferOpinion(
@@ -1780,6 +2485,34 @@ ${edgesDesc}
                 }
 
                 // ============================================
+                // 10-1. DataChannel 전송 (RAG 문서 출처 → AI 문서 패널)
+                // ============================================
+                if (llmResult.ragSources && llmResult.ragSources.length > 0) {
+                    const documentMessage = {
+                        type: 'AI_DOCUMENT_SHOW',
+                        keyword: processedText.substring(0, 30),
+                        documents: llmResult.ragSources.map((source, idx) => ({
+                            id: `doc-${Date.now()}-${idx}`,
+                            pageNumber: idx + 1,
+                            content: source.text,
+                            sourceFile: source.speaker ? `${source.speaker}의 발언` : '회의 기록',
+                            relevance: `"${processedText.substring(0, 20)}..." 질문에 대한 관련 내용`,
+                            highlights: [{
+                                text: source.text.substring(0, 200),
+                                color: '#fef08a'
+                            }]
+                        }))
+                    };
+
+                    const encoder = new TextEncoder();
+                    await context.room.localParticipant.publishData(
+                        encoder.encode(JSON.stringify(documentMessage)),
+                        { reliable: true }
+                    );
+                    this.logger.log(`[DataChannel] AI 문서 패널 전송 (${llmResult.ragSources.length}개 출처)`);
+                }
+
+                // ============================================
                 // 11. TTS 발화
                 // ============================================
                 context.shouldInterrupt = false;
@@ -1802,6 +2535,7 @@ ${edgesDesc}
         } finally {
             if (context.currentRequestId === requestId) {
                 context.isPublishing = false;
+                context.publishingStartTime = 0;
             }
         }
     }
@@ -2358,6 +3092,7 @@ ${edgesDesc}
         }
         this.processingLock.set(roomId, true);
         context.isPublishing = true;
+        context.publishingStartTime = Date.now();
 
         // Vision 플로우용 currentRequestId 설정 (TTS 발화를 위해 필수)
         context.currentRequestId = requestId;
@@ -2441,6 +3176,7 @@ ${edgesDesc}
             context.lastResponseTime = Date.now();
             context.lastSpeechTime = Date.now();
             context.isPublishing = false;
+            context.publishingStartTime = 0;
             this.processingLock.set(roomId, false);
             this.logger.log(`[Vision] 상태 정리 완료 - 음성 처리 재개 가능`);
         }
@@ -2591,6 +3327,7 @@ ${edgesDesc}
 
         try {
             context.isPublishing = true;
+            context.publishingStartTime = Date.now();
             context.botState = BotState.SPEAKING;
 
             // 각 다이어그램 타입에 대한 간단한 설명 생성
@@ -2637,6 +3374,7 @@ ${firstCode.substring(0, 500)}
             this.logger.error(`[설계 모드] 자동 설명 실패: ${error.message}`);
         } finally {
             context.isPublishing = false;
+            context.publishingStartTime = 0;
         }
     }
 
