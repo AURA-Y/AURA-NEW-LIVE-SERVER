@@ -2284,7 +2284,7 @@ ${edgesDesc}
             // 3.7. 캘린더/일정 추천 Intent 처리
             // ================================================
             if (intentAnalysis.isCallIntent && intentAnalysis.isCalendarIntent) {
-                this.logger.log(`[캘린더 일정 추천] Intent 감지 - 발화자: ${userId}`);
+                this.logger.log(`[캘린더 일정 생성] Intent 감지 - 발화자: ${userId}`);
 
                 try {
                     // 현재 방의 참여자 목록 가져오기
@@ -2299,7 +2299,6 @@ ${edgesDesc}
                     const { timeMin, timeMax } = this.calendarService.getNextWeekRange();
 
                     // 참여자들의 userId 추출 (닉네임에서 _로 구분된 경우)
-                    // 실제로는 방 정보에서 participantUserIds를 가져와야 함
                     const userIds = participants
                         .filter(p => p && !p.startsWith('ai-bot'))
                         .map(p => p.split('_')[0]); // 임시로 닉네임 사용
@@ -2312,7 +2311,7 @@ ${edgesDesc}
                         context,
                         roomId,
                         requestId,
-                        `${participantCount}명의 참여자 일정을 분석하고 있습니다. 잠시만 기다려주세요.`
+                        `${participantCount}명의 참여자 일정을 분석하고 일정을 생성하겠습니다.`
                     );
 
                     // 공통 빈 시간 검색 (내부 API 키 사용)
@@ -2323,8 +2322,54 @@ ${edgesDesc}
                         durationMinutes: 60,
                     });
 
-                    // 결과를 자연어로 변환
-                    const responseText = this.calendarService.formatFreeSlotsResponse(freeSlots, participantCount);
+                    if (freeSlots.length === 0) {
+                        await this.speakAndPublish(
+                            context,
+                            roomId,
+                            requestId,
+                            `${participantCount}명의 일정을 확인했지만, 공통으로 비어 있는 시간을 찾지 못했습니다.`
+                        );
+                        context.botState = BotState.ARMED;
+                        context.lastResponseTime = Date.now();
+                        return;
+                    }
+
+                    // 첫 번째 빈 시간으로 일정 생성
+                    const firstSlot = freeSlots[0];
+                    const slotDate = new Date(firstSlot.start);
+                    const dateStr = slotDate.toISOString().split('T')[0]; // YYYY-MM-DD
+                    const timeStr = slotDate.toTimeString().slice(0, 5); // HH:mm
+
+                    // 회의 주제를 일정 제목으로 사용
+                    const meetingTopic = context.roomTopic || '팀 미팅';
+
+                    // 일정 생성
+                    const createResult = await this.calendarService.addEventToUsers({
+                        userIds,
+                        title: meetingTopic,
+                        date: dateStr,
+                        time: timeStr,
+                        description: `AURA 회의실에서 자동 생성된 일정입니다.\n회의 주제: ${meetingTopic}`,
+                        durationMinutes: 60,
+                    });
+
+                    // 결과 포맷팅
+                    const dateFormatted = slotDate.toLocaleDateString('ko-KR', {
+                        month: 'long',
+                        day: 'numeric',
+                        weekday: 'short',
+                    });
+                    const timeFormatted = slotDate.toLocaleTimeString('ko-KR', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                    });
+
+                    let responseText: string;
+                    if (createResult.success) {
+                        responseText = `${dateFormatted} ${timeFormatted}에 "${meetingTopic}" 일정을 생성했습니다. ${createResult.successCount}명의 캘린더에 추가되었습니다.`;
+                    } else {
+                        responseText = `일정 생성에 실패했습니다. Google 캘린더 연동을 확인해주세요.`;
+                    }
 
                     // 음성 응답
                     await this.speakAndPublish(context, roomId, requestId, responseText);
@@ -2332,28 +2377,31 @@ ${edgesDesc}
                     context.lastResponseTime = Date.now();
 
                     // DataChannel로 캘린더 결과 전송 (UI 표시용)
-                    if (freeSlots.length > 0) {
-                        const calendarMessage = {
-                            type: 'CALENDAR_FREE_SLOTS',
-                            freeSlots,
-                            participantCount,
-                            timeRange: { timeMin, timeMax },
-                        };
-                        const encoder = new TextEncoder();
-                        await context.room.localParticipant.publishData(
-                            encoder.encode(JSON.stringify(calendarMessage)),
-                            { reliable: true }
-                        );
-                    }
+                    const calendarMessage = {
+                        type: 'CALENDAR_EVENT_CREATED',
+                        event: {
+                            title: meetingTopic,
+                            date: dateStr,
+                            time: timeStr,
+                            durationMinutes: 60,
+                        },
+                        participantCount,
+                        result: createResult,
+                    };
+                    const encoder = new TextEncoder();
+                    await context.room.localParticipant.publishData(
+                        encoder.encode(JSON.stringify(calendarMessage)),
+                        { reliable: true }
+                    );
 
                     return;
                 } catch (error) {
-                    this.logger.error(`[캘린더] 일정 분석 실패: ${error.message}`);
+                    this.logger.error(`[캘린더] 일정 생성 실패: ${error.message}`);
                     await this.speakAndPublish(
                         context,
                         roomId,
                         requestId,
-                        "죄송합니다. 일정 분석 중 오류가 발생했습니다. Google 캘린더 연동이 필요할 수 있습니다."
+                        "죄송합니다. 일정 생성 중 오류가 발생했습니다. Google 캘린더 연동이 필요할 수 있습니다."
                     );
                     context.botState = BotState.ARMED;
                     return;

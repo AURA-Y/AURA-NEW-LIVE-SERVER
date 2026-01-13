@@ -135,6 +135,64 @@ export class CalendarService {
     }
 
     /**
+     * 여러 참여자의 캘린더에 일정 추가
+     */
+    async addEventToUsers(params: {
+        userIds: string[];
+        title: string;
+        date: string;
+        time?: string;
+        description?: string;
+        durationMinutes?: number;
+    }): Promise<{ success: boolean; message: string; successCount: number; failCount: number }> {
+        const { userIds, title, date, time, description, durationMinutes = 60 } = params;
+
+        this.logger.log(`[캘린더] 일정 생성 - 참여자: ${userIds.length}명, 제목: ${title}, 날짜: ${date} ${time || '종일'}`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.post(
+                `${this.apiBackendUrl}/restapi/calendar/internal/add-event`,
+                {
+                    userIds,
+                    title,
+                    date,
+                    time,
+                    description,
+                    durationMinutes,
+                },
+                {
+                    headers: {
+                        'x-internal-api-key': this.internalApiKey,
+                        'Content-Type': 'application/json',
+                    },
+                }
+            );
+
+            const results = response.data?.results || [];
+            const successCount = results.filter((r: any) => r.success).length;
+            const failCount = results.filter((r: any) => !r.success).length;
+
+            this.logger.log(`[캘린더] 일정 생성 완료 - 성공: ${successCount}명, 실패: ${failCount}명`);
+
+            return {
+                success: successCount > 0,
+                message: response.data?.message || `${successCount}명의 캘린더에 일정이 추가되었습니다.`,
+                successCount,
+                failCount,
+            };
+        } catch (error: any) {
+            this.logger.error(`[캘린더] 일정 생성 실패: ${error.message}`);
+            return {
+                success: false,
+                message: `일정 생성에 실패했습니다: ${error.message}`,
+                successCount: 0,
+                failCount: userIds.length,
+            };
+        }
+    }
+
+    /**
      * 빈 시간대를 자연어 응답으로 변환
      */
     formatFreeSlotsResponse(freeSlots: FreeSlot[], participantCount: number): string {
