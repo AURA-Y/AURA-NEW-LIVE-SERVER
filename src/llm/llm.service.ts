@@ -114,7 +114,44 @@ export class LlmService implements OnModuleInit {
             return { text: calendarResult };
         }
 
-        // 2. 회의록/문서 관련 질문이고 roomId가 있으면 RAG 서버에 질문
+        // 2. 실시간 검색 카테고리 체크 (RAG보다 우선)
+        // 날씨, 맛집, 뉴스 등은 RAG 문서가 아닌 실시간 검색이 필요
+        const realTimeSearchPatterns = [
+            // 장소 검색 (local)
+            /카페|커피|커피숍|스타벅스|투썸|이디야|카공/,
+            /맛집|식당|레스토랑|밥집|음식점|저녁|점심|브런치/,
+            /술집|바|포차|호프|이자카야|와인바|회식/,
+            /분식|떡볶이|김밥|순대/,
+            /치킨|BBQ|BHC|교촌/,
+            /피자|도미노|피자헛/,
+            /빵집|베이커리|제과점|파리바게뜨/,
+            /디저트|마카롱|아이스크림|젤라또|와플/,
+            /쇼핑|백화점|마트|아울렛/,
+            /팝업|팝업스토어/,
+            /전시|전시회|갤러리|미술관|박물관/,
+            // 뉴스 검색 (news)
+            /날씨|기온|온도|비|눈|미세먼지|우산|더워|추워/,
+            /뉴스|소식|기사|속보|이슈/,
+            /주식|주가|코스피|코스닥|나스닥|증시/,
+            /스포츠|축구|야구|농구|배구|경기|스코어/,
+            /영화|개봉|상영|박스오피스|CGV|롯데시네마/,
+        ];
+        const isRealTimeSearch = realTimeSearchPatterns.some(pattern => pattern.test(userMessage));
+
+        if (isRealTimeSearch) {
+            this.logger.log(`[실시간 검색] RAG 우회 → 검색 서비스 직행: "${userMessage.substring(0, 30)}..."`);
+            // 바로 검색 서비스로 진행 (아래 processWithTools에서 처리)
+            this.isProcessing = true;
+            this.lastRequestTime = Date.now();
+            try {
+                const messages = [{ role: "user", content: userMessage }];
+                return await this.processWithTools(messages, 0, undefined, searchDomain, true);
+            } finally {
+                this.isProcessing = false;
+            }
+        }
+
+        // 3. 회의록/문서 관련 질문이고 roomId가 있으면 RAG 서버에 질문
         // - 회의 관련 키워드
         // - 문서/자료/학습 관련 키워드
         // - 질문형 키워드 (문서에서 답변을 찾을 수 있는 질문)
