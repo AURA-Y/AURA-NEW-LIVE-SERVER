@@ -25,6 +25,7 @@ import { VisionService, VisionContext } from '../vision/vision.service';
 import { AgentRouterService } from '../agent/agent-router.service';
 import { OpinionService } from '../agent/evidence';
 import { PerplexityService, PerplexityMessage } from '../perplexity';
+import { CalendarService } from '../calendar/calendar.service';
 import type { LivekitService } from './livekit.service';
 
 enum BotState {
@@ -142,6 +143,7 @@ export class VoiceBotService {
         private agentRouter: AgentRouterService,
         private opinionService: OpinionService,
         private perplexityService: PerplexityService,
+        private calendarService: CalendarService,
         @Inject(forwardRef(() => require('./livekit.service').LivekitService))
         private livekitService: LivekitService,
     ) { }
@@ -2257,6 +2259,86 @@ ${edgesDesc}
                 context.botState = BotState.ARMED;
                 context.lastResponseTime = Date.now();
                 return;
+            }
+
+            // ================================================
+            // 3.7. 캘린더/일정 추천 Intent 처리
+            // ================================================
+            if (intentAnalysis.isCallIntent && intentAnalysis.isCalendarIntent) {
+                this.logger.log(`[캘린더 일정 추천] Intent 감지 - 발화자: ${userId}`);
+
+                try {
+                    // 현재 방의 참여자 목록 가져오기
+                    const participants = Array.from(context.room.remoteParticipants.values())
+                        .filter(p => !p.identity.startsWith('ai-bot'))
+                        .map(p => p.identity);
+                    participants.push(context.room.localParticipant?.identity || '');
+
+                    const participantCount = participants.filter(p => p && !p.startsWith('ai-bot')).length;
+
+                    // 다음 주 기간 계산
+                    const { timeMin, timeMax } = this.calendarService.getNextWeekRange();
+
+                    // 참여자들의 userId 추출 (닉네임에서 _로 구분된 경우)
+                    // 실제로는 방 정보에서 participantUserIds를 가져와야 함
+                    const userIds = participants
+                        .filter(p => p && !p.startsWith('ai-bot'))
+                        .map(p => p.split('_')[0]); // 임시로 닉네임 사용
+
+                    this.logger.log(`[캘린더] 참여자 ${participantCount}명의 일정 분석 시작`);
+
+                    // 음성으로 처리 중 안내
+                    context.botState = BotState.SPEAKING;
+                    await this.speakAndPublish(
+                        context,
+                        roomId,
+                        requestId,
+                        `${participantCount}명의 참여자 일정을 분석하고 있습니다. 잠시만 기다려주세요.`
+                    );
+
+                    // 공통 빈 시간 검색 (내부 API 키 사용)
+                    const freeSlots = await this.calendarService.findCommonFreeSlots({
+                        userIds,
+                        timeMin,
+                        timeMax,
+                        durationMinutes: 60,
+                    });
+
+                    // 결과를 자연어로 변환
+                    const responseText = this.calendarService.formatFreeSlotsResponse(freeSlots, participantCount);
+
+                    // 음성 응답
+                    await this.speakAndPublish(context, roomId, requestId, responseText);
+                    context.botState = BotState.ARMED;
+                    context.lastResponseTime = Date.now();
+
+                    // DataChannel로 캘린더 결과 전송 (UI 표시용)
+                    if (freeSlots.length > 0) {
+                        const calendarMessage = {
+                            type: 'CALENDAR_FREE_SLOTS',
+                            freeSlots,
+                            participantCount,
+                            timeRange: { timeMin, timeMax },
+                        };
+                        const encoder = new TextEncoder();
+                        await context.room.localParticipant.publishData(
+                            encoder.encode(JSON.stringify(calendarMessage)),
+                            { reliable: true }
+                        );
+                    }
+
+                    return;
+                } catch (error) {
+                    this.logger.error(`[캘린더] 일정 분석 실패: ${error.message}`);
+                    await this.speakAndPublish(
+                        context,
+                        roomId,
+                        requestId,
+                        "죄송합니다. 일정 분석 중 오류가 발생했습니다. Google 캘린더 연동이 필요할 수 있습니다."
+                    );
+                    context.botState = BotState.ARMED;
+                    return;
+                }
             }
 
             // ================================================
