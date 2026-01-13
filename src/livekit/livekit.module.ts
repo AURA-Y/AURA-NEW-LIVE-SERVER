@@ -9,9 +9,10 @@ import { RagModule } from '../rag/rag.module';
 import { IntentModule } from '../intent/intent.module';
 import { VisionModule } from '../vision/vision.module';
 import { AgentModule } from '../agent/agent.module';
+import { PerplexityModule } from '../perplexity/perplexity.module';
 
 @Module({
-  imports: [SttModule, LlmModule, TtsModule, IntentModule, RagModule, VisionModule, AgentModule],
+  imports: [SttModule, LlmModule, TtsModule, IntentModule, RagModule, VisionModule, AgentModule, PerplexityModule],
 
   controllers: [LivekitController, ApiController],
   providers: [LivekitService, VoiceBotService],
