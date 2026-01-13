@@ -111,6 +111,9 @@ interface RoomContext {
 
     // 클라이언트 준비 대기 (인삿말 타이밍 제어)
     greetingDone: boolean;
+
+    // AI 음소거 (사용자가 AI 음성을 음소거)
+    aiMuted: boolean;
     // Perplexity 모드 (WFC 기반 흐름 제어)
     perplexityModeActive: boolean;
     // isPublishing 시작 시간 (타임아웃 감지용)
@@ -279,6 +282,14 @@ export class VoiceBotService {
                         context.greetingDone = true;
                         this.greetOnJoin(roomId);
                     }
+                    return;
+                }
+
+                // AI 음소거 토글
+                if (message.type === 'AI_MUTE') {
+                    const muted = message.muted === true;
+                    context.aiMuted = muted;
+                    this.logger.log(`[AI 음소거] ${muted ? 'ON' : 'OFF'} by ${participant?.identity || 'unknown'}`);
                     return;
                 }
 
@@ -554,6 +565,8 @@ export class VoiceBotService {
                 designModeOpenTime: 0,
                 // 인삿말 대기 (클라이언트 준비 완료 후 시작)
                 greetingDone: false,
+                // AI 음소거 초기값
+                aiMuted: false,
                 // Perplexity 모드 초기화
                 perplexityModeActive: false,
                 // isPublishing 타임아웃 감지용
@@ -590,6 +603,12 @@ export class VoiceBotService {
     private async greetOnJoin(roomId: string): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
+
+        // AI 음소거 상태면 인사 스킵
+        if (context.aiMuted) {
+            this.logger.log(`[입장 인사 스킵] AI 음소거 상태`);
+            return;
+        }
 
         // 인사 멘트 (캘리브레이션 3초 동안 TTS)
         const greetings = [
@@ -2612,6 +2631,12 @@ ${edgesDesc}
         requestId: number,
         message: string
     ): Promise<void> {
+        // AI 음소거 상태면 TTS 스킵
+        if (context.aiMuted) {
+            this.logger.log(`[TTS 스킵] AI 음소거 상태 - 메시지: "${message.substring(0, 50)}..."`);
+            return;
+        }
+
         const ttsStart = Date.now();
         const pcmAudio = await this.ttsService.synthesizePcm(message);
         this.logger.log(`[TTS] ${Date.now() - ttsStart}ms - ${pcmAudio.length} bytes`);
