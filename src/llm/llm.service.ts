@@ -151,32 +151,22 @@ export class LlmService implements OnModuleInit {
             }
         }
 
-        // 3. 회의록/문서 관련 질문이고 roomId가 있으면 RAG 서버에 질문
-        // - 회의 관련 키워드
-        // - 문서/자료/학습 관련 키워드
-        // - 질문형 키워드 (문서에서 답변을 찾을 수 있는 질문)
-        const ragKeywords = [
-            // 회의 관련
-            '회의', '미팅', '액션', '액션아이템', '할 일', '할일', 'todo', 'action',
-            '결정', '논의', '안건', '발언', '누가', '언제', '요약', '정리',
-            // 문서/자료 관련
-            '문서', '자료', '페이지', '챕터', '장', '절', '내용', '설명',
-            // 학습/개념 관련
-            '개념', '정의', '뭐야', '뭔가요', '무엇', '어떻게', '왜', '이유',
-            '알려줘', '설명해', '가르쳐', '이해', '학습',
-            // CS/기술 관련 (CSAPP 등)
-            '메모리', '가상', '프로세스', '페이지', '주소', '캐시', '스택', '힙',
-            '포인터', '변수', '함수', '코드', '컴파일', '링커', '로더',
+        // 3. 과거 대화/회의 참조 질문일 때만 RAG 서버에 질문
+        // "지난", "이전", "방금", "아까" 등 과거 참조 키워드가 있을 때만 RAG 검색
+        const pastReferencePatterns = [
+            // 시간 참조 키워드
+            /지난/, /이전/, /방금/, /아까/, /전에/, /저번/, /좀\s*전/,
+            // 과거 대화 참조
+            /뭐라고\s*(했|한|하셨)/, /뭐(였|더라|였더라)/,
+            /다시\s*(말해|알려|설명)/, /한번\s*더/,
+            // 회의 내용 참조
+            /(회의|미팅).{0,10}(내용|정리|요약)/,
+            /누가.{0,10}(말|발언|얘기)/,
+            /(결정|논의|안건).{0,5}(된|한|했)/,
         ];
-        const isRagQuery = ragKeywords.some(kw => userMessage.toLowerCase().includes(kw));
+        const isPastReference = pastReferencePatterns.some(pattern => pattern.test(userMessage));
 
-        // roomId가 있고 (RAG 키워드가 있거나 질문형 문장이면) RAG 시도
-        const isQuestionForm = userMessage.includes('?') ||
-                               userMessage.endsWith('요') ||
-                               userMessage.endsWith('까') ||
-                               userMessage.endsWith('줘');
-
-        if (roomId && (isRagQuery || isQuestionForm)) {
+        if (roomId && isPastReference) {
             const resolvedRoomId = await this.getRoomIdByTopic(roomId);
     
             try {
