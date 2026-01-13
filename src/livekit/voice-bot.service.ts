@@ -920,20 +920,27 @@ ${ragContext ? `=== 관련 문서 내용 ===\n${ragContext}` : ''}
         } catch (error) {
             this.logger.error(`[PDF 질문] 처리 실패: ${error.message}`);
 
-            // 에러 응답 전송 (질문한 사람에게만)
-            const errorMessage = {
-                type: 'search_answer',
-                text: 'PDF 질문을 처리하는 중 오류가 발생했습니다. 다시 시도해주세요.',
-                category: 'PDF 분석',
-                minutes: [],
-                results: [],
-            };
+            // 에러 응답 전송 (질문한 사람에게만) - 연결 끊김 방어
+            try {
+                if (context.room?.localParticipant) {
+                    const errorMessage = {
+                        type: 'search_answer',
+                        text: 'PDF 질문을 처리하는 중 오류가 발생했습니다. 다시 시도해주세요.',
+                        category: 'PDF 분석',
+                        minutes: [],
+                        results: [],
+                    };
 
-            const encoder = new TextEncoder();
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(errorMessage)),
-                { reliable: true, destination_identities: [requesterId] }
-            );
+                    const encoder = new TextEncoder();
+                    await context.room.localParticipant.publishData(
+                        encoder.encode(JSON.stringify(errorMessage)),
+                        { reliable: true, destination_identities: [requesterId] }
+                    );
+                }
+            } catch (publishError) {
+                // 연결 끊김 등의 에러는 무시
+                this.logger.debug(`[PDF 질문] 에러 응답 전송 실패 (연결 끊김): ${publishError.message}`);
+            }
         }
     }
 
