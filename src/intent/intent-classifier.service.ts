@@ -7,6 +7,7 @@ export interface IntentAnalysis {
     isVisionIntent: boolean;  // 화면 공유 Vision 관련 의도
     isIdeaBoardIntent: boolean;  // 아이디어 보드 열기 의도
     isFlowchartIntent: boolean;  // Flowchart 보드 열기 의도
+    isCalendarIntent: boolean;  // 캘린더/일정 추천 의도
     confidence: number;
     matchedPatterns: string[];
     normalizedText: string;
@@ -301,6 +302,27 @@ export class IntentClassifierService {
         /(구조도|흐름도|시퀀스)\s*(그려|열어|시작|만들어|보여)/,
         // 시스템 설계 패턴
         /시스템\s*(설계|구조)\s*(보여|그려|열어|시작)/,
+    ];
+
+    // =====================================================
+    // 캘린더/일정 추천 패턴
+    // =====================================================
+    private readonly CALENDAR_PATTERNS: RegExp[] = [
+        // 일정 잡기/추천 패턴
+        /일정\s*(잡|추천|찾|조율|조정|맞춰|정|확인).{0,5}(아|어|줘|줄래|주세요|해|할까)?/,
+        /(회의|미팅|약속|모임)\s*(일정|시간|날짜).{0,5}(잡|추천|찾|조율|조정|맞춰|정|확인)/,
+        // 언제 가능/비어있는 시간 패턴
+        /(언제|몇\s*시|몇\s*일).{0,10}(가능|되|비어|괜찮|시간)/,
+        /(빈\s*시간|가능한\s*시간|비어\s*있는\s*시간|공통\s*시간).{0,5}(찾|알려|추천|확인|언제)/,
+        // 참여자 일정 확인 패턴
+        /(참여자|참석자|멤버|모두|다\s*같이|우리).{0,10}(일정|시간|스케줄).{0,5}(확인|알려|맞춰|조율)/,
+        /(다들|모두|참석자).{0,5}(언제|몇\s*시).{0,5}(가능|되|괜찮)/,
+        // 스케줄 관련
+        /스케줄\s*(조율|조정|확인|추천|잡|맞춰)/,
+        /(캘린더|달력|일정표).{0,5}(확인|봐|보여|열어|분석)/,
+        // 날짜/시간 추천
+        /(날짜|시간|일시).{0,5}(추천|잡|정|알려|찾)/,
+        /(다음\s*주|이번\s*주|내일|모레).{0,10}(가능|되|비어|시간)/,
     ];
 
     // =====================================================
@@ -625,6 +647,15 @@ export class IntentClassifierService {
             return false;
         });
 
+        // 17. 캘린더/일정 추천 Intent 체크
+        const isCalendarIntent = this.CALENDAR_PATTERNS.some(pattern => {
+            if (pattern.test(lowerNormalized)) {
+                matchedPatterns.push(`Calendar: ${pattern.source.substring(0, 20)}...`);
+                return true;
+            }
+            return false;
+        });
+
         // 질문 의도 판단
         const isQuestionIntent = hasQuestionWord || hasCommandWord || hasQuestionPattern || hasRequestPattern;
 
@@ -649,6 +680,7 @@ export class IntentClassifierService {
             isVisionIntent,
             isIdeaBoardIntent,
             isFlowchartIntent,
+            isCalendarIntent,
             confidence,
             matchedPatterns,
             normalizedText,
@@ -664,7 +696,7 @@ export class IntentClassifierService {
             needsLlmCorrection,
         };
 
-        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, idea=${isIdeaBoardIntent}, flowchart=${isFlowchartIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
+        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, idea=${isIdeaBoardIntent}, flowchart=${isFlowchartIntent}, calendar=${isCalendarIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
 
         return result;
     }
