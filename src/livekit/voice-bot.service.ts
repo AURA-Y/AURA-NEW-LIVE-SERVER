@@ -44,6 +44,15 @@ interface ConversationTurn {
     speaker?: string;  // 발화자 ID (user인 경우)
 }
 
+// 참여자 발언 통계 타입
+interface ParticipantSpeakingStats {
+    participantId: string;
+    participantName: string;
+    speakingDurationMs: number;  // 총 발언 시간 (밀리초)
+    speakingCount: number;       // 발언 횟수
+    lastSpokenAt: number;        // 마지막 발언 시간
+}
+
 interface RoomContext {
     room: Room;
     audioSource: AudioSource;
@@ -117,16 +126,21 @@ interface RoomContext {
     aiMuted: boolean;
     // Perplexity 모드 (WFC 기반 흐름 제어)
     perplexityModeActive: boolean;
+    // 호스트 전용 코칭 모드 (TTS 비활성화, Wake word 비활성화)
+    hostOnlyMode: boolean;
+    hostIdentity: string | null;
+    // Wake word 활성화 여부 (호스트가 토글 가능)
+    wakeWordEnabled: boolean;
     // isPublishing 시작 시간 (타임아웃 감지용)
     publishingStartTime: number;
     // 회의 주제
     roomTopic?: string;
-    // 타임라인 키워드 기능 (1분 단위)
-    timelineStartTime: number;
-    // 현재 분의 발화 수집 (5초마다 LLM으로 키워드 추출)
-    pendingTranscripts: Array<{ speaker: string; text: string; timestamp: number }>;
-    timelineInterval?: NodeJS.Timeout;
-    lastTimelineMinuteIndex: number;
+    // 참여자 발언 통계 (코칭 패널용)
+    participantSpeakingStats: Map<string, ParticipantSpeakingStats>;
+    // 통계 업데이트 인터벌
+    statsUpdateInterval: NodeJS.Timeout | null;
+    // Dominant speaker 알림 기록 (중복 방지)
+    dominantAlertSent: boolean;
 }
 
 @Injectable()
@@ -227,11 +241,32 @@ export class VoiceBotService {
                     clearTimeout(context.shutdownTimeout);
                     context.shutdownTimeout = undefined;
                 }
+
+                // RAG 서버에 참여자 입장 전송 (호스트 모드일 때, 호스트 아닌 경우)
+                if (context?.hostOnlyMode && participant.identity !== context.hostIdentity) {
+                    this.ragClient.participantJoined(roomId, {
+                        id: participant.identity,
+                        name: participant.name || participant.identity,
+                        role: 'participant',
+                    }).catch(err => {
+                        this.logger.warn(`[RAG 참여자 입장] 전송 실패: ${err.message}`);
+                    });
+                }
             }
         });
 
         room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
             this.logger.log(`[참여자 퇴장] ${participant.identity}`);
+
+            // RAG 서버에 참여자 퇴장 전송 (AI 봇 제외)
+            if (!participant.identity.startsWith('ai-bot')) {
+                const context = this.activeRooms.get(roomId);
+                if (context?.hostOnlyMode) {
+                    this.ragClient.participantLeft(roomId, participant.identity).catch(err => {
+                        this.logger.warn(`[RAG 참여자 퇴장] 전송 실패: ${err.message}`);
+                    });
+                }
+            }
 
             const humanCount = Array.from(room.remoteParticipants.values())
                 .filter(p => !p.identity.startsWith('ai-bot')).length;
@@ -315,11 +350,55 @@ export class VoiceBotService {
                 if (message.type === 'AI_MUTE') {
                     const muted = message.muted === true;
                     context.aiMuted = muted;
-                    this.logger.log(`[AI 음소거] ${muted ? 'ON' : 'OFF'} by ${participant?.identity || 'unknown'}`);
+                    // 음소거 ON이면 현재 재생 중인 오디오도 즉시 중단
+                    if (muted) {
+                        context.shouldInterrupt = true;
+                    }
+                    this.logger.log(`[AI 음소거] ${muted ? 'ON (오디오 중단)' : 'OFF'} by ${participant?.identity || 'unknown'}`);
                     return;
                 }
 
+                // 호스트 전용 코칭 모드 활성화
+                if (message.type === 'HOST_MODE_ENABLE') {
+                    context.hostOnlyMode = message.enabled === true;
+                    context.hostIdentity = message.hostIdentity || participant?.identity || null;
+                    this.logger.log(`[호스트 모드] ${context.hostOnlyMode ? 'ON' : 'OFF'} - host: ${context.hostIdentity}`);
 
+                    // RAG 서버에 호스트 입장 전송
+                    if (context.hostOnlyMode && context.hostIdentity) {
+                        const hostParticipant = context.room.remoteParticipants.get(context.hostIdentity);
+                        this.ragClient.participantJoined(roomId, {
+                            id: context.hostIdentity,
+                            name: hostParticipant?.name || context.hostIdentity,
+                            role: 'host',
+                        }).catch(err => {
+                            this.logger.warn(`[RAG 호스트 입장] 전송 실패: ${err.message}`);
+                        });
+                    }
+                    return;
+                }
+
+                // Wake word 모드 토글 (호스트 전용)
+                if (message.type === 'WAKE_WORD_TOGGLE') {
+                    // 호스트만 토글 가능
+                    if (participant?.identity === context.hostIdentity) {
+                        context.wakeWordEnabled = message.enabled === true;
+                        this.logger.log(`[Wake Word] ${context.wakeWordEnabled ? 'ON' : 'OFF'} by host`);
+                    }
+                    return;
+                }
+
+                // 호스트 전용 AI 쿼리 (Wake word 대체)
+                if (message.type === 'HOST_AI_QUERY') {
+                    if (context.hostOnlyMode && participant?.identity === context.hostIdentity) {
+                        this.logger.log(`[호스트 AI 쿼리] ${message.query}`);
+                        // 호스트가 직접 AI 질문 - 처리 로직 호출 (비동기)
+                        this.processHostQuery(roomId, message.query, participant.identity).catch(err => {
+                            this.logger.error(`[호스트 쿼리 에러] ${err.message}`);
+                        });
+                    }
+                    return;
+                }
 
                 if (message.type === 'IDEA_MODE_START') {
                     // 이미 ON이면 무시
@@ -609,20 +688,25 @@ export class VoiceBotService {
                 aiMuted: false,
                 // Perplexity 모드 초기화
                 perplexityModeActive: false,
+                // 호스트 전용 코칭 모드 초기화 (기본 활성화)
+                hostOnlyMode: true,
+                hostIdentity: null,
+                wakeWordEnabled: false,
                 // isPublishing 타임아웃 감지용
                 publishingStartTime: 0,
                 // 회의 주제
                 roomTopic,
-                // 타임라인 키워드 (30초 단위)
-                timelineStartTime: Date.now(),
-                pendingTranscripts: [],
-                lastTimelineMinuteIndex: 0,
+                // 참여자 발언 통계 초기화
+                participantSpeakingStats: new Map(),
+                statsUpdateInterval: null,
+                dominantAlertSent: false,
             };
             this.activeRooms.set(roomId, context);
 
             this.startArmedTimeoutChecker(roomId);
-            // 타임라인 5초 인터벌 시작
-            this.startTimelineInterval(roomId);
+            this.startSilentParticipantChecker(roomId);
+            this.startTopicSummaryChecker(roomId);
+            this.startSpeakingStatsChecker(roomId);
 
             this.logger.log(`[봇 입장 성공] 참여자: ${room.remoteParticipants.size}명`);
 
@@ -2066,18 +2150,12 @@ ${edgesDesc}
         // 모든 참가자의 발화를 기록 (봇 응답 여부와 무관)
         this.sendToRagForEmbedding(roomId, transcript, userId, startTime);
 
-        // ★ 타임라인용 발화 수집 (5초마다 LLM으로 키워드 추출)
-        // 키워드 힌트로 인한 "아우라" 오인식 제거 후 수집
-        const timelineTranscript = rawTranscript
-            .replace(/아우라(야|나|요)?/gi, '')
-            .replace(/오우라(야)?/gi, '')
-            .replace(/어우라(야)?/gi, '')
-            .replace(/헤이\s*아우라/gi, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-        if (timelineTranscript.length > 0) {
-            this.collectTranscriptForTimeline(roomId, timelineTranscript, userId);
-        }
+        // ★ 발언 통계 업데이트 (코칭 패널용)
+        // 오디오 버퍼에서 발언 시간 계산 (16kHz, 16-bit mono PCM)
+        const speakingDurationMs = Math.round((audioBuffer.length / (16000 * 2)) * 1000);
+        const participant = context.room.remoteParticipants.get(userId);
+        const participantName = participant?.name || userId;
+        this.updateParticipantSpeakingStats(context, userId, participantName, speakingDurationMs);
 
         // ================================================
         // ★ Perplexity 모드: isPublishing과 무관하게 TRANSCRIPT 항상 저장
@@ -2474,6 +2552,12 @@ ${edgesDesc}
             // 4. 웨이크워드 판단 + LLM 교정 (필요시만!)
             // ================================================
             let shouldRespond = intentAnalysis.isCallIntent;
+
+            // Wake word 비활성화 상태에서는 무시 (호스트가 활성화해야 동작)
+            if (!context.wakeWordEnabled) {
+                shouldRespond = false;
+            }
+
             let processedText = intentAnalysis.normalizedText;
             let searchKeyword = intentAnalysis.extractedKeyword;
             let searchType = intentAnalysis.searchType;
@@ -2581,6 +2665,9 @@ ${edgesDesc}
 
                 context.lastInteractionTime = Date.now();
 
+                // ★ AI 상태: listening (시리 UI용)
+                this.broadcastAiState(roomId, 'listening', { transcript: processedText }).catch(() => {});
+
                 // ============================================
                 // 7.5 Agent 모드 판단 (패턴 매칭 실패 시 LLM 라우팅)
                 // ============================================
@@ -2614,6 +2701,9 @@ ${edgesDesc}
 
                 this.logger.log(`[검색 준비] keyword="${finalSearchKeyword}", cat=${finalCategory}`);
 
+                // ★ AI 상태: processing (시리 UI용)
+                this.broadcastAiState(roomId, 'processing', { transcript: processedText }).catch(() => {});
+
                 // ============================================
                 // 9. LLM 호출 (생각중 응답 포함)
                 // ============================================
@@ -2646,8 +2736,9 @@ ${edgesDesc}
                     roomId
                 ).finally(() => { llmResolved = true; });
 
-                // 700ms 후에도 응답 없으면 "생각중" 발화
+                // 700ms 후에도 응답 없으면 "생각중" 발화 (hostOnlyMode에서는 스킵 - Dynamic Island로 대체)
                 const thinkingTask = (async () => {
+                    if (context.hostOnlyMode) return; // Dynamic Island가 상태 표시
                     await this.sleep(700);
                     if (llmResolved || context.currentRequestId !== requestId) return;
                     this.logger.log(`[생각중] 응답 대기...`);
@@ -2673,9 +2764,9 @@ ${edgesDesc}
                 }
 
                 // ============================================
-                // 10. DataChannel 전송 (검색 결과)
+                // 10. DataChannel 전송 (검색 결과) - hostOnlyMode에서는 스킵
                 // ============================================
-                if (llmResult.searchResults && llmResult.searchResults.length > 0) {
+                if (!context.hostOnlyMode && llmResult.searchResults && llmResult.searchResults.length > 0) {
                     const primaryResult = llmResult.searchResults[0];
                     const routeInfo = await this.llmService.getRouteInfo(primaryResult);
 
@@ -2829,6 +2920,23 @@ ${edgesDesc}
             return;
         }
 
+        // 호스트 전용 모드면 TTS 대신 텍스트 카드 전송
+        if (context.hostOnlyMode && context.hostIdentity) {
+            this.logger.log(`[텍스트 카드] 호스트에게만 전송 - 메시지: "${message.substring(0, 50)}..."`);
+
+            // Siri 스타일: speaking 상태 브로드캐스트
+            await this.broadcastAiState(roomId, 'speaking', { response: message });
+
+            await this.sendTextCardToHost(context, message);
+
+            // 일정 시간 후 idle 상태로 복귀 (텍스트 읽는 시간 고려)
+            const readingTime = Math.min(message.length * 50, 5000); // 글자당 50ms, 최대 5초
+            setTimeout(() => {
+                this.broadcastAiState(roomId, 'idle');
+            }, readingTime);
+            return;
+        }
+
         const ttsStart = Date.now();
         const pcmAudio = await this.ttsService.synthesizePcm(message);
         this.logger.log(`[TTS] ${Date.now() - ttsStart}ms - ${pcmAudio.length} bytes`);
@@ -2845,7 +2953,13 @@ ${edgesDesc}
         // TTS 합성 완료 후 interrupt 플래그 리셋 (합성 중 barge-in 무시)
         context.shouldInterrupt = false;
 
+        // Siri 스타일: speaking 상태 브로드캐스트
+        await this.broadcastAiState(roomId, 'speaking', { response: message });
+
         await this.publishAudio(roomId, context.audioSource, pcmAudio);
+
+        // 오디오 재생 완료 후 idle 상태로 복귀
+        await this.broadcastAiState(roomId, 'idle');
     }
 
     // ============================================================
@@ -3343,14 +3457,16 @@ ${edgesDesc}
             context.botState = BotState.SPEAKING;
             context.speakingStartTime = Date.now();
 
-            // "잠깐만요" 먼저 말하기 (Vision API 호출 시간 벌기)
-            const thinkingPhrases = [
-                '잠깐 볼게요~',
-                '한번 볼게요',
-                '잠깐만요~',
-            ];
-            const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
-            await this.speakAndPublish(context, roomId, requestId, thinkingPhrase);
+            // "잠깐만요" 먼저 말하기 (Vision API 호출 시간 벌기) - hostOnlyMode에서는 스킵
+            if (!context.hostOnlyMode) {
+                const thinkingPhrases = [
+                    '잠깐 볼게요~',
+                    '한번 볼게요',
+                    '잠깐만요~',
+                ];
+                const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
+                await this.speakAndPublish(context, roomId, requestId, thinkingPhrase);
+            }
 
             // Vision API 호출
             const result = await this.visionService.analyzeScreenShare(
@@ -4025,5 +4141,455 @@ ${transcripts}
      */
     getActiveRoomIds(): string[] {
         return Array.from(this.activeRooms.keys());
+    }
+
+    // ============================================================
+    // 호스트 전용 코칭 모드 메서드
+    // ============================================================
+
+    /**
+     * 호스트에게만 텍스트 카드 전송 (TTS 대체)
+     */
+    private async sendTextCardToHost(context: RoomContext, message: string): Promise<void> {
+        if (!context.hostIdentity) return;
+
+        const textCardMessage = {
+            type: 'AI_TEXT_RESPONSE',
+            text: message,
+            timestamp: Date.now(),
+        };
+
+        const encoder = new TextEncoder();
+
+        // 호스트에게만 전송
+        await context.room.localParticipant.publishData(
+            encoder.encode(JSON.stringify(textCardMessage)),
+            {
+                reliable: true,
+                destination_identities: [context.hostIdentity]
+            }
+        );
+
+        this.logger.log(`[텍스트 카드] 호스트에게 전송 완료`);
+    }
+
+    /**
+     * 호스트 AI 쿼리 처리 (Wake word 대체)
+     */
+    private async processHostQuery(roomId: string, query: string, hostIdentity: string): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        try {
+            // RAG 검색
+            const ragAnswer = await this.ragClient.sendQuestion(roomId, query);
+
+            if (ragAnswer) {
+                await this.sendTextCardToHost(context, ragAnswer);
+            } else {
+                // RAG 결과 없으면 LLM 직접 호출
+                const prompt = `질문: ${query}\n\n간결하고 명확하게 한국어로 답변해주세요.`;
+                const llmResponse = await this.llmService.sendMessagePure(prompt, 500);
+                await this.sendTextCardToHost(context, llmResponse);
+            }
+
+            // 대화 히스토리에 추가
+            context.conversationHistory.push({
+                role: 'user',
+                content: query,
+                timestamp: Date.now(),
+                speaker: hostIdentity,
+            });
+        } catch (error) {
+            this.logger.error(`[호스트 쿼리] 에러: ${error.message}`);
+            await this.sendTextCardToHost(context, '죄송해요, 잠시 문제가 생겼어요.');
+        }
+    }
+
+    /**
+     * Silent Participant 주기적 체크 시작
+     */
+    private startSilentParticipantChecker(roomId: string): void {
+        const SILENT_THRESHOLD_MS = 2* 60 * 1000; // 2분
+        const CHECK_INTERVAL_MS = 15 * 1000; // 15초마다 체크
+        const alreadyAlerted = new Set<string>(); // 이미 알린 참여자
+
+        const initialContext = this.activeRooms.get(roomId);
+        if (!initialContext) return;
+
+        // 참여자 입장 시간 기록 (한 번도 발언 안 한 참여자 감지용)
+        const participantJoinTime = new Map<string, number>();
+
+        const checkInterval = setInterval(async () => {
+            const context = this.activeRooms.get(roomId);
+            if (!context) {
+                clearInterval(checkInterval);
+                return;
+            }
+
+            // 호스트 전용 모드가 아니면 스킵
+            if (!context.hostOnlyMode || !context.hostIdentity) {
+                return;
+            }
+
+            const now = Date.now();
+
+            // 현재 방의 모든 참여자 확인
+            for (const participant of context.room.remoteParticipants.values()) {
+                const identity = participant.identity;
+
+                // AI 봇이나 호스트는 제외
+                if (identity.startsWith('ai-bot') || identity === context.hostIdentity) {
+                    continue;
+                }
+
+                // 참여자 입장 시간 기록 (처음 본 경우)
+                if (!participantJoinTime.has(identity)) {
+                    participantJoinTime.set(identity, now);
+                }
+
+                const lastSttTime = context.lastSttTimeByUser.get(identity) || 0;
+                const joinTime = participantJoinTime.get(identity) || now;
+
+                // 마지막 발언 시간 또는 입장 시간 기준
+                const referenceTime = lastSttTime > 0 ? lastSttTime : joinTime;
+                const silentDuration = now - referenceTime;
+
+                // 3분 이상 발언 없고, 아직 알리지 않은 경우
+                if (silentDuration >= SILENT_THRESHOLD_MS && !alreadyAlerted.has(identity)) {
+                    const participantName = participant.name || identity;
+                    await this.sendSilentParticipantAlert(roomId, identity, participantName, silentDuration);
+                    alreadyAlerted.add(identity);
+                    this.logger.log(`[Silent 감지] ${participantName} - ${Math.floor(silentDuration / 60000)}분 동안 발언 없음`);
+                }
+
+                // 발언하면 알림 리셋
+                if (lastSttTime > 0 && (now - lastSttTime) < SILENT_THRESHOLD_MS) {
+                    alreadyAlerted.delete(identity);
+                }
+            }
+        }, CHECK_INTERVAL_MS);
+
+        // 방 종료 시 정리
+        const cleanup = () => {
+            clearInterval(checkInterval);
+        };
+
+        initialContext.room.on(RoomEvent.Disconnected, cleanup);
+    }
+
+    /**
+     * Silent Participant 알림 전송 (호스트에게만)
+     */
+    async sendSilentParticipantAlert(
+        roomId: string,
+        participantId: string,
+        participantName: string,
+        silentDurationMs: number
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context || !context.hostOnlyMode || !context.hostIdentity) return;
+
+        const alertMessage = {
+            type: 'SILENT_PARTICIPANT_ALERT',
+            participantId,
+            participantName,
+            silentDurationMs,
+            silentMinutes: Math.floor(silentDurationMs / 60000),
+            timestamp: Date.now(),
+        };
+
+        const encoder = new TextEncoder();
+
+        await context.room.localParticipant.publishData(
+            encoder.encode(JSON.stringify(alertMessage)),
+            {
+                reliable: true,
+                destination_identities: [context.hostIdentity]
+            }
+        );
+
+        this.logger.log(`[Silent 알림] ${participantName} (${Math.floor(silentDurationMs / 60000)}분) → 호스트에게 전송`);
+    }
+
+    /**
+     * 참여자 발언 통계 업데이트
+     */
+    private updateParticipantSpeakingStats(
+        context: RoomContext,
+        participantId: string,
+        participantName: string,
+        durationMs: number
+    ): void {
+        const existing = context.participantSpeakingStats.get(participantId);
+
+        if (existing) {
+            existing.speakingDurationMs += durationMs;
+            existing.speakingCount += 1;
+            existing.lastSpokenAt = Date.now();
+        } else {
+            context.participantSpeakingStats.set(participantId, {
+                participantId,
+                participantName,
+                speakingDurationMs: durationMs,
+                speakingCount: 1,
+                lastSpokenAt: Date.now(),
+            });
+        }
+    }
+
+    /**
+     * 발언 통계 주기적 전송 시작 (호스트에게 실시간 발언 분포 전송)
+     */
+    private startSpeakingStatsChecker(roomId: string): void {
+        const STATS_INTERVAL_MS = 10 * 1000; // 10초마다
+        const DOMINANT_THRESHOLD = 0.6; // 60% 이상이면 dominant
+
+        const initialContext = this.activeRooms.get(roomId);
+        if (!initialContext) return;
+
+        const statsInterval = setInterval(async () => {
+            const context = this.activeRooms.get(roomId);
+            if (!context) {
+                clearInterval(statsInterval);
+                return;
+            }
+
+            // 호스트 전용 모드가 아니면 스킵
+            if (!context.hostOnlyMode || !context.hostIdentity) {
+                return;
+            }
+
+            // 발언 데이터가 없으면 스킵
+            if (context.participantSpeakingStats.size === 0) {
+                return;
+            }
+
+            // 전체 발언 시간 계산
+            let totalDurationMs = 0;
+            const statsArray: Array<{
+                participantId: string;
+                participantName: string;
+                speakingDurationMs: number;
+                speakingCount: number;
+                speakingRatio: number;
+            }> = [];
+
+            for (const stats of context.participantSpeakingStats.values()) {
+                totalDurationMs += stats.speakingDurationMs;
+            }
+
+            // 비율 계산
+            for (const stats of context.participantSpeakingStats.values()) {
+                const ratio = totalDurationMs > 0 ? stats.speakingDurationMs / totalDurationMs : 0;
+                statsArray.push({
+                    participantId: stats.participantId,
+                    participantName: stats.participantName,
+                    speakingDurationMs: stats.speakingDurationMs,
+                    speakingCount: stats.speakingCount,
+                    speakingRatio: Math.round(ratio * 100) / 100,
+                });
+            }
+
+            // 발언 시간 순으로 정렬
+            statsArray.sort((a, b) => b.speakingDurationMs - a.speakingDurationMs);
+
+            // 호스트에게 통계 전송
+            const statsMessage = {
+                type: 'PARTICIPANT_STATS',
+                stats: statsArray,
+                totalDurationMs,
+                timestamp: Date.now(),
+            };
+
+            const encoder = new TextEncoder();
+
+            try {
+                await context.room.localParticipant.publishData(
+                    encoder.encode(JSON.stringify(statsMessage)),
+                    {
+                        reliable: true,
+                        destination_identities: [context.hostIdentity]
+                    }
+                );
+
+                // Dominant speaker 체크 (60% 이상, 2명 이상 참여자)
+                if (statsArray.length >= 2 && !context.dominantAlertSent) {
+                    const topSpeaker = statsArray[0];
+                    if (topSpeaker.speakingRatio >= DOMINANT_THRESHOLD) {
+                        // Dominant 알림 전송
+                        const dominantAlert = {
+                            type: 'DOMINANT_SPEAKER_ALERT',
+                            participantId: topSpeaker.participantId,
+                            participantName: topSpeaker.participantName,
+                            speakingRatio: topSpeaker.speakingRatio,
+                            timestamp: Date.now(),
+                        };
+
+                        await context.room.localParticipant.publishData(
+                            encoder.encode(JSON.stringify(dominantAlert)),
+                            {
+                                reliable: true,
+                                destination_identities: [context.hostIdentity]
+                            }
+                        );
+
+                        context.dominantAlertSent = true;
+                        this.logger.log(`[Dominant 알림] ${topSpeaker.participantName} (${Math.round(topSpeaker.speakingRatio * 100)}%) → 호스트에게 전송`);
+                    }
+                }
+
+                // 비율이 60% 미만으로 떨어지면 다시 알림 가능
+                if (statsArray.length >= 2 && context.dominantAlertSent) {
+                    const topSpeaker = statsArray[0];
+                    if (topSpeaker.speakingRatio < DOMINANT_THRESHOLD - 0.1) { // 50% 미만이면 리셋
+                        context.dominantAlertSent = false;
+                    }
+                }
+
+            } catch (error) {
+                this.logger.debug(`[발언 통계] 전송 실패: ${error.message}`);
+            }
+
+        }, STATS_INTERVAL_MS);
+
+        // 인터벌 참조 저장 (cleanup용)
+        initialContext.statsUpdateInterval = statsInterval;
+    }
+
+    /**
+     * 논점 요약 주기적 체크 시작 (호스트에게 실시간 논점 전송)
+     * RAG 서버의 중간 보고서를 활용
+     */
+    private startTopicSummaryChecker(roomId: string): void {
+        const SUMMARY_INTERVAL_MS = 2 * 60 * 1000; // 2분마다
+        let lastReportHash = '';
+
+        const initialContext = this.activeRooms.get(roomId);
+        if (!initialContext) return;
+
+        const summaryInterval = setInterval(async () => {
+            const context = this.activeRooms.get(roomId);
+            if (!context) {
+                clearInterval(summaryInterval);
+                return;
+            }
+
+            // 호스트 전용 모드가 아니면 스킵
+            if (!context.hostOnlyMode || !context.hostIdentity) {
+                return;
+            }
+
+            try {
+                // RAG 서버에서 중간 보고서 요청
+                const reportResult = await this.ragClient.requestReport(roomId);
+
+                if (!reportResult.success || !reportResult.report?.reportContent) {
+                    this.logger.debug(`[논점 요약] RAG 보고서 없음 또는 실패`);
+                    return;
+                }
+
+                const reportContent = reportResult.report.reportContent;
+
+                // 동일한 보고서 중복 전송 방지
+                const reportHash = reportContent.substring(0, 100);
+                if (reportHash === lastReportHash) {
+                    return;
+                }
+                lastReportHash = reportHash;
+
+                // LLM으로 논점 추출
+                const prompt = `다음 회의 중간 보고서에서 핵심 논점 1개를 추출하세요.
+
+보고서:
+${reportContent.substring(0, 1000)}
+
+응답 형식 (JSON만, 다른 텍스트 없이):
+{"topic": "논점 제목 (5단어 이내)", "summary": "핵심 내용 요약 (1-2문장)"}`;
+
+                const response = await this.llmService.sendMessagePure(prompt, 200);
+
+                // JSON 파싱 시도
+                const jsonMatch = response.match(/\{[\s\S]*?\}/);
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    if (parsed.topic && parsed.summary) {
+                        await this.sendTopicSummary(roomId, parsed.topic, parsed.summary);
+                        this.logger.log(`[논점 요약] RAG 기반 - "${parsed.topic}"`);
+                    }
+                }
+            } catch (error) {
+                this.logger.debug(`[논점 요약] 에러: ${error.message}`);
+            }
+        }, SUMMARY_INTERVAL_MS);
+
+        // 방 종료 시 정리
+        const cleanup = () => {
+            clearInterval(summaryInterval);
+        };
+
+        initialContext.room.on(RoomEvent.Disconnected, cleanup);
+    }
+
+    /**
+     * 논점 요약 전송 (호스트에게만)
+     */
+    async sendTopicSummary(
+        roomId: string,
+        topic: string,
+        summary: string
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context || !context.hostOnlyMode || !context.hostIdentity) return;
+
+        const topicMessage = {
+            type: 'TOPIC_SUMMARY',
+            topic,
+            summary,
+            timestamp: Date.now(),
+        };
+
+        const encoder = new TextEncoder();
+
+        await context.room.localParticipant.publishData(
+            encoder.encode(JSON.stringify(topicMessage)),
+            {
+                reliable: true,
+                destination_identities: [context.hostIdentity]
+            }
+        );
+
+        this.logger.log(`[논점 요약] "${topic}" → 호스트에게 전송`);
+    }
+
+    /**
+     * AI 상태 브로드캐스트 (시리 스타일 UI용)
+     * state: 'idle' | 'listening' | 'processing' | 'speaking'
+     */
+    async broadcastAiState(
+        roomId: string,
+        state: 'idle' | 'listening' | 'processing' | 'speaking',
+        data?: { transcript?: string; response?: string }
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        const stateMessage = {
+            type: 'AI_STATE',
+            state,
+            transcript: data?.transcript,
+            response: data?.response,
+            timestamp: Date.now(),
+        };
+
+        const encoder = new TextEncoder();
+
+        // 모든 참여자에게 브로드캐스트 (시리 UI는 모두에게 보임)
+        await context.room.localParticipant.publishData(
+            encoder.encode(JSON.stringify(stateMessage)),
+            { reliable: true }
+        );
+
+        this.logger.debug(`[AI 상태] ${state}`);
     }
 }
