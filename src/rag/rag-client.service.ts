@@ -701,6 +701,52 @@ export class RagClientService implements OnModuleDestroy {
         }
     }
 
+    /**
+     * 참여자 입장 알림 (HTTP POST)
+     * POST /meetings/{roomId}/participants/join
+     */
+    async participantJoined(roomId: string, participant: {
+        id: string;
+        name: string;
+        role: 'host' | 'participant';
+    }): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/participants/join`;
+
+        this.logger.log(`[RAG 참여자 입장] ${participant.name} (${participant.role})`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint, participant);
+            this.logger.log(`[RAG 참여자 입장 성공] ${roomId} - ${participant.name}`);
+            return { success: true, message: response.data };
+        } catch (error: any) {
+            this.logger.warn(`[RAG 참여자 입장 실패] ${roomId}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
+
+    /**
+     * 참여자 퇴장 알림 (HTTP POST)
+     * POST /meetings/{roomId}/participants/leave
+     */
+    async participantLeft(roomId: string, participantId: string): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/participants/leave`;
+
+        this.logger.log(`[RAG 참여자 퇴장] ${participantId}`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint, { participantId });
+            this.logger.log(`[RAG 참여자 퇴장 성공] ${roomId} - ${participantId}`);
+            return { success: true, message: response.data };
+        } catch (error: any) {
+            this.logger.warn(`[RAG 참여자 퇴장 실패] ${roomId}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
+
     // ============================================================
     // 시연용 목업 데이터 주입 메서드
     // ============================================================

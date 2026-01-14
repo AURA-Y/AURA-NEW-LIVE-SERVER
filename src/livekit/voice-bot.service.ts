@@ -224,11 +224,32 @@ export class VoiceBotService {
                     clearTimeout(context.shutdownTimeout);
                     context.shutdownTimeout = undefined;
                 }
+
+                // RAG 서버에 참여자 입장 전송 (호스트 모드일 때, 호스트 아닌 경우)
+                if (context?.hostOnlyMode && participant.identity !== context.hostIdentity) {
+                    this.ragClient.participantJoined(roomId, {
+                        id: participant.identity,
+                        name: participant.name || participant.identity,
+                        role: 'participant',
+                    }).catch(err => {
+                        this.logger.warn(`[RAG 참여자 입장] 전송 실패: ${err.message}`);
+                    });
+                }
             }
         });
 
         room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
             this.logger.log(`[참여자 퇴장] ${participant.identity}`);
+
+            // RAG 서버에 참여자 퇴장 전송 (AI 봇 제외)
+            if (!participant.identity.startsWith('ai-bot')) {
+                const context = this.activeRooms.get(roomId);
+                if (context?.hostOnlyMode) {
+                    this.ragClient.participantLeft(roomId, participant.identity).catch(err => {
+                        this.logger.warn(`[RAG 참여자 퇴장] 전송 실패: ${err.message}`);
+                    });
+                }
+            }
 
             const humanCount = Array.from(room.remoteParticipants.values())
                 .filter(p => !p.identity.startsWith('ai-bot')).length;
@@ -307,6 +328,18 @@ export class VoiceBotService {
                     context.hostOnlyMode = message.enabled === true;
                     context.hostIdentity = message.hostIdentity || participant?.identity || null;
                     this.logger.log(`[호스트 모드] ${context.hostOnlyMode ? 'ON' : 'OFF'} - host: ${context.hostIdentity}`);
+
+                    // RAG 서버에 호스트 입장 전송
+                    if (context.hostOnlyMode && context.hostIdentity) {
+                        const hostParticipant = context.room.remoteParticipants.get(context.hostIdentity);
+                        this.ragClient.participantJoined(roomId, {
+                            id: context.hostIdentity,
+                            name: hostParticipant?.name || context.hostIdentity,
+                            role: 'host',
+                        }).catch(err => {
+                            this.logger.warn(`[RAG 호스트 입장] 전송 실패: ${err.message}`);
+                        });
+                    }
                     return;
                 }
 
