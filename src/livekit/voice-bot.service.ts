@@ -289,7 +289,11 @@ export class VoiceBotService {
                 if (message.type === 'AI_MUTE') {
                     const muted = message.muted === true;
                     context.aiMuted = muted;
-                    this.logger.log(`[AI 음소거] ${muted ? 'ON' : 'OFF'} by ${participant?.identity || 'unknown'}`);
+                    // 음소거 ON이면 현재 재생 중인 오디오도 즉시 중단
+                    if (muted) {
+                        context.shouldInterrupt = true;
+                    }
+                    this.logger.log(`[AI 음소거] ${muted ? 'ON (오디오 중단)' : 'OFF'} by ${participant?.identity || 'unknown'}`);
                     return;
                 }
 
