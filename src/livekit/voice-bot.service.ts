@@ -4257,7 +4257,7 @@ ${firstCode.substring(0, 500)}
      * RAG 서버의 중간 보고서를 활용
      */
     private startTopicSummaryChecker(roomId: string): void {
-        const SUMMARY_INTERVAL_MS = 2 * 60 * 1000; // 2분마다
+        const SUMMARY_INTERVAL_MS = 30 * 1000; // 30초마다
         let lastReportHash = '';
 
         const initialContext = this.activeRooms.get(roomId);
