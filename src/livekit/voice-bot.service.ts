@@ -515,6 +515,18 @@ export class VoiceBotService {
         try {
             await room.connect(livekitUrl, botToken);
 
+            // Room metadata에서 회의 주제 추출
+            let roomTopic: string | undefined;
+            try {
+                if (room.metadata) {
+                    const meta = JSON.parse(room.metadata);
+                    roomTopic = meta.topic;
+                    this.logger.log(`[회의 주제] ${roomTopic || '(없음)'}`);
+                }
+            } catch (e) {
+                this.logger.warn(`[metadata 파싱 실패] ${e.message}`);
+            }
+
             // RAG 연결은 비동기로 처리 (방 입장을 블로킹하지 않음)
             this.ragClient.connect(roomId)
                 .then(() => this.logger.log(`[RAG 연결 완료] ${roomId}`))
@@ -575,6 +587,8 @@ export class VoiceBotService {
                 perplexityModeActive: false,
                 // isPublishing 타임아웃 감지용
                 publishingStartTime: 0,
+                // 회의 주제
+                roomTopic,
             };
             this.activeRooms.set(roomId, context);
 
