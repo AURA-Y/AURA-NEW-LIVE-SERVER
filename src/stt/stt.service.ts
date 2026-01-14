@@ -13,6 +13,12 @@ import { DagloSttAdapter } from './daglo-stt.adapter';
 // 지원하는 STT 프로바이더 타입
 type SttProvider = 'deepgram' | 'azure' | 'clova' | 'daglo';
 
+// STT 결과 (원본 + 교정)
+export interface SttResult {
+    raw: string;        // 교정 전 원본
+    corrected: string;  // 교정 후 결과
+}
+
 @Injectable()
 export class SttService implements OnModuleDestroy {
     private readonly logger = new Logger(SttService.name);
@@ -247,6 +253,15 @@ export class SttService implements OnModuleDestroy {
     }
 
     /**
+     * 버퍼에서 음성 인식 - 원본과 교정 결과 둘 다 반환
+     */
+    async transcribeFromBufferWithRaw(audioBuffer: Buffer, fileName: string): Promise<SttResult> {
+        const raw = await this.rawTranscribeFromBuffer(audioBuffer, fileName);
+        const corrected = await this.postProcess(raw);
+        return { raw, corrected };
+    }
+
+    /**
      * 스트림에서 음성 인식 + 후처리 교정
      */
     async transcribeStream(audioStream: Readable): Promise<string> {
@@ -255,11 +270,29 @@ export class SttService implements OnModuleDestroy {
     }
 
     /**
+     * 스트림에서 음성 인식 - 원본과 교정 결과 둘 다 반환
+     */
+    async transcribeStreamWithRaw(audioStream: Readable): Promise<SttResult> {
+        const raw = await this.rawTranscribeStream(audioStream);
+        const corrected = await this.postProcess(raw);
+        return { raw, corrected };
+    }
+
+    /**
      * 버퍼 스트림에서 음성 인식 + 후처리 교정
      */
     async transcribeFromBufferStream(audioBuffer: Buffer, fileName: string): Promise<string> {
         const rawTranscript = await this.rawTranscribeFromBufferStream(audioBuffer, fileName);
         return this.postProcess(rawTranscript);
+    }
+
+    /**
+     * 버퍼 스트림에서 음성 인식 - 원본과 교정 결과 둘 다 반환
+     */
+    async transcribeFromBufferStreamWithRaw(audioBuffer: Buffer, fileName: string): Promise<SttResult> {
+        const raw = await this.rawTranscribeFromBufferStream(audioBuffer, fileName);
+        const corrected = await this.postProcess(raw);
+        return { raw, corrected };
     }
 
     // =====================================================
@@ -705,15 +738,11 @@ export class SttService implements OnModuleDestroy {
             throw new Error('Clova STT adapter is not initialized');
         }
 
-        this.logger.log(`[Clova STT 시작] 파일: ${fileName}, 크기: ${audioBuffer.length} bytes`);
-
         try {
             const transcript = await this.clovaAdapter.transcribe(audioBuffer, {
                 language: 'ko',
-                keywordBoosting: this.ALL_HINTS.slice(0, 50), // 상위 50개 키워드
+                keywordBoosting: this.ALL_HINTS.slice(0, 50),
             });
-
-            this.logger.log(`[Clova STT 완료] 결과: ${transcript}`);
             return transcript || '';
         } catch (error) {
             this.logger.error(`[Clova STT 에러] ${error.message}`);
@@ -726,9 +755,6 @@ export class SttService implements OnModuleDestroy {
             throw new Error('Clova STT adapter is not initialized');
         }
 
-        this.logger.log(`[Clova STT 스트림 시작]`);
-
-        // Readable을 AsyncGenerator로 변환
         const audioGenerator = async function* (stream: Readable): AsyncGenerator<Buffer> {
             for await (const chunk of stream) {
                 yield chunk as Buffer;
@@ -743,14 +769,11 @@ export class SttService implements OnModuleDestroy {
                 keywordBoosting: this.ALL_HINTS.slice(0, 50),
             })) {
                 if (result.isFinal && result.text) {
-                    this.logger.log(`[Clova STT 결과] ${result.text}`);
                     transcripts.push(result.text);
                 }
             }
 
-            const fullTranscript = transcripts.join(' ').trim();
-            this.logger.log(`[Clova STT 스트림 완료] 결과: ${fullTranscript}`);
-            return fullTranscript;
+            return transcripts.join(' ').trim();
         } catch (error) {
             this.logger.error(`[Clova STT 스트림 에러] ${error.message}`);
             throw error;
