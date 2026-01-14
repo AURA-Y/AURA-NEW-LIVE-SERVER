@@ -2622,6 +2622,9 @@ ${edgesDesc}
 
                 context.lastInteractionTime = Date.now();
 
+                // ★ AI 상태: listening (시리 UI용)
+                this.broadcastAiState(roomId, 'listening', { transcript: processedText }).catch(() => {});
+
                 // ============================================
                 // 7.5 Agent 모드 판단 (패턴 매칭 실패 시 LLM 라우팅)
                 // ============================================
@@ -2654,6 +2657,9 @@ ${edgesDesc}
                 }
 
                 this.logger.log(`[검색 준비] keyword="${finalSearchKeyword}", cat=${finalCategory}`);
+
+                // ★ AI 상태: processing (시리 UI용)
+                this.broadcastAiState(roomId, 'processing', { transcript: processedText }).catch(() => {});
 
                 // ============================================
                 // 9. LLM 호출 (생각중 응답 포함)
@@ -2873,7 +2879,17 @@ ${edgesDesc}
         // 호스트 전용 모드면 TTS 대신 텍스트 카드 전송
         if (context.hostOnlyMode && context.hostIdentity) {
             this.logger.log(`[텍스트 카드] 호스트에게만 전송 - 메시지: "${message.substring(0, 50)}..."`);
+
+            // Siri 스타일: speaking 상태 브로드캐스트
+            await this.broadcastAiState(roomId, 'speaking', { response: message });
+
             await this.sendTextCardToHost(context, message);
+
+            // 일정 시간 후 idle 상태로 복귀 (텍스트 읽는 시간 고려)
+            const readingTime = Math.min(message.length * 50, 5000); // 글자당 50ms, 최대 5초
+            setTimeout(() => {
+                this.broadcastAiState(roomId, 'idle');
+            }, readingTime);
             return;
         }
 
@@ -2893,7 +2909,13 @@ ${edgesDesc}
         // TTS 합성 완료 후 interrupt 플래그 리셋 (합성 중 barge-in 무시)
         context.shouldInterrupt = false;
 
+        // Siri 스타일: speaking 상태 브로드캐스트
+        await this.broadcastAiState(roomId, 'speaking', { response: message });
+
         await this.publishAudio(roomId, context.audioSource, pcmAudio);
+
+        // 오디오 재생 완료 후 idle 상태로 복귀
+        await this.broadcastAiState(roomId, 'idle');
     }
 
     // ============================================================
@@ -4194,5 +4216,36 @@ ${reportContent.substring(0, 1000)}
         );
 
         this.logger.log(`[논점 요약] "${topic}" → 호스트에게 전송`);
+    }
+
+    /**
+     * AI 상태 브로드캐스트 (시리 스타일 UI용)
+     * state: 'idle' | 'listening' | 'processing' | 'speaking'
+     */
+    async broadcastAiState(
+        roomId: string,
+        state: 'idle' | 'listening' | 'processing' | 'speaking',
+        data?: { transcript?: string; response?: string }
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        const stateMessage = {
+            type: 'AI_STATE',
+            state,
+            transcript: data?.transcript,
+            response: data?.response,
+            timestamp: Date.now(),
+        };
+
+        const encoder = new TextEncoder();
+
+        // 모든 참여자에게 브로드캐스트 (시리 UI는 모두에게 보임)
+        await context.room.localParticipant.publishData(
+            encoder.encode(JSON.stringify(stateMessage)),
+            { reliable: true }
+        );
+
+        this.logger.debug(`[AI 상태] ${state}`);
     }
 }
