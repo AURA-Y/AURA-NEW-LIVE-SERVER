@@ -4060,11 +4060,11 @@ ${firstCode.substring(0, 500)}
 
     /**
      * 논점 요약 주기적 체크 시작 (호스트에게 실시간 논점 전송)
+     * RAG 서버의 중간 보고서를 활용
      */
     private startTopicSummaryChecker(roomId: string): void {
         const SUMMARY_INTERVAL_MS = 2 * 60 * 1000; // 2분마다
-        let lastSummaryTime = Date.now();
-        let lastProcessedIndex = 0;
+        let lastReportHash = '';
 
         const initialContext = this.activeRooms.get(roomId);
         if (!initialContext) return;
@@ -4081,43 +4081,42 @@ ${firstCode.substring(0, 500)}
                 return;
             }
 
-            // 마지막 요약 이후의 새 대화만 추출
-            const newTurns = context.conversationHistory.slice(lastProcessedIndex);
-            if (newTurns.length < 3) {
-                return; // 최소 3턴 이상 쌓여야 요약
-            }
-
-            // 사용자 발언만 추출
-            const userTurns = newTurns.filter(t => t.role === 'user');
-            if (userTurns.length < 2) {
-                return;
-            }
-
-            const recentConversation = userTurns
-                .map(t => `${t.speaker || '참여자'}: ${t.content}`)
-                .join('\n');
-
             try {
-                const prompt = `다음 회의 대화에서 핵심 논점 1개를 추출하세요.
+                // RAG 서버에서 중간 보고서 요청
+                const reportResult = await this.ragClient.requestReport(roomId);
 
-대화:
-${recentConversation}
+                if (!reportResult.success || !reportResult.report?.reportContent) {
+                    this.logger.debug(`[논점 요약] RAG 보고서 없음 또는 실패`);
+                    return;
+                }
 
-응답 형식 (JSON):
-{"topic": "논점 제목 (5단어 이내)", "summary": "핵심 내용 요약 (1-2문장)"}
+                const reportContent = reportResult.report.reportContent;
 
-응답:`;
+                // 동일한 보고서 중복 전송 방지
+                const reportHash = reportContent.substring(0, 100);
+                if (reportHash === lastReportHash) {
+                    return;
+                }
+                lastReportHash = reportHash;
+
+                // LLM으로 논점 추출
+                const prompt = `다음 회의 중간 보고서에서 핵심 논점 1개를 추출하세요.
+
+보고서:
+${reportContent.substring(0, 1000)}
+
+응답 형식 (JSON만, 다른 텍스트 없이):
+{"topic": "논점 제목 (5단어 이내)", "summary": "핵심 내용 요약 (1-2문장)"}`;
 
                 const response = await this.llmService.sendMessagePure(prompt, 200);
 
                 // JSON 파싱 시도
-                const jsonMatch = response.match(/\{[\s\S]*\}/);
+                const jsonMatch = response.match(/\{[\s\S]*?\}/);
                 if (jsonMatch) {
                     const parsed = JSON.parse(jsonMatch[0]);
                     if (parsed.topic && parsed.summary) {
                         await this.sendTopicSummary(roomId, parsed.topic, parsed.summary);
-                        lastProcessedIndex = context.conversationHistory.length;
-                        lastSummaryTime = Date.now();
+                        this.logger.log(`[논점 요약] RAG 기반 - "${parsed.topic}"`);
                     }
                 }
             } catch (error) {
