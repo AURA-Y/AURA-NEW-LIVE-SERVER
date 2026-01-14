@@ -44,6 +44,15 @@ interface ConversationTurn {
     speaker?: string;  // 발화자 ID (user인 경우)
 }
 
+// 참여자 발언 통계 타입
+interface ParticipantSpeakingStats {
+    participantId: string;
+    participantName: string;
+    speakingDurationMs: number;  // 총 발언 시간 (밀리초)
+    speakingCount: number;       // 발언 횟수
+    lastSpokenAt: number;        // 마지막 발언 시간
+}
+
 interface RoomContext {
     room: Room;
     audioSource: AudioSource;
@@ -126,6 +135,12 @@ interface RoomContext {
     publishingStartTime: number;
     // 회의 주제
     roomTopic?: string;
+    // 참여자 발언 통계 (코칭 패널용)
+    participantSpeakingStats: Map<string, ParticipantSpeakingStats>;
+    // 통계 업데이트 인터벌
+    statsUpdateInterval: NodeJS.Timeout | null;
+    // Dominant speaker 알림 기록 (중복 방지)
+    dominantAlertSent: boolean;
 }
 
 @Injectable()
@@ -661,12 +676,17 @@ export class VoiceBotService {
                 publishingStartTime: 0,
                 // 회의 주제
                 roomTopic,
+                // 참여자 발언 통계 초기화
+                participantSpeakingStats: new Map(),
+                statsUpdateInterval: null,
+                dominantAlertSent: false,
             };
             this.activeRooms.set(roomId, context);
 
             this.startArmedTimeoutChecker(roomId);
             this.startSilentParticipantChecker(roomId);
             this.startTopicSummaryChecker(roomId);
+            this.startSpeakingStatsChecker(roomId);
 
             this.logger.log(`[봇 입장 성공] 참여자: ${room.remoteParticipants.size}명`);
 
@@ -2107,12 +2127,12 @@ ${edgesDesc}
         // 모든 참가자의 발화를 기록 (봇 응답 여부와 무관)
         this.sendToRagForEmbedding(roomId, transcript, userId, startTime);
 
-        // ★ 호스트에게 발언 분포 정보 전송 (코칭 패널용)
-        if (context.hostOnlyMode && context.hostIdentity) {
-            const participant = context.room.remoteParticipants.get(userId);
-            const participantName = participant?.name || userId;
-            this.sendParticipantSpeakingAlert(roomId, userId, participantName).catch(() => {});
-        }
+        // ★ 발언 통계 업데이트 (코칭 패널용)
+        // 오디오 버퍼에서 발언 시간 계산 (16kHz, 16-bit mono PCM)
+        const speakingDurationMs = Math.round((audioBuffer.length / (16000 * 2)) * 1000);
+        const participant = context.room.remoteParticipants.get(userId);
+        const participantName = participant?.name || userId;
+        this.updateParticipantSpeakingStats(context, userId, participantName, speakingDurationMs);
 
         // ================================================
         // ★ Perplexity 모드: isPublishing과 무관하게 TRANSCRIPT 항상 저장
@@ -4088,32 +4108,148 @@ ${firstCode.substring(0, 500)}
     }
 
     /**
-     * 참여자 발언 알림 전송 (호스트에게만 - 발언 분포 추적용)
+     * 참여자 발언 통계 업데이트
      */
-    async sendParticipantSpeakingAlert(
-        roomId: string,
+    private updateParticipantSpeakingStats(
+        context: RoomContext,
         participantId: string,
-        participantName: string
-    ): Promise<void> {
-        const context = this.activeRooms.get(roomId);
-        if (!context || !context.hostOnlyMode || !context.hostIdentity) return;
+        participantName: string,
+        durationMs: number
+    ): void {
+        const existing = context.participantSpeakingStats.get(participantId);
 
-        const speakingMessage = {
-            type: 'PARTICIPANT_SPEAKING',
-            participantId,
-            participantName,
-            timestamp: Date.now(),
-        };
+        if (existing) {
+            existing.speakingDurationMs += durationMs;
+            existing.speakingCount += 1;
+            existing.lastSpokenAt = Date.now();
+        } else {
+            context.participantSpeakingStats.set(participantId, {
+                participantId,
+                participantName,
+                speakingDurationMs: durationMs,
+                speakingCount: 1,
+                lastSpokenAt: Date.now(),
+            });
+        }
+    }
 
-        const encoder = new TextEncoder();
+    /**
+     * 발언 통계 주기적 전송 시작 (호스트에게 실시간 발언 분포 전송)
+     */
+    private startSpeakingStatsChecker(roomId: string): void {
+        const STATS_INTERVAL_MS = 10 * 1000; // 10초마다
+        const DOMINANT_THRESHOLD = 0.6; // 60% 이상이면 dominant
 
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(speakingMessage)),
-            {
-                reliable: true,
-                destination_identities: [context.hostIdentity]
+        const initialContext = this.activeRooms.get(roomId);
+        if (!initialContext) return;
+
+        const statsInterval = setInterval(async () => {
+            const context = this.activeRooms.get(roomId);
+            if (!context) {
+                clearInterval(statsInterval);
+                return;
             }
-        );
+
+            // 호스트 전용 모드가 아니면 스킵
+            if (!context.hostOnlyMode || !context.hostIdentity) {
+                return;
+            }
+
+            // 발언 데이터가 없으면 스킵
+            if (context.participantSpeakingStats.size === 0) {
+                return;
+            }
+
+            // 전체 발언 시간 계산
+            let totalDurationMs = 0;
+            const statsArray: Array<{
+                participantId: string;
+                participantName: string;
+                speakingDurationMs: number;
+                speakingCount: number;
+                speakingRatio: number;
+            }> = [];
+
+            for (const stats of context.participantSpeakingStats.values()) {
+                totalDurationMs += stats.speakingDurationMs;
+            }
+
+            // 비율 계산
+            for (const stats of context.participantSpeakingStats.values()) {
+                const ratio = totalDurationMs > 0 ? stats.speakingDurationMs / totalDurationMs : 0;
+                statsArray.push({
+                    participantId: stats.participantId,
+                    participantName: stats.participantName,
+                    speakingDurationMs: stats.speakingDurationMs,
+                    speakingCount: stats.speakingCount,
+                    speakingRatio: Math.round(ratio * 100) / 100,
+                });
+            }
+
+            // 발언 시간 순으로 정렬
+            statsArray.sort((a, b) => b.speakingDurationMs - a.speakingDurationMs);
+
+            // 호스트에게 통계 전송
+            const statsMessage = {
+                type: 'PARTICIPANT_STATS',
+                stats: statsArray,
+                totalDurationMs,
+                timestamp: Date.now(),
+            };
+
+            const encoder = new TextEncoder();
+
+            try {
+                await context.room.localParticipant.publishData(
+                    encoder.encode(JSON.stringify(statsMessage)),
+                    {
+                        reliable: true,
+                        destination_identities: [context.hostIdentity]
+                    }
+                );
+
+                // Dominant speaker 체크 (60% 이상, 2명 이상 참여자)
+                if (statsArray.length >= 2 && !context.dominantAlertSent) {
+                    const topSpeaker = statsArray[0];
+                    if (topSpeaker.speakingRatio >= DOMINANT_THRESHOLD) {
+                        // Dominant 알림 전송
+                        const dominantAlert = {
+                            type: 'DOMINANT_SPEAKER_ALERT',
+                            participantId: topSpeaker.participantId,
+                            participantName: topSpeaker.participantName,
+                            speakingRatio: topSpeaker.speakingRatio,
+                            timestamp: Date.now(),
+                        };
+
+                        await context.room.localParticipant.publishData(
+                            encoder.encode(JSON.stringify(dominantAlert)),
+                            {
+                                reliable: true,
+                                destination_identities: [context.hostIdentity]
+                            }
+                        );
+
+                        context.dominantAlertSent = true;
+                        this.logger.log(`[Dominant 알림] ${topSpeaker.participantName} (${Math.round(topSpeaker.speakingRatio * 100)}%) → 호스트에게 전송`);
+                    }
+                }
+
+                // 비율이 60% 미만으로 떨어지면 다시 알림 가능
+                if (statsArray.length >= 2 && context.dominantAlertSent) {
+                    const topSpeaker = statsArray[0];
+                    if (topSpeaker.speakingRatio < DOMINANT_THRESHOLD - 0.1) { // 50% 미만이면 리셋
+                        context.dominantAlertSent = false;
+                    }
+                }
+
+            } catch (error) {
+                this.logger.debug(`[발언 통계] 전송 실패: ${error.message}`);
+            }
+
+        }, STATS_INTERVAL_MS);
+
+        // 인터벌 참조 저장 (cleanup용)
+        initialContext.statsUpdateInterval = statsInterval;
     }
 
     /**
