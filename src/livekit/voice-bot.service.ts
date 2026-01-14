@@ -2693,8 +2693,9 @@ ${edgesDesc}
                     roomId
                 ).finally(() => { llmResolved = true; });
 
-                // 700ms 후에도 응답 없으면 "생각중" 발화
+                // 700ms 후에도 응답 없으면 "생각중" 발화 (hostOnlyMode에서는 스킵 - Dynamic Island로 대체)
                 const thinkingTask = (async () => {
+                    if (context.hostOnlyMode) return; // Dynamic Island가 상태 표시
                     await this.sleep(700);
                     if (llmResolved || context.currentRequestId !== requestId) return;
                     this.logger.log(`[생각중] 응답 대기...`);
@@ -2720,9 +2721,9 @@ ${edgesDesc}
                 }
 
                 // ============================================
-                // 10. DataChannel 전송 (검색 결과)
+                // 10. DataChannel 전송 (검색 결과) - hostOnlyMode에서는 스킵
                 // ============================================
-                if (llmResult.searchResults && llmResult.searchResults.length > 0) {
+                if (!context.hostOnlyMode && llmResult.searchResults && llmResult.searchResults.length > 0) {
                     const primaryResult = llmResult.searchResults[0];
                     const routeInfo = await this.llmService.getRouteInfo(primaryResult);
 
@@ -3413,14 +3414,16 @@ ${edgesDesc}
             context.botState = BotState.SPEAKING;
             context.speakingStartTime = Date.now();
 
-            // "잠깐만요" 먼저 말하기 (Vision API 호출 시간 벌기)
-            const thinkingPhrases = [
-                '잠깐 볼게요~',
-                '한번 볼게요',
-                '잠깐만요~',
-            ];
-            const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
-            await this.speakAndPublish(context, roomId, requestId, thinkingPhrase);
+            // "잠깐만요" 먼저 말하기 (Vision API 호출 시간 벌기) - hostOnlyMode에서는 스킵
+            if (!context.hostOnlyMode) {
+                const thinkingPhrases = [
+                    '잠깐 볼게요~',
+                    '한번 볼게요',
+                    '잠깐만요~',
+                ];
+                const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
+                await this.speakAndPublish(context, roomId, requestId, thinkingPhrase);
+            }
 
             // Vision API 호출
             const result = await this.visionService.analyzeScreenShare(
