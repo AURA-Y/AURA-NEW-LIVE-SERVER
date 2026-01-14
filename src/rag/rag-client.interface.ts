@@ -69,7 +69,7 @@ export interface IRagClient {
     /**
      * 중간 보고서 요청
      */
-    requestReport(roomId: string): Promise<{ success: boolean; message?: string }>;
+    requestReport(roomId: string): Promise<{ success: boolean; message?: string; report?: { reportContent?: string; meetingTitle?: string; summaryType?: string } }>;
 
     // ============================================================
     // 시연용 목업 데이터 메서드
