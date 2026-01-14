@@ -141,6 +141,12 @@ interface RoomContext {
     statsUpdateInterval: NodeJS.Timeout | null;
     // Dominant speaker 알림 기록 (중복 방지)
     dominantAlertSent: boolean;
+    // 타임라인 키워드 기능 (30초 단위)
+    timelineStartTime: number;
+    // 현재 분의 발화 수집 (5초마다 LLM으로 키워드 추출)
+    pendingTranscripts: Array<{ speaker: string; text: string; timestamp: number }>;
+    timelineInterval?: NodeJS.Timeout;
+    lastTimelineMinuteIndex: number;
 }
 
 @Injectable()
@@ -700,6 +706,10 @@ export class VoiceBotService {
                 participantSpeakingStats: new Map(),
                 statsUpdateInterval: null,
                 dominantAlertSent: false,
+                // 타임라인 키워드 (30초 단위)
+                timelineStartTime: Date.now(),
+                pendingTranscripts: [],
+                lastTimelineMinuteIndex: 0,
             };
             this.activeRooms.set(roomId, context);
 
@@ -707,6 +717,8 @@ export class VoiceBotService {
             this.startSilentParticipantChecker(roomId);
             this.startTopicSummaryChecker(roomId);
             this.startSpeakingStatsChecker(roomId);
+            // 타임라인 5초 인터벌 시작
+            this.startTimelineInterval(roomId);
 
             this.logger.log(`[봇 입장 성공] 참여자: ${room.remoteParticipants.size}명`);
 
@@ -2149,6 +2161,19 @@ ${edgesDesc}
         // ★ RAG로 발언 전송 (비동기, 논블로킹 - 회의록/임베딩용)
         // 모든 참가자의 발화를 기록 (봇 응답 여부와 무관)
         this.sendToRagForEmbedding(roomId, transcript, userId, startTime);
+
+        // ★ 타임라인용 발화 수집 (5초마다 LLM으로 키워드 추출)
+        // 키워드 힌트로 인한 "아우라" 오인식 제거 후 수집
+        const timelineTranscript = rawTranscript
+            .replace(/아우라(야|나|요)?/gi, '')
+            .replace(/오우라(야)?/gi, '')
+            .replace(/어우라(야)?/gi, '')
+            .replace(/헤이\s*아우라/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (timelineTranscript.length > 0) {
+            this.collectTranscriptForTimeline(roomId, timelineTranscript, userId);
+        }
 
         // ★ 발언 통계 업데이트 (코칭 패널용)
         // 오디오 버퍼에서 발언 시간 계산 (16kHz, 16-bit mono PCM)
