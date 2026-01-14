@@ -119,6 +119,8 @@ interface RoomContext {
     perplexityModeActive: boolean;
     // isPublishing 시작 시간 (타임아웃 감지용)
     publishingStartTime: number;
+    // 회의 주제
+    roomTopic?: string;
 }
 
 @Injectable()
