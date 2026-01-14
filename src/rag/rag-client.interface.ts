@@ -71,6 +71,20 @@ export interface IRagClient {
      */
     requestReport(roomId: string): Promise<{ success: boolean; message?: string; report?: { reportContent?: string; meetingTitle?: string; summaryType?: string } }>;
 
+    /**
+     * 참여자 입장 알림
+     */
+    participantJoined(roomId: string, participant: {
+        id: string;
+        name: string;
+        role: 'host' | 'participant';
+    }): Promise<{ success: boolean; message?: string }>;
+
+    /**
+     * 참여자 퇴장 알림
+     */
+    participantLeft(roomId: string, participantId: string): Promise<{ success: boolean; message?: string }>;
+
     // ============================================================
     // 시연용 목업 데이터 메서드
     // ============================================================
