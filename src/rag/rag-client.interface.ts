@@ -85,6 +85,12 @@ export interface IRagClient {
      */
     participantLeft(roomId: string, participantId: string): Promise<{ success: boolean; message?: string }>;
 
+    /**
+     * 회의 논점 조회
+     * @param refresh true면 캐시 무시하고 새로 추출
+     */
+    getIssues(roomId: string, refresh?: boolean): Promise<{ success: boolean; data?: any; message?: string }>;
+
     // ============================================================
     // 시연용 목업 데이터 메서드
     // ============================================================

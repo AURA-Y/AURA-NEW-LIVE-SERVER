@@ -595,6 +595,32 @@ export class RagClientService implements OnModuleDestroy {
     }
 
     /**
+     * 회의 논점 조회 API 호출 (HTTP GET)
+     * GET /meetings/{roomId}/issues
+     * @param refresh true면 캐시 무시하고 새로 추출
+     */
+    async getIssues(roomId: string, refresh: boolean = false): Promise<{
+        success: boolean;
+        data?: any;
+        message?: string;
+    }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/issues${refresh ? '?refresh=true' : ''}`;
+
+        this.logger.log(`[RAG 논점 조회] GET ${endpoint}`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.get(endpoint);
+            this.logger.log(`[RAG 논점 조회 성공] ${roomId} - from_cache: ${response.data?.from_cache}`);
+            return { success: true, data: response.data };
+        } catch (error: any) {
+            this.logger.error(`[RAG 논점 조회 실패] ${roomId}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
+
+    /**
      * 회의 종료 API 호출 (HTTP POST)
      * POST /meetings/{roomId}/end
      */
