@@ -162,6 +162,9 @@ interface RoomContext {
         lastConversationHash: string;  // 대화 해시 추가
         analysisTimer?: NodeJS.Timeout;
     };
+
+    // ★ 대기 모드 (요약 후 STT/응답 비활성화, 리소스 절약)
+    standbyMode: boolean;
 }
 
 // 화면 캡처 컨텍스트 타입
@@ -833,6 +836,8 @@ export class VoiceBotService {
                     lastConversationHash: '',  // 대화 해시 초기화
                     analysisTimer: undefined,
                 },
+                // ★ 대기 모드 초기화
+                standbyMode: false,
             };
             this.activeRooms.set(roomId, context);
 
@@ -2238,6 +2243,12 @@ ${edgesDesc}
         const context = this.activeRooms.get(roomId);
         if (!context) return;
 
+        // ★ 대기 모드에서는 STT/응답 처리 스킵
+        if (context.standbyMode) {
+            this.logger.debug(`[대기 모드] STT/응답 스킵 - ${roomId}`);
+            return;
+        }
+
         // ================================================
         // [DEBUG] 오디오 파일 저장 (품질 확인용)
         // ================================================
@@ -3517,6 +3528,52 @@ ${edgesDesc}
             clearTimeout(context.shutdownTimeout);
         }
         this.activeRooms.delete(roomId);
+    }
+
+    // ★ 대기 모드 진입 (요약 후 STT/응답 비활성화, 리소스 절약)
+    async enterStandbyMode(roomId: string): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) {
+            this.logger.warn(`[대기 모드] 방을 찾을 수 없음: ${roomId}`);
+            return;
+        }
+
+        if (context.standbyMode) {
+            this.logger.log(`[대기 모드] 이미 대기 모드 상태: ${roomId}`);
+            return;
+        }
+
+        context.standbyMode = true;
+        this.logger.log(`[대기 모드 진입] ${roomId} - STT/응답 비활성화됨`);
+
+        // RAG WebSocket 연결 해제 (리소스 절약)
+        try {
+            await this.ragClient.disconnect(roomId);
+            this.logger.log(`[대기 모드] RAG 연결 해제 완료`);
+        } catch (error) {
+            this.logger.error(`[대기 모드] RAG 연결 해제 실패: ${error.message}`);
+        }
+
+        // 타임라인 인터벌 정리
+        if (context.timelineInterval) {
+            clearInterval(context.timelineInterval);
+            context.timelineInterval = undefined;
+        }
+
+        // 통계 인터벌 정리
+        if (context.statsUpdateInterval) {
+            clearInterval(context.statsUpdateInterval);
+            context.statsUpdateInterval = null;
+        }
+
+        // Proactive 분석 타이머 정리
+        if (context.proactiveAnalysis.analysisTimer) {
+            clearTimeout(context.proactiveAnalysis.analysisTimer);
+            context.proactiveAnalysis.analysisTimer = undefined;
+        }
+
+        // 봇 상태를 SLEEP으로 변경
+        context.botState = BotState.SLEEP;
     }
 
     // 봇만 종료 (요약할 때 사용 - cleanup 안 함)
