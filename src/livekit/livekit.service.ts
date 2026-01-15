@@ -416,15 +416,16 @@ export class LivekitService {
   }
 
   /**
-   * 회의 종료 (봇 정리 + RAG 요약 요청)
+   * 회의 종료 (봇 대기 모드 + RAG 요약 요청)
+   * 봇은 대기 모드로 전환되어 STT/응답 비활성화, 인간 참여자 없을 때 30초 후 자동 퇴장
    */
   async endMeeting(roomId: string): Promise<{ success: boolean; message?: string }> {
     this.logger.log(`[회의 종료] roomId: ${roomId}`);
 
-    // 1. 봇 종료
+    // 1. 봇을 대기 모드로 전환 (STT/응답 비활성화, 리소스 절약)
     if (this.isBotActive(roomId)) {
-      await this.stopBotForRoom(roomId);
-      this.logger.log(`[회의 종료] 봇 정리 완료`);
+      await this.voiceBotService.enterStandbyMode(roomId);
+      this.logger.log(`[회의 종료] 봇 대기 모드 전환 완료`);
     }
 
     // 2. RAG 서버에 회의 종료 알림 (요약 생성 트리거)
