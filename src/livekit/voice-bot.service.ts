@@ -24,6 +24,7 @@ import { IntentClassifierService } from '../intent/intent-classifier.service';
 import { VisionService, VisionContext } from '../vision/vision.service';
 import { AgentRouterService } from '../agent/agent-router.service';
 import { OpinionService } from '../agent/evidence';
+import { ProactiveAnalysisService, ProactiveInsight, ProactiveInsightMessage } from '../agent/proactive';
 import { PerplexityService, PerplexityMessage } from '../perplexity';
 import { CalendarService } from '../calendar/calendar.service';
 import type { LivekitService } from './livekit.service';
@@ -121,6 +122,28 @@ interface RoomContext {
     publishingStartTime: number;
     // 회의 주제
     roomTopic?: string;
+
+    // ★ 연속 화면 이해 모드 (OCR 기반)
+    screenUnderstandingMode: boolean;
+    screenContextHistory: ScreenCapture[];
+    screenContextStartTime: number;
+
+    // ★ Proactive AI Assistant (화면+발화 분석 → 인사이트 제안)
+    proactiveAnalysis: {
+        enabled: boolean;
+        lastAnalysisTime: number;
+        lastScreenTextHash: string;
+        lastConversationHash: string;  // 대화 해시 추가
+        analysisTimer?: NodeJS.Timeout;
+    };
+}
+
+// 화면 캡처 컨텍스트 타입
+interface ScreenCapture {
+    captureId: number;
+    extractedText: string;
+    captureIndex: number;
+    timestamp: number;
 }
 
 @Injectable()
@@ -149,6 +172,7 @@ export class VoiceBotService {
         private opinionService: OpinionService,
         private perplexityService: PerplexityService,
         private calendarService: CalendarService,
+        private proactiveAnalysisService: ProactiveAnalysisService,
         @Inject(forwardRef(() => require('./livekit.service').LivekitService))
         private livekitService: LivekitService,
     ) { }
@@ -593,6 +617,18 @@ export class VoiceBotService {
                 publishingStartTime: 0,
                 // 회의 주제
                 roomTopic,
+                // ★ 연속 화면 이해 모드 초기화
+                screenUnderstandingMode: false,
+                screenContextHistory: [],
+                screenContextStartTime: 0,
+                // ★ Proactive AI Assistant 초기화
+                proactiveAnalysis: {
+                    enabled: false,
+                    lastAnalysisTime: 0,
+                    lastScreenTextHash: '',
+                    lastConversationHash: '',  // 대화 해시 초기화
+                    analysisTimer: undefined,
+                },
             };
             this.activeRooms.set(roomId, context);
 
@@ -2876,28 +2912,36 @@ ${edgesDesc}
             // 1. 대화 히스토리 준비
             const conversationHistory = context.conversationHistory || [];
 
-            // 2. Agent 판단 (어떤 도구를 사용할지)
+            // 2. 화면 컨텍스트 가져오기 (연속 캡처 모드에서 수집된 텍스트)
+            const screenContext = this.buildScreenContextPrompt(roomId);
+            if (screenContext) {
+                this.logger.log(`[Agent] 화면 컨텍스트 포함 (${context.screenContextHistory?.length || 0}회 캡처)`);
+            }
+
+            // 3. Agent 판단 (어떤 도구를 사용할지)
             const decision = await this.agentRouter.decide(
                 processedText,
                 conversationHistory,
-                { title: roomId }
+                { title: roomId },
+                screenContext || undefined
             );
 
             this.logger.log(`[Agent] Tool: ${decision.tool}, Params: ${JSON.stringify(decision.params)}`);
 
-            // 3. 도구 실행
+            // 4. 도구 실행
             const toolResult = await this.agentRouter.executeTool(
                 decision,
                 roomId,
                 processedText
             );
 
-            // 4. 최종 응답 생성
+            // 5. 최종 응답 생성
             const response = await this.agentRouter.generateResponse(
                 processedText,
                 decision,
                 toolResult,
-                conversationHistory
+                conversationHistory,
+                screenContext || undefined
             );
 
             if (context.currentRequestId !== requestId) {
@@ -3801,5 +3845,276 @@ ${firstCode.substring(0, 500)}
      */
     getActiveRoomIds(): string[] {
         return Array.from(this.activeRooms.keys());
+    }
+
+    // ==========================================
+    // ★ 연속 화면 이해 모드 관련 메서드
+    // ==========================================
+
+    /**
+     * 화면 컨텍스트 추가 (HTTP 엔드포인트에서 호출)
+     */
+    addScreenContext(
+        roomId: string,
+        capture: ScreenCapture
+    ): { success: boolean; message: string } {
+        const context = this.activeRooms.get(roomId);
+        if (!context) {
+            this.logger.warn(`[화면 컨텍스트] 방 없음: ${roomId}`);
+            return { success: false, message: '방을 찾을 수 없습니다' };
+        }
+
+        // 최대 24개까지 저장 (5초 간격 x 2분 = 24회)
+        const MAX_SCREEN_CAPTURES = 24;
+        if (context.screenContextHistory.length >= MAX_SCREEN_CAPTURES) {
+            // 가장 오래된 것 제거
+            context.screenContextHistory.shift();
+        }
+
+        context.screenContextHistory.push(capture);
+        context.screenUnderstandingMode = true;
+        if (!context.screenContextStartTime) {
+            context.screenContextStartTime = Date.now();
+        }
+
+        this.logger.log(
+            `[화면 컨텍스트] Room ${roomId}: 캡처 ${capture.captureIndex + 1} 추가 ` +
+            `(텍스트 길이: ${capture.extractedText.length}자, 총 ${context.screenContextHistory.length}개)`
+        );
+
+        // ★ Proactive 분석 시작 (첫 캡처 시)
+        if (!context.proactiveAnalysis.enabled) {
+            this.startProactiveAnalysis(roomId, context);
+        }
+
+        return { success: true, message: '화면 컨텍스트 추가됨' };
+    }
+
+    /**
+     * 화면 컨텍스트 초기화
+     */
+    clearScreenContext(roomId: string): { success: boolean; message: string } {
+        const context = this.activeRooms.get(roomId);
+        if (!context) {
+            this.logger.warn(`[화면 컨텍스트] 방 없음: ${roomId}`);
+            return { success: false, message: '방을 찾을 수 없습니다' };
+        }
+
+        // ★ Proactive 분석 중지
+        this.stopProactiveAnalysis(context);
+
+        context.screenContextHistory = [];
+        context.screenUnderstandingMode = false;
+        context.screenContextStartTime = 0;
+
+        this.logger.log(`[화면 컨텍스트] Room ${roomId}: 컨텍스트 초기화됨`);
+
+        return { success: true, message: '화면 컨텍스트 초기화됨' };
+    }
+
+    /**
+     * 화면 컨텍스트를 LLM 프롬프트용 텍스트로 변환
+     */
+    buildScreenContextPrompt(roomId: string): string {
+        const context = this.activeRooms.get(roomId);
+        if (!context || context.screenContextHistory.length === 0) {
+            return '';
+        }
+
+        const captures = context.screenContextHistory;
+        const duration = context.screenContextStartTime
+            ? Math.round((Date.now() - context.screenContextStartTime) / 1000)
+            : 0;
+
+        let prompt = `\n[화면 컨텍스트 - ${captures.length}회 캡처, ${duration}초간 수집]\n`;
+        prompt += '사용자가 공유한 화면에서 추출한 텍스트입니다. 질문에 답할 때 이 정보를 참고하세요.\n\n';
+
+        for (const capture of captures) {
+            const time = new Date(capture.timestamp).toLocaleTimeString('ko-KR', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            prompt += `--- [캡처 ${capture.captureIndex + 1}] ${time} ---\n`;
+            prompt += capture.extractedText.trim() || '(텍스트 없음)';
+            prompt += '\n\n';
+        }
+
+        return prompt;
+    }
+
+    /**
+     * 화면 컨텍스트 존재 여부 확인
+     */
+    hasScreenContext(roomId: string): boolean {
+        const context = this.activeRooms.get(roomId);
+        return context ? context.screenContextHistory.length > 0 : false;
+    }
+
+    /**
+     * 화면 컨텍스트 상태 조회
+     */
+    getScreenContextStatus(roomId: string): {
+        isActive: boolean;
+        captureCount: number;
+        totalTextLength: number;
+    } {
+        const context = this.activeRooms.get(roomId);
+        if (!context) {
+            return { isActive: false, captureCount: 0, totalTextLength: 0 };
+        }
+
+        const totalTextLength = context.screenContextHistory.reduce(
+            (sum, c) => sum + c.extractedText.length,
+            0
+        );
+
+        return {
+            isActive: context.screenUnderstandingMode,
+            captureCount: context.screenContextHistory.length,
+            totalTextLength,
+        };
+    }
+
+    // ============================================================
+    // ★ Proactive AI Assistant 메서드
+    // ============================================================
+
+    /**
+     * Proactive 분석 시작 (화면 이해 모드 시작 시)
+     */
+    private startProactiveAnalysis(roomId: string, context: RoomContext): void {
+        if (context.proactiveAnalysis.enabled) {
+            return; // 이미 실행 중
+        }
+
+        this.logger.log(`[Proactive] 분석 시작 - Room: ${roomId}`);
+
+        context.proactiveAnalysis.enabled = true;
+        context.proactiveAnalysis.lastAnalysisTime = 0;
+        context.proactiveAnalysis.lastScreenTextHash = '';
+        context.proactiveAnalysis.lastConversationHash = '';
+
+        // 8초 간격으로 분석 실행
+        const ANALYSIS_INTERVAL_MS = 8000;
+
+        context.proactiveAnalysis.analysisTimer = setInterval(() => {
+            this.runProactiveAnalysis(roomId, context);
+        }, ANALYSIS_INTERVAL_MS);
+
+        // 첫 분석은 3초 후 실행 (컨텍스트 수집 대기)
+        setTimeout(() => {
+            if (context.proactiveAnalysis.enabled) {
+                this.runProactiveAnalysis(roomId, context);
+            }
+        }, 3000);
+    }
+
+    /**
+     * Proactive 분석 중지 (화면 이해 모드 종료 시)
+     */
+    private stopProactiveAnalysis(context: RoomContext): void {
+        if (!context.proactiveAnalysis.enabled) {
+            return;
+        }
+
+        this.logger.log(`[Proactive] 분석 중지`);
+
+        if (context.proactiveAnalysis.analysisTimer) {
+            clearInterval(context.proactiveAnalysis.analysisTimer);
+            context.proactiveAnalysis.analysisTimer = undefined;
+        }
+
+        context.proactiveAnalysis.enabled = false;
+        this.proactiveAnalysisService.clearCooldowns();
+    }
+
+    /**
+     * Proactive 분석 실행 (주기적 호출)
+     */
+    private async runProactiveAnalysis(roomId: string, context: RoomContext): Promise<void> {
+        // 비활성화 또는 컨텍스트 없으면 스킵
+        if (!context.proactiveAnalysis.enabled || !context.screenUnderstandingMode) {
+            return;
+        }
+
+        // 화면 텍스트 해시 생성 (최근 3개)
+        const recentScreenTexts = context.screenContextHistory
+            .slice(-3)
+            .map(c => c.extractedText);
+
+        const currentScreenHash = this.proactiveAnalysisService.hashTexts(recentScreenTexts);
+
+        // 최근 대화 수집 (5턴)
+        const recentConversation = context.conversationHistory
+            .slice(-5)
+            .map(turn => `${turn.role === 'user' ? '사용자' : '아우라'}: ${turn.content}`);
+
+        // 대화 해시 생성
+        const currentConversationHash = this.proactiveAnalysisService.hashTexts(recentConversation);
+
+        // 화면 AND 대화 모두 변경 없으면 스킵
+        const screenChanged = currentScreenHash !== context.proactiveAnalysis.lastScreenTextHash;
+        const conversationChanged = currentConversationHash !== context.proactiveAnalysis.lastConversationHash;
+
+        if (!screenChanged && !conversationChanged) {
+            this.logger.debug(`[Proactive] 화면/대화 변경 없음, 스킵`);
+            return;
+        }
+
+        // 변경 로그
+        if (screenChanged) {
+            this.logger.debug(`[Proactive] 화면 변경 감지`);
+        }
+        if (conversationChanged) {
+            this.logger.debug(`[Proactive] 대화 변경 감지 (${recentConversation.length}턴)`);
+        }
+
+        context.proactiveAnalysis.lastScreenTextHash = currentScreenHash;
+        context.proactiveAnalysis.lastConversationHash = currentConversationHash;
+        context.proactiveAnalysis.lastAnalysisTime = Date.now();
+
+        try {
+            // LLM 분석 실행
+            const insights = await this.proactiveAnalysisService.analyze({
+                screenTexts: recentScreenTexts,
+                recentConversation,
+                roomTopic: context.roomTopic,
+            });
+
+            // 인사이트가 있으면 DataChannel로 전송
+            if (insights.length > 0) {
+                this.sendProactiveInsights(context, insights);
+            }
+        } catch (error) {
+            this.logger.error(`[Proactive] 분석 오류: ${error.message}`);
+        }
+    }
+
+    /**
+     * Proactive 인사이트를 DataChannel로 전송
+     */
+    private sendProactiveInsights(context: RoomContext, insights: ProactiveInsight[]): void {
+        const message: ProactiveInsightMessage = {
+            type: 'PROACTIVE_INSIGHT',
+            insights,
+            timestamp: Date.now(),
+        };
+
+        try {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(JSON.stringify(message));
+
+            // 모든 참여자에게 전송
+            context.room.localParticipant.publishData(data, {
+                reliable: true,
+            });
+
+            this.logger.log(
+                `[Proactive] 인사이트 전송: ${insights.map(i => i.type).join(', ')}`
+            );
+        } catch (error) {
+            this.logger.error(`[Proactive] DataChannel 전송 실패: ${error.message}`);
+        }
     }
 }
