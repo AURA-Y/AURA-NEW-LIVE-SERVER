@@ -141,6 +141,12 @@ interface RoomContext {
     statsUpdateInterval: NodeJS.Timeout | null;
     // Dominant speaker 알림 기록 (중복 방지)
     dominantAlertSent: boolean;
+    // 타임라인 키워드 기능 (30초 단위)
+    timelineStartTime: number;
+    // 현재 분의 발화 수집 (5초마다 LLM으로 키워드 추출)
+    pendingTranscripts: Array<{ speaker: string; text: string; timestamp: number }>;
+    timelineInterval?: NodeJS.Timeout;
+    lastTimelineMinuteIndex: number;
 }
 
 @Injectable()
@@ -187,8 +193,10 @@ export class VoiceBotService {
         this.logger.log(`방: ${roomId}, URL: ${livekitUrl}`);
 
         room.on(RoomEvent.TrackSubscribed, async (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            if (track.kind === TrackKind.KIND_AUDIO && !participant.identity.startsWith('ai-bot')) {
-                this.logger.log(`[오디오 트랙 구독] ${participant.identity}`);
+            // 마이크 오디오만 STT 처리 (화면 공유 오디오는 제외)
+            const isScreenShareAudio = publication.source === TrackSource.SOURCE_SCREENSHARE_AUDIO;
+            if (track.kind === TrackKind.KIND_AUDIO && !participant.identity.startsWith('ai-bot') && !isScreenShareAudio) {
+                this.logger.log(`[오디오 트랙 구독] ${participant.identity} (source: ${publication.source})`);
                 await this.handleAudioTrack(roomId, track, participant.identity);
             }
             // 화면 공유 트랙 감지
@@ -298,8 +306,22 @@ export class VoiceBotService {
         });
 
         room.on(RoomEvent.Disconnected, (reason?: any) => {
-            this.logger.warn(`[봇 연결 끊김] 사유: ${reason || 'UNKNOWN'}`);
+            this.logger.error(`[봇 연결 끊김] roomId=${roomId}, 사유: ${reason || 'UNKNOWN'}`);
             this.cleanupRoom(roomId);
+        });
+
+        room.on(RoomEvent.Reconnecting, () => {
+            this.logger.warn(`[봇 재연결 시도 중] roomId=${roomId}`);
+        });
+
+        room.on(RoomEvent.Reconnected, () => {
+            this.logger.log(`[봇 재연결 성공] roomId=${roomId}`);
+        });
+
+        room.on(RoomEvent.ConnectionQualityChanged, (quality: any, participant: any) => {
+            if (participant?.identity?.includes('ai-bot')) {
+                this.logger.log(`[봇 연결 품질] ${quality} (roomId=${roomId})`);
+            }
         });
 
         // 아이디어 모드 시작/종료 메시지 수신 (디바운싱 적용)
@@ -684,6 +706,10 @@ export class VoiceBotService {
                 participantSpeakingStats: new Map(),
                 statsUpdateInterval: null,
                 dominantAlertSent: false,
+                // 타임라인 키워드 (30초 단위)
+                timelineStartTime: Date.now(),
+                pendingTranscripts: [],
+                lastTimelineMinuteIndex: 0,
             };
             this.activeRooms.set(roomId, context);
 
@@ -691,6 +717,8 @@ export class VoiceBotService {
             this.startSilentParticipantChecker(roomId);
             this.startTopicSummaryChecker(roomId);
             this.startSpeakingStatsChecker(roomId);
+            // 타임라인 5초 인터벌 시작
+            this.startTimelineInterval(roomId);
 
             this.logger.log(`[봇 입장 성공] 참여자: ${room.remoteParticipants.size}명`);
 
@@ -2113,9 +2141,12 @@ ${edgesDesc}
         // 1. STT (음성 → 텍스트) - 항상 수행 (isPublishing과 무관)
         // ================================================
         const sttStart = Date.now();
-        let transcript: string;
+        let transcript: string;      // 교정된 결과 (일반 용도)
+        let rawTranscript: string;   // 원본 (타임라인 용도)
         try {
-            transcript = await this.sttService.transcribeFromBufferStream(audioBuffer, 'live-audio.pcm');
+            const sttResult = await this.sttService.transcribeFromBufferStreamWithRaw(audioBuffer, 'live-audio.pcm');
+            transcript = sttResult.corrected;
+            rawTranscript = sttResult.raw;
         } catch (err) {
             this.logger.error(`[STT 에러] ${err.message}`);
             return;
@@ -2130,6 +2161,19 @@ ${edgesDesc}
         // ★ RAG로 발언 전송 (비동기, 논블로킹 - 회의록/임베딩용)
         // 모든 참가자의 발화를 기록 (봇 응답 여부와 무관)
         this.sendToRagForEmbedding(roomId, transcript, userId, startTime);
+
+        // ★ 타임라인용 발화 수집 (5초마다 LLM으로 키워드 추출)
+        // 키워드 힌트로 인한 "아우라" 오인식 제거 후 수집
+        const timelineTranscript = rawTranscript
+            .replace(/아우라(야|나|요)?/gi, '')
+            .replace(/오우라(야)?/gi, '')
+            .replace(/어우라(야)?/gi, '')
+            .replace(/헤이\s*아우라/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (timelineTranscript.length > 0) {
+            this.collectTranscriptForTimeline(roomId, timelineTranscript, userId);
+        }
 
         // ★ 발언 통계 업데이트 (코칭 패널용)
         // 오디오 버퍼에서 발언 시간 계산 (16kHz, 16-bit mono PCM)
@@ -2866,7 +2910,7 @@ ${edgesDesc}
                 }
 
                 // 프레임 전송 (논블로킹)
-                audioSource.captureFrame(frames[frameIndex]).catch(() => {});
+                audioSource.captureFrame(frames[frameIndex]).catch(() => { });
                 frameIndex++;
 
                 // 다음 프레임 스케줄 (드리프트 보정)
@@ -3719,6 +3763,188 @@ ${firstCode.substring(0, 500)}
         return diagramKeywords.some(keyword =>
             normalizedTranscript.includes(keyword.toLowerCase())
         );
+    }
+
+    // ============================================================
+    // 타임라인 키워드 추출 (30초 단위, 5초마다 갱신)
+    // ============================================================
+
+    /**
+     * 현재 30초 구간 인덱스 계산
+     */
+    private getCurrentMinuteIndex(roomId: string): number {
+        const context = this.activeRooms.get(roomId);
+        if (!context?.timelineStartTime) return 0;
+        const elapsed = Date.now() - context.timelineStartTime;
+        return Math.floor(elapsed / 30000); // 30초 = 0.5분
+    }
+
+    /**
+     * 타임라인 5초 인터벌 시작
+     */
+    private startTimelineInterval(roomId: string): void {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        // 기존 인터벌 정리
+        if (context.timelineInterval) {
+            clearInterval(context.timelineInterval);
+        }
+
+        // 5초마다 키워드 추출 및 전송
+        context.timelineInterval = setInterval(async () => {
+            await this.flushTimelineKeywords(roomId);
+        }, 5000);
+
+        this.logger.log(`[Timeline] 5초 인터벌 시작 - roomId: ${roomId}`);
+    }
+
+    /**
+     * 타임라인 인터벌 정지
+     */
+    private stopTimelineInterval(roomId: string): void {
+        const context = this.activeRooms.get(roomId);
+        if (context?.timelineInterval) {
+            clearInterval(context.timelineInterval);
+            context.timelineInterval = undefined;
+            this.logger.log(`[Timeline] 인터벌 정지 - roomId: ${roomId}`);
+        }
+    }
+
+    /**
+     * STT 발화를 수집 (키워드 추출은 5초마다 일괄 처리)
+     */
+    private collectTranscriptForTimeline(
+        roomId: string,
+        transcript: string,
+        speaker: string
+    ): void {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        // 너무 짧은 텍스트는 스킵
+        if (transcript.trim().length <= 3) return;
+
+        const currentMinute = this.getCurrentMinuteIndex(roomId);
+
+        // 새로운 분이 시작되면 이전 발화 초기화
+        if (currentMinute !== context.lastTimelineMinuteIndex) {
+            context.pendingTranscripts = [];
+            context.lastTimelineMinuteIndex = currentMinute;
+            this.logger.log(`[Timeline] 새 분 시작: ${currentMinute}`);
+        }
+
+        // 발화 수집
+        context.pendingTranscripts.push({
+            speaker,
+            text: transcript.trim(),
+            timestamp: Date.now(),
+        });
+    }
+
+    /**
+     * 수집된 발화에서 핵심 키워드 추출 후 전송 (5초마다 호출)
+     * - 발화자별로 그룹화하여 각각 키워드 5개씩 추출
+     */
+    private async flushTimelineKeywords(roomId: string): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context || context.pendingTranscripts.length === 0) return;
+
+        const minuteIndex = this.getCurrentMinuteIndex(roomId);
+
+        // 발화자별로 그룹화
+        const speakerTranscripts = new Map<string, string[]>();
+        for (const t of context.pendingTranscripts) {
+            const texts = speakerTranscripts.get(t.speaker) || [];
+            texts.push(t.text);
+            speakerTranscripts.set(t.speaker, texts);
+        }
+
+        try {
+            // 발화자별로 키워드 추출 (병렬 처리)
+            const speakerKeywordsPromises = Array.from(speakerTranscripts.entries()).map(
+                async ([speaker, texts]) => {
+                    const allText = texts.join(' ');
+                    const keywords = await this.extractKeywordsWithLLM(allText);
+                    return { speaker, keywords };
+                }
+            );
+
+            const speakerKeywordsResults = await Promise.all(speakerKeywordsPromises);
+
+            // 키워드가 하나도 없으면 스킵
+            const validResults = speakerKeywordsResults.filter(r => r.keywords.length > 0);
+            if (validResults.length === 0) return;
+
+            // 발화자별 키워드 객체 생성
+            const speakerKeywords: Record<string, string[]> = {};
+            for (const { speaker, keywords } of validResults) {
+                speakerKeywords[speaker] = keywords;
+            }
+
+            const message = {
+                type: 'TIMELINE_KEYWORDS_UPDATE',
+                speakerKeywords, // { "발화자1": ["키워드1", ...], "발화자2": ["키워드1", ...] }
+                minuteIndex,
+                timestamp: Date.now(),
+                roomId,
+            };
+
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(message)),
+                { reliable: true }
+            );
+
+            const logSummary = validResults.map(r => `${r.speaker}: [${r.keywords.join(', ')}]`).join(' | ');
+            this.logger.log(`[Timeline] 키워드 갱신 (minute: ${minuteIndex}) - ${logSummary}`);
+
+            // 전송 후 발화 초기화 (이전 키워드가 반복되지 않도록)
+            context.pendingTranscripts = [];
+        } catch (error) {
+            this.logger.error(`[Timeline] 키워드 추출 실패: ${error.message}`);
+        }
+    }
+
+    /**
+     * LLM으로 핵심 키워드 최대 5개 추출
+     */
+    private async extractKeywordsWithLLM(transcripts: string): Promise<string[]> {
+        const prompt = `다음 대화에서 핵심 키워드를 최대 5개 추출하세요.
+
+규칙:
+- 명사 또는 명사구만 추출
+- 의미 없는 추임새나 감탄사만 제외 (예: 네, 아, 음, 어)
+- 대화에서 언급된 주요 토픽이나 주제어 추출
+- 중복 키워드 제외
+- 키워드가 없으면 빈 줄 출력
+- 각 키워드를 한 줄에 하나씩 출력 (번호나 설명 없이)
+
+발화 내용:
+${transcripts}
+
+핵심 키워드:`;
+
+        const result = await this.llmService.sendMessagePure(prompt, 100);
+
+        // 결과 파싱: 줄바꿈으로 분리하고 정리
+        const keywords = result
+            .split('\n')
+            .map(line => line.trim().replace(/^[-•*\d.)\s]+/, '').trim())
+            .filter(kw =>
+                kw.length >= 2 &&
+                kw.length <= 20 &&  // 너무 긴 문장 제외
+                kw !== 'NONE' &&
+                !kw.includes(':') &&
+                !kw.includes('키워드') &&  // 설명 문구 제외
+                !kw.includes('추출') &&
+                !kw.includes('불가능') &&
+                !kw.includes('없습니다') &&
+                !kw.includes('명사')
+            )
+            .slice(0, 5);
+
+        return keywords;
     }
 
     // ============================================================
