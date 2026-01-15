@@ -178,7 +178,8 @@ export class AgentRouterService {
     async decide(
         userMessage: string,
         conversationHistory: ConversationTurn[],
-        meetingContext?: { title?: string; participants?: string[] }
+        meetingContext?: { title?: string; participants?: string[] },
+        screenContext?: string
     ): Promise<AgentDecision> {
         const startTime = Date.now();
 
@@ -200,6 +201,9 @@ export class AgentRouterService {
             const meetingInfo = meetingContext?.title
                 ? `\n[회의 정보] 제목: ${meetingContext.title}`
                 : '';
+            const screenInfo = screenContext
+                ? `\n\n[화면 컨텍스트 - 사용자가 공유한 화면에서 추출된 텍스트]\n${screenContext}`
+                : '';
 
             const systemPrompt = `[역할]
 너는 화상회의에 참여 중인 AI 비서 "아우라"입니다.
@@ -208,7 +212,7 @@ export class AgentRouterService {
 - 반드시 존댓말(~입니다, ~습니다, ~세요)만 사용
 - 이모티콘/이모지 절대 사용 금지
 
-${historyContext}${meetingInfo}
+${historyContext}${meetingInfo}${screenInfo}
 
 [도구 선택 기준 - 우선순위대로 적용]
 1. **이전 대화/회의 내용 참조** → query_meeting (최우선)
@@ -364,6 +368,7 @@ ${historyContext}${meetingInfo}
         decision: AgentDecision,
         toolResult: { result: string; searchResults?: SearchResult[]; meetingSources?: MeetingSource[] },
         conversationHistory: ConversationTurn[],
+        screenContext?: string,
     ): Promise<string> {
         // ask_clarification은 이미 생성된 응답을 그대로 반환
         if (decision.tool === 'ask_clarification') {
@@ -372,7 +377,7 @@ ${historyContext}${meetingInfo}
 
         // direct_response이거나 도구 결과가 없으면 직접 응답 생성
         if (decision.tool === 'direct_response' || !toolResult.result) {
-            return await this.generateDirectResponse(userMessage, conversationHistory);
+            return await this.generateDirectResponse(userMessage, conversationHistory, screenContext);
         }
 
         // 회의 내용 조회 (팩트체크) - sources가 있으면 인용 포맷
@@ -381,15 +386,19 @@ ${historyContext}${meetingInfo}
                 userMessage,
                 toolResult.result,
                 toolResult.meetingSources,
-                conversationHistory
+                conversationHistory,
+                screenContext
             );
         }
 
         // 일반 도구 결과를 포함한 응답 생성
         const historyContext = this.buildHistoryContext(conversationHistory);
+        const screenInfo = screenContext
+            ? `\n[화면 컨텍스트]\n${screenContext}\n`
+            : '';
 
         const prompt = `[대화 맥락]
-${historyContext}
+${historyContext}${screenInfo}
 
 [사용자 질문]
 ${userMessage}
@@ -398,6 +407,7 @@ ${userMessage}
 ${toolResult.result}
 
 위 정보를 바탕으로 간결하게 답변하세요.
+- 화면 컨텍스트가 있으면 화면에 보이는 내용을 참고해서 답변
 - 반드시 존댓말(~입니다, ~습니다, ~세요)만 사용
 - 2-3문장으로 핵심만
 - 이모티콘/이모지 절대 사용 금지`;
@@ -413,7 +423,8 @@ ${toolResult.result}
         userMessage: string,
         ragAnswer: string,
         sources: MeetingSource[],
-        conversationHistory: ConversationTurn[]
+        conversationHistory: ConversationTurn[],
+        screenContext?: string
     ): Promise<string> {
         // 출처 정보 포맷팅
         const sourcesText = sources
@@ -426,9 +437,12 @@ ${toolResult.result}
             .join('\n');
 
         const historyContext = this.buildHistoryContext(conversationHistory);
+        const screenInfo = screenContext
+            ? `\n[화면 컨텍스트]\n${screenContext}\n`
+            : '';
 
         const prompt = `[대화 맥락]
-${historyContext}
+${historyContext}${screenInfo}
 
 [사용자 질문]
 ${userMessage}
@@ -440,6 +454,7 @@ ${ragAnswer}
 ${sourcesText}
 
 위 정보를 바탕으로 팩트체크 응답을 생성해줘.
+(화면 컨텍스트가 있으면 화면에 보이는 내용도 참고)
 
 응답 형식:
 - "전에 하신 발언을 보니" 또는 "과거 회의 기록을 보니" 로 시작
@@ -551,18 +566,23 @@ ${sourcesText}
 
     private async generateDirectResponse(
         userMessage: string,
-        conversationHistory: ConversationTurn[]
+        conversationHistory: ConversationTurn[],
+        screenContext?: string
     ): Promise<string> {
         const historyContext = this.buildHistoryContext(conversationHistory);
+        const screenInfo = screenContext
+            ? `\n[화면 컨텍스트 - 사용자가 공유한 화면에서 추출된 텍스트]\n${screenContext}\n`
+            : '';
 
         const prompt = `[대화 맥락]
-${historyContext}
+${historyContext}${screenInfo}
 
 [사용자]
 ${userMessage}
 
 화상회의 AI 비서 "아우라"로서 답변하세요.
 - 대화 기록을 참고해서 맥락에 맞게 응답
+- 화면 컨텍스트가 있으면 화면에 보이는 내용을 참고해서 답변
 - 반드시 존댓말(~입니다, ~습니다, ~세요)만 사용
 - 1-2문장으로 간결하게
 - 이모티콘/이모지 절대 사용 금지`;

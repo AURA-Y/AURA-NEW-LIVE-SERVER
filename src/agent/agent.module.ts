@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AgentRouterService } from './agent-router.service';
 import { EvidenceRepository, OpinionService } from './evidence';
+import { ProactiveModule } from './proactive';
 import { RagModule } from '../rag/rag.module';
 import { LlmModule } from '../llm/llm.module';
 
@@ -15,6 +16,7 @@ import { LlmModule } from '../llm/llm.module';
         ConfigModule,
         RagModule,
         LlmModule,
+        ProactiveModule,
     ],
     providers: [
         AgentRouterService,
@@ -25,6 +27,7 @@ import { LlmModule } from '../llm/llm.module';
         AgentRouterService,
         EvidenceRepository,
         OpinionService,
+        ProactiveModule,  // 모듈 자체를 re-export (내부 서비스 포함)
     ],
 })
 export class AgentModule {}
