@@ -723,17 +723,14 @@ ${JSON.stringify(searchResults.slice(0, 2))}`;
 
     private buildPlaceRecommendation(result: SearchResult): string {
         const title = result.title || '그 장소';
-        const address = result.roadAddress || result.address || '';
         const newsHighlight = (result as any).newsHighlight;
 
+        // 검색 결과 카드가 상세 정보를 보여주므로 AI 응답은 간결하게
         let response = `${title} 추천드립니다.`;
         if (newsHighlight) {
             response += ` ${newsHighlight}까지래요.`;
         }
-        if (address) {
-            response += ` ${address} 쪽이에요.`;
-        }
-        response += ' 경로 보내드리겠습니다';
+        response += ' 경로 보내드릴게요.';
 
         return response.replace(/\s+/g, ' ').trim();
     }
