@@ -2958,26 +2958,39 @@ ${edgesDesc}
                 }
 
                 // ============================================
-                // 10. DataChannel 전송 (검색 결과) - hostOnlyMode에서는 스킵
+                // 10. DataChannel 전송 (검색 결과)
                 // ============================================
-                if (!context.hostOnlyMode && llmResult.searchResults && llmResult.searchResults.length > 0) {
+                if (llmResult.searchResults && llmResult.searchResults.length > 0) {
                     const primaryResult = llmResult.searchResults[0];
                     const routeInfo = await this.llmService.getRouteInfo(primaryResult);
 
+                    // hostOnlyMode에서는 AI_TEXT_RESPONSE 타입으로 호스트에게만 전송
                     const searchMessage = {
-                        type: 'search_answer',
+                        type: context.hostOnlyMode ? 'AI_TEXT_RESPONSE' : 'search_answer',
                         text: finalResponse,
                         category: finalCategory,
                         results: llmResult.searchResults,
                         route: routeInfo || undefined,
+                        timestamp: Date.now(),
                     };
 
                     const encoder = new TextEncoder();
-                    await context.room.localParticipant.publishData(
-                        encoder.encode(JSON.stringify(searchMessage)),
-                        { reliable: true }
-                    );
-                    this.logger.log(`[DataChannel] 검색 결과 전송 (${llmResult.searchResults.length}개)`);
+
+                    if (context.hostOnlyMode && context.hostIdentity) {
+                        // 호스트에게만 전송
+                        await context.room.localParticipant.publishData(
+                            encoder.encode(JSON.stringify(searchMessage)),
+                            { reliable: true, destination_identities: [context.hostIdentity] }
+                        );
+                        this.logger.log(`[DataChannel] 검색 결과 호스트에게 전송 (${llmResult.searchResults.length}개)`);
+                    } else {
+                        // 모든 참여자에게 전송
+                        await context.room.localParticipant.publishData(
+                            encoder.encode(JSON.stringify(searchMessage)),
+                            { reliable: true }
+                        );
+                        this.logger.log(`[DataChannel] 검색 결과 전송 (${llmResult.searchResults.length}개)`);
+                    }
                 }
 
                 // ============================================
