@@ -4220,7 +4220,7 @@ ${transcripts}
      * Silent Participant 주기적 체크 시작
      */
     private startSilentParticipantChecker(roomId: string): void {
-        const SILENT_THRESHOLD_MS = 2* 60 * 1000; // 2분
+        const SILENT_THRESHOLD_MS = 30 * 1000; // 30초
         const CHECK_INTERVAL_MS = 15 * 1000; // 15초마다 체크
         const alreadyAlerted = new Set<string>(); // 이미 알린 참여자
 
