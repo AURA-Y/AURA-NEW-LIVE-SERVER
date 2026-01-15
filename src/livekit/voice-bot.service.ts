@@ -1119,29 +1119,14 @@ ${processedContent}
         this.logger.log(`[PDF 질문] 처리 시작 from ${requesterId}: "${question.substring(0, 50)}..."`);
 
         try {
-            // RAG 컨텍스트 조회 시도
-            let ragContext = '';
-            try {
-                if (this.ragClient.isConnected(roomId)) {
-                    const ragResult = await this.ragClient.sendQuestionWithSources(roomId, question);
-                    if (ragResult && ragResult.sources && ragResult.sources.length > 0) {
-                        ragContext = ragResult.sources.map((s) => `[${s.speaker || '발언자'}] ${s.text}`).join('\n\n');
-                        this.logger.log(`[PDF 질문] RAG 컨텍스트 ${ragResult.sources.length}개 조회됨`);
-                    }
-                }
-            } catch (ragError) {
-                this.logger.warn(`[PDF 질문] RAG 조회 실패: ${ragError.message}`);
-            }
-
-            // LLM에 질문 (PDF 컨텍스트 + RAG 컨텍스트 포함)
+            // PDF 질문은 RAG 스킵 (속도 개선: 3~5초 단축)
+            // PDF 선택 텍스트에 대한 질문은 회의 내용 검색이 불필요
             const fullContext = `
 === PDF 선택 텍스트 ===
 ${question}
 
 === PDF 정보 ===
 ${pdfContext}
-
-${ragContext ? `=== 관련 문서 내용 ===\n${ragContext}` : ''}
 `.trim();
 
             const response = await this.llmService.answerWithContext(
@@ -2247,7 +2232,10 @@ ${edgesDesc}
 
         // ★ RAG로 발언 전송 (비동기, 논블로킹 - 회의록/임베딩용)
         // 모든 참가자의 발화를 기록 (봇 응답 여부와 무관)
-        this.sendToRagForEmbedding(roomId, transcript, userId, startTime);
+        // endTime = startTime + 오디오 버퍼 길이 (16kHz, 16-bit mono PCM)
+        const audioDurationMs = (audioBuffer.length / (16000 * 2)) * 1000;
+        const endTime = startTime ? startTime + audioDurationMs : null;
+        this.sendToRagForEmbedding(roomId, transcript, userId, startTime, endTime);
 
         // ★ 타임라인용 발화 수집 (5초마다 LLM으로 키워드 추출)
         // 키워드 힌트로 인한 "아우라" 오인식 제거 후 수집
@@ -4213,8 +4201,9 @@ ${transcripts}
      * - 비동기, 논블로킹 (fire-and-forget)
      * - 짧은 추임새나 무의미한 텍스트는 필터링
      * @param startTime 발언 시작 시간 (동시발화 순서 보장용)
+     * @param endTime 발언 종료 시간 (타임라인용, Clova STT에서 제공)
      */
-    private sendToRagForEmbedding(roomId: string, text: string, speaker: string, startTime: number | null = null): void {
+    private sendToRagForEmbedding(roomId: string, text: string, speaker: string, startTime: number | null = null, endTime: number | null = null): void {
         // 너무 짧은 텍스트 필터링 (3글자 이하)
         if (text.trim().length <= 3) {
             return;
@@ -4249,7 +4238,7 @@ ${transcripts}
         }
 
         // 비동기로 RAG에 전송 (응답 대기 없음)
-        this.ragClient.sendStatement(roomId, text, speaker, startTime)
+        this.ragClient.sendStatement(roomId, text, speaker, startTime, endTime)
             .then(() => {
                 this.logger.debug(`[RAG 임베딩] 전송 완료: "${text.substring(0, 30)}..." by ${speaker}`);
             })
@@ -4492,7 +4481,7 @@ ${transcripts}
      * Silent Participant 주기적 체크 시작
      */
     private startSilentParticipantChecker(roomId: string): void {
-        const SILENT_THRESHOLD_MS = 2* 60 * 1000; // 2분
+        const SILENT_THRESHOLD_MS = 30 * 1000; // 30초
         const CHECK_INTERVAL_MS = 15 * 1000; // 15초마다 체크
         const alreadyAlerted = new Set<string>(); // 이미 알린 참여자
 
