@@ -310,20 +310,30 @@ export class LivekitController {
     @Query('refresh') refresh?: string,
   ) {
     const normalizedRoomId = roomId.trim();
+    console.log(`\n========== [GET /${normalizedRoomId}/issues] 논점 조회 요청 ==========`);
+    console.log(`refresh: ${refresh}`);
+
     if (!normalizedRoomId) {
+      console.log('[Issues API] roomId가 비어있음');
       throw new HttpException('roomId가 필요합니다.', HttpStatus.BAD_REQUEST);
     }
 
     try {
       const shouldRefresh = refresh === 'true';
+      console.log(`[Issues API] RAG 서버에 요청 중... roomId=${normalizedRoomId}, refresh=${shouldRefresh}`);
+
       const result = await this.ragClient.getIssues(normalizedRoomId, shouldRefresh);
+      console.log(`[Issues API] RAG 응답:`, JSON.stringify(result).substring(0, 200));
 
       if (!result.success) {
+        console.log(`[Issues API] RAG 실패: ${result.message}`);
         throw new HttpException(result.message || '논점 조회 실패', HttpStatus.BAD_GATEWAY);
       }
 
+      console.log(`[Issues API] 성공 - issues 수: ${result.data?.issues?.issues?.length || 0}`);
       return result.data;
     } catch (error) {
+      console.error(`[Issues API] 에러:`, error.message);
       if (error instanceof HttpException) throw error;
       throw new HttpException(`논점 조회 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
