@@ -1000,29 +1000,14 @@ ${processedContent}
         this.logger.log(`[PDF 질문] 처리 시작 from ${requesterId}: "${question.substring(0, 50)}..."`);
 
         try {
-            // RAG 컨텍스트 조회 시도
-            let ragContext = '';
-            try {
-                if (this.ragClient.isConnected(roomId)) {
-                    const ragResult = await this.ragClient.sendQuestionWithSources(roomId, question);
-                    if (ragResult && ragResult.sources && ragResult.sources.length > 0) {
-                        ragContext = ragResult.sources.map((s) => `[${s.speaker || '발언자'}] ${s.text}`).join('\n\n');
-                        this.logger.log(`[PDF 질문] RAG 컨텍스트 ${ragResult.sources.length}개 조회됨`);
-                    }
-                }
-            } catch (ragError) {
-                this.logger.warn(`[PDF 질문] RAG 조회 실패: ${ragError.message}`);
-            }
-
-            // LLM에 질문 (PDF 컨텍스트 + RAG 컨텍스트 포함)
+            // PDF 질문은 RAG 스킵 (속도 개선: 3~5초 단축)
+            // PDF 선택 텍스트에 대한 질문은 회의 내용 검색이 불필요
             const fullContext = `
 === PDF 선택 텍스트 ===
 ${question}
 
 === PDF 정보 ===
 ${pdfContext}
-
-${ragContext ? `=== 관련 문서 내용 ===\n${ragContext}` : ''}
 `.trim();
 
             const response = await this.llmService.answerWithContext(
