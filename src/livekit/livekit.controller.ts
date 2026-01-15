@@ -445,6 +445,26 @@ export class LivekitController {
     }
   }
 
+  // 회의 재개 (요약 팝업 닫고 회의 계속할 때 - 대기 모드 해제)
+  @Post('resume-meeting')
+  async resumeMeeting(@Body('roomId') roomIdParam: string) {
+    const roomId = roomIdParam?.trim();
+    if (!roomId) {
+      return { status: 'fail', roomId: '', message: 'roomId가 필요합니다.' };
+    }
+
+    try {
+      const result = await this.livekitService.resumeMeeting(roomId);
+      return {
+        status: result.success ? 'success' : 'fail',
+        roomId: roomId,
+        message: result.message,
+      };
+    } catch (error) {
+      return { status: 'fail', roomId: roomId, message: error.message };
+    }
+  }
+
   // 중간 보고서 요청
   @Post(':roomId/report')
   async requestReport(@Param('roomId') roomId: string) {

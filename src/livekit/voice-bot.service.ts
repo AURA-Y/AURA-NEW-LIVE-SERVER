@@ -3576,6 +3576,44 @@ ${edgesDesc}
         context.botState = BotState.SLEEP;
     }
 
+    // ★ 대기 모드 해제 (회의 계속 시 STT/응답 재활성화)
+    async exitStandbyMode(roomId: string): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) {
+            this.logger.warn(`[대기 모드 해제] 방을 찾을 수 없음: ${roomId}`);
+            return;
+        }
+
+        if (!context.standbyMode) {
+            this.logger.log(`[대기 모드 해제] 이미 활성 상태: ${roomId}`);
+            return;
+        }
+
+        context.standbyMode = false;
+        this.logger.log(`[대기 모드 해제] ${roomId} - STT/응답 재활성화됨`);
+
+        // RAG WebSocket 재연결
+        try {
+            await this.ragClient.connect(roomId, {
+                roomTopic: context.roomTopic || '',
+                description: '',
+                files: [],
+            });
+            this.logger.log(`[대기 모드 해제] RAG 재연결 완료`);
+        } catch (error) {
+            this.logger.error(`[대기 모드 해제] RAG 재연결 실패: ${error.message}`);
+        }
+
+        // 타임라인 인터벌 재시작
+        this.startTimelineInterval(roomId);
+
+        // 통계 인터벌 재시작
+        this.startSpeakingStatsChecker(roomId);
+
+        // 봇 상태를 ARMED로 변경 (응답 대기)
+        context.botState = BotState.ARMED;
+    }
+
     // 봇만 종료 (요약할 때 사용 - cleanup 안 함)
     async stopBot(roomId: string): Promise<void> {
         const context = this.activeRooms.get(roomId);

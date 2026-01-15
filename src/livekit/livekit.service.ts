@@ -436,6 +436,22 @@ export class LivekitService {
   }
 
   /**
+   * 회의 재개 (대기 모드 해제 - 요약 팝업 닫고 회의 계속할 때)
+   */
+  async resumeMeeting(roomId: string): Promise<{ success: boolean; message?: string }> {
+    this.logger.log(`[회의 재개] roomId: ${roomId}`);
+
+    if (!this.isBotActive(roomId)) {
+      return { success: false, message: '봇이 활성 상태가 아닙니다.' };
+    }
+
+    await this.voiceBotService.exitStandbyMode(roomId);
+    this.logger.log(`[회의 재개] 대기 모드 해제 완료`);
+
+    return { success: true, message: '회의가 재개되었습니다.' };
+  }
+
+  /**
    * 중간 보고서 요청
    */
   async requestReport(roomId: string): Promise<{ success: boolean; message?: string; report?: any }> {
