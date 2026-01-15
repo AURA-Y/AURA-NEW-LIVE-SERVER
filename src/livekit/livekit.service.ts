@@ -416,18 +416,13 @@ export class LivekitService {
   }
 
   /**
-   * 회의 종료 (봇 정리 + RAG 요약 요청)
+   * 회의 종료 (RAG 요약 요청만 - 봇은 인간 참여자 없을 때 30초 후 자동 퇴장)
    */
   async endMeeting(roomId: string): Promise<{ success: boolean; message?: string }> {
     this.logger.log(`[회의 종료] roomId: ${roomId}`);
 
-    // 1. 봇 종료
-    if (this.isBotActive(roomId)) {
-      await this.stopBotForRoom(roomId);
-      this.logger.log(`[회의 종료] 봇 정리 완료`);
-    }
-
-    // 2. RAG 서버에 회의 종료 알림 (요약 생성 트리거)
+    // RAG 서버에 회의 종료 알림 (요약 생성 트리거)
+    // 봇은 인간 참여자가 없을 때 30초 후 자동으로 퇴장함 (voice-bot.service.ts)
     const result = await this.ragClient.endMeeting(roomId);
     this.logger.log(`[회의 종료] RAG 응답: ${result.message}`);
 
