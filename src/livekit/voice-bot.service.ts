@@ -3062,7 +3062,11 @@ ${edgesDesc}
                 // ============================================
                 context.shouldInterrupt = false;
                 context.botState = BotState.SPEAKING;
-                await this.speakAndPublish(context, roomId, requestId, finalResponse);
+                // 검색 결과가 있고 hostOnlyMode면 텍스트 카드 스킵 (이미 search_answer에 포함됨)
+                const hasSearchResults = llmResult.searchResults && llmResult.searchResults.length > 0;
+                await this.speakAndPublish(context, roomId, requestId, finalResponse, {
+                    skipTextCard: hasSearchResults && context.hostOnlyMode
+                });
 
                 // 응답 완료 → SLEEP
                 context.botState = BotState.SLEEP;
@@ -3155,7 +3159,8 @@ ${edgesDesc}
         context: RoomContext,
         roomId: string,
         requestId: number,
-        message: string
+        message: string,
+        options?: { skipTextCard?: boolean }
     ): Promise<void> {
         // AI 음소거 상태면 TTS 스킵
         if (context.aiMuted) {
@@ -3165,6 +3170,17 @@ ${edgesDesc}
 
         // 호스트 전용 모드면 TTS 대신 텍스트 카드 전송
         if (context.hostOnlyMode && context.hostIdentity) {
+            // 검색 결과와 함께 이미 전송된 경우 텍스트 카드 스킵
+            if (options?.skipTextCard) {
+                this.logger.log(`[텍스트 카드 스킵] 검색 결과에 이미 포함됨`);
+                await this.broadcastAiState(roomId, 'speaking', { response: message });
+                const readingTime = Math.min(message.length * 50, 5000);
+                setTimeout(() => {
+                    this.broadcastAiState(roomId, 'idle');
+                }, readingTime);
+                return;
+            }
+
             this.logger.log(`[텍스트 카드] 호스트에게만 전송 - 메시지: "${message.substring(0, 50)}..."`);
 
             // Siri 스타일: speaking 상태 브로드캐스트
