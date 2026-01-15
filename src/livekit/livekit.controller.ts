@@ -303,6 +303,32 @@ export class LivekitController {
   // 일반 라우트 (와일드카드는 맨 아래에)
   // ============================================================
 
+  // 회의 논점 조회 (와일드카드보다 먼저 정의)
+  @Get(':roomId/issues')
+  async getIssues(
+    @Param('roomId') roomId: string,
+    @Query('refresh') refresh?: string,
+  ) {
+    const normalizedRoomId = roomId.trim();
+    if (!normalizedRoomId) {
+      throw new HttpException('roomId가 필요합니다.', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const shouldRefresh = refresh === 'true';
+      const result = await this.ragClient.getIssues(normalizedRoomId, shouldRefresh);
+
+      if (!result.success) {
+        throw new HttpException(result.message || '논점 조회 실패', HttpStatus.BAD_GATEWAY);
+      }
+
+      return result.data;
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new HttpException(`논점 조회 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   @Get(':roomId')
   async getRoom(@Param('roomId') roomId: string) {
     return this.livekitService.getRoom(roomId);
@@ -351,32 +377,6 @@ export class LivekitController {
       };
     } catch (error) {
       return { status: 'fail', roomId: normalizedRoomId, message: error.message };
-    }
-  }
-
-  // 회의 논점 조회
-  @Get(':roomId/issues')
-  async getIssues(
-    @Param('roomId') roomId: string,
-    @Query('refresh') refresh?: string,
-  ) {
-    const normalizedRoomId = roomId.trim();
-    if (!normalizedRoomId) {
-      throw new HttpException('roomId가 필요합니다.', HttpStatus.BAD_REQUEST);
-    }
-
-    try {
-      const shouldRefresh = refresh === 'true';
-      const result = await this.ragClient.getIssues(normalizedRoomId, shouldRefresh);
-
-      if (!result.success) {
-        throw new HttpException(result.message || '논점 조회 실패', HttpStatus.BAD_GATEWAY);
-      }
-
-      return result.data;
-    } catch (error) {
-      if (error instanceof HttpException) throw error;
-      throw new HttpException(`논점 조회 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
