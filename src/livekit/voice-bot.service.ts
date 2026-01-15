@@ -177,7 +177,62 @@ export class VoiceBotService {
         private calendarService: CalendarService,
         @Inject(forwardRef(() => require('./livekit.service').LivekitService))
         private livekitService: LivekitService,
-    ) { }
+    ) {
+        // 타이머 알림 콜백 등록
+        this.setupTimerNotifyCallback();
+    }
+
+    /**
+     * 타이머 warning/ended 이벤트 발생 시 DataChannel로 브로드캐스트
+     */
+    private async setupTimerNotifyCallback() {
+        const { setTimerNotifyCallback } = await import('../mcp/tools/timer.tool');
+
+        setTimerNotifyCallback(async (roomId: string, event: 'warning' | 'ended', data: any) => {
+            const context = this.activeRooms.get(roomId);
+            if (!context) {
+                this.logger.warn(`[타이머 콜백] Room context 없음: ${roomId}`);
+                return;
+            }
+
+            this.logger.log(`[타이머 콜백] ${roomId} - ${event}, 남은 시간: ${data.remainingSeconds}초`);
+
+            // DataChannel로 타이머 알림 전송
+            const timerMessage = {
+                type: 'TIMER_ALERT',
+                event, // 'warning' | 'ended'
+                data: {
+                    targetMinutes: data.targetMinutes,
+                    warningMinutes: data.warningMinutes,
+                    remainingSeconds: data.remainingSeconds,
+                    timerState: data.timerState,
+                },
+            };
+
+            try {
+                const encoder = new TextEncoder();
+                await context.room.localParticipant.publishData(
+                    encoder.encode(JSON.stringify(timerMessage)),
+                    { reliable: true }
+                );
+                this.logger.log(`[DataChannel] 타이머 알림 전송: ${event}`);
+
+                // TTS로 알림 (AI 음소거가 아닌 경우)
+                if (!context.aiMuted) {
+                    const message = event === 'warning'
+                        ? `회의 종료 ${data.warningMinutes}분 전입니다.`
+                        : '회의 시간이 종료되었습니다.';
+
+                    const requestId = ++context.currentRequestId;
+                    context.botState = BotState.SPEAKING;
+                    await this.speakAndPublish(context, roomId, requestId, message);
+                    context.botState = BotState.ARMED;
+                }
+            } catch (error) {
+                this.logger.error(`[타이머 콜백] DataChannel 전송 실패: ${error.message}`);
+            }
+        });
+    }
 
     async startBot(roomId: string, botToken: string): Promise<void> {
         if (this.activeRooms.has(roomId)) {
@@ -221,7 +276,7 @@ export class VoiceBotService {
             }
         });
 
-        // DataChannel 메시지 수신 (Vision 캡처 응답)
+        // DataChannel 메시지 수신 (Vision 캡처 응답, 타이머 명령 등)
         room.on(RoomEvent.DataReceived, async (payload: Uint8Array, participant?: RemoteParticipant) => {
             try {
                 const message = JSON.parse(new TextDecoder().decode(payload));
@@ -230,13 +285,19 @@ export class VoiceBotService {
                     this.logger.log(`[Vision] 캡처 응답 수신 - requestId: ${message.requestId}, 이미지 크기: ${(message.imageBase64?.length / 1024).toFixed(1)}KB`);
                     await this.handleVisionCaptureResponse(roomId, message);
                 }
+
+                // 프론트엔드에서 보낸 타이머 명령 처리
+                if (message.type === 'TIMER_COMMAND') {
+                    this.logger.log(`[타이머 명령 수신] action: ${message.action}, minutes: ${message.minutes}`);
+                    await this.handleTimerCommand(roomId, message);
+                }
             } catch (error) {
                 // JSON 파싱 실패 시 무시 (다른 타입의 DataChannel 메시지일 수 있음)
                 this.logger.debug(`[DataChannel] 파싱 실패 또는 비-JSON 메시지`);
             }
         });
 
-        room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
+        room.on(RoomEvent.ParticipantConnected, async (participant: RemoteParticipant) => {
             this.logger.log(`[참여자 입장] ${participant.identity}`);
 
             // 인간 참여자 입장 시 셧다운 취소
@@ -257,6 +318,32 @@ export class VoiceBotService {
                     }).catch(err => {
                         this.logger.warn(`[RAG 참여자 입장] 전송 실패: ${err.message}`);
                     });
+                }
+
+                // 새 참여자에게 현재 타이머 상태 전송
+                try {
+                    const { getTimerStatus } = await import('../mcp/tools/timer.tool');
+                    const timerStatus = getTimerStatus(roomId);
+                    if (timerStatus && timerStatus.timerState !== 'idle') {
+                        const timerMessage = {
+                            type: 'TIMER_UPDATE',
+                            action: 'sync',
+                            data: {
+                                targetMinutes: timerStatus.targetMinutes,
+                                warningMinutes: timerStatus.warningMinutes,
+                                remainingSeconds: timerStatus.remainingSeconds,
+                                timerState: timerStatus.timerState,
+                            },
+                        };
+                        const encoder = new TextEncoder();
+                        await context.room.localParticipant.publishData(
+                            encoder.encode(JSON.stringify(timerMessage)),
+                            { reliable: true }
+                        );
+                        this.logger.log(`[타이머 동기화] 새 참여자 ${participant.identity}에게 타이머 상태 전송`);
+                    }
+                } catch (error) {
+                    this.logger.warn(`[타이머 동기화] 전송 실패: ${error.message}`);
                 }
             }
         });
@@ -2574,6 +2661,100 @@ ${edgesDesc}
             }
 
             // ================================================
+            // 3.8. 타이머 Intent 처리
+            // ================================================
+            if (intentAnalysis.isCallIntent && intentAnalysis.isTimerIntent) {
+                this.logger.log(`[타이머] Intent 감지 - action: ${intentAnalysis.timerAction}, minutes: ${intentAnalysis.timerMinutes}`);
+
+                try {
+                    const { startTimer, pauseTimer, resumeTimer, extendTimer, stopTimer, getTimerStatus } = await import('../mcp/tools/timer.tool');
+
+                    let result: any = null;
+                    let message = '';
+                    const action = intentAnalysis.timerAction || 'status';
+
+                    switch (action) {
+                        case 'start': {
+                            const targetMinutes = intentAnalysis.timerMinutes || 30;
+                            const warningMinutes = Math.max(1, Math.floor(targetMinutes * 0.15)); // 15% 전 알림
+                            result = startTimer(roomId, targetMinutes, warningMinutes);
+                            message = `${targetMinutes}분 타이머를 시작합니다. ${warningMinutes}분 전에 알림을 드릴게요.`;
+                            break;
+                        }
+
+                        case 'pause':
+                            result = pauseTimer(roomId);
+                            message = result ? '타이머를 일시정지했습니다.' : '실행 중인 타이머가 없습니다.';
+                            break;
+
+                        case 'resume':
+                            result = resumeTimer(roomId);
+                            message = result ? '타이머를 재개합니다.' : '일시정지된 타이머가 없습니다.';
+                            break;
+
+                        case 'extend': {
+                            const minutes = intentAnalysis.timerMinutes || 10;
+                            result = extendTimer(roomId, minutes);
+                            message = result ? `${minutes}분 연장했습니다.` : '타이머가 없습니다.';
+                            break;
+                        }
+
+                        case 'stop':
+                            result = stopTimer(roomId);
+                            message = result ? '타이머를 중지했습니다.' : '타이머가 없습니다.';
+                            break;
+
+                        case 'status':
+                            result = getTimerStatus(roomId);
+                            if (result) {
+                                const mins = Math.floor(result.remainingSeconds / 60);
+                                const secs = result.remainingSeconds % 60;
+                                message = `현재 ${mins}분 ${secs}초 남았습니다.`;
+                            } else {
+                                message = '설정된 타이머가 없습니다.';
+                            }
+                            break;
+                    }
+
+                    // DataChannel로 타이머 상태 브로드캐스트
+                    const timerMessage = {
+                        type: 'TIMER_UPDATE',
+                        action,
+                        data: result ? {
+                            targetMinutes: result.targetMinutes,
+                            warningMinutes: result.warningMinutes,
+                            remainingSeconds: result.remainingSeconds,
+                            timerState: result.timerState,
+                        } : null,
+                    };
+                    const encoder = new TextEncoder();
+                    await context.room.localParticipant.publishData(
+                        encoder.encode(JSON.stringify(timerMessage)),
+                        { reliable: true }
+                    );
+                    this.logger.log(`[DataChannel] 타이머 상태 전송: ${action}`);
+
+                    // 음성 응답
+                    context.botState = BotState.SPEAKING;
+                    await this.speakAndPublish(context, roomId, requestId, message);
+                    context.botState = BotState.ARMED;
+                    context.lastResponseTime = Date.now();
+
+                    return;
+                } catch (error) {
+                    this.logger.error(`[타이머] 처리 실패: ${error.message}`);
+                    await this.speakAndPublish(
+                        context,
+                        roomId,
+                        requestId,
+                        "타이머 처리 중 오류가 발생했습니다."
+                    );
+                    context.botState = BotState.ARMED;
+                    return;
+                }
+            }
+
+            // ================================================
             // 4. 웨이크워드 판단 + LLM 교정 (필요시만!)
             // ================================================
             let shouldRespond = intentAnalysis.isCallIntent;
@@ -3402,6 +3583,82 @@ ${edgesDesc}
     ): Promise<void> {
         this.logger.log(`[Vision HTTP] 처리 시작 - room: ${roomId}, requestId: ${message.requestId}`);
         await this.handleVisionCaptureResponse(roomId, message);
+    }
+
+    /**
+     * 프론트엔드에서 보낸 타이머 명령 처리
+     */
+    private async handleTimerCommand(
+        roomId: string,
+        message: { action: string; minutes?: number; warningMinutes?: number }
+    ): Promise<void> {
+        const context = this.activeRooms.get(roomId);
+        if (!context) {
+            this.logger.warn(`[타이머 명령] Room context 없음: ${roomId}`);
+            return;
+        }
+
+        const { startTimer, pauseTimer, resumeTimer, extendTimer, stopTimer, getTimerStatus } = await import('../mcp/tools/timer.tool');
+
+        let result: any = null;
+        const { action, minutes, warningMinutes } = message;
+
+        switch (action) {
+            case 'start': {
+                const targetMins = minutes || 30;
+                const warnMins = warningMinutes || Math.max(1, Math.floor(targetMins * 0.15));
+                result = startTimer(roomId, targetMins, warnMins);
+                this.logger.log(`[타이머] 시작: ${targetMins}분, 경고: ${warnMins}분 전`);
+                break;
+            }
+            case 'pause':
+                result = pauseTimer(roomId);
+                this.logger.log(`[타이머] 일시정지`);
+                break;
+            case 'resume':
+                result = resumeTimer(roomId);
+                this.logger.log(`[타이머] 재개`);
+                break;
+            case 'extend': {
+                const extendMins = minutes || 10;
+                result = extendTimer(roomId, extendMins);
+                this.logger.log(`[타이머] ${extendMins}분 연장`);
+                break;
+            }
+            case 'stop':
+                result = stopTimer(roomId);
+                this.logger.log(`[타이머] 중지`);
+                break;
+            case 'status':
+                result = getTimerStatus(roomId);
+                break;
+            default:
+                this.logger.warn(`[타이머] 알 수 없는 액션: ${action}`);
+                return;
+        }
+
+        // 결과를 모든 참여자에게 브로드캐스트
+        const timerMessage = {
+            type: 'TIMER_UPDATE',
+            action,
+            data: result ? {
+                targetMinutes: result.targetMinutes,
+                warningMinutes: result.warningMinutes,
+                remainingSeconds: result.remainingSeconds,
+                timerState: result.timerState,
+            } : null,
+        };
+
+        try {
+            const encoder = new TextEncoder();
+            await context.room.localParticipant.publishData(
+                encoder.encode(JSON.stringify(timerMessage)),
+                { reliable: true }
+            );
+            this.logger.log(`[DataChannel] 타이머 상태 브로드캐스트: ${action}`);
+        } catch (error) {
+            this.logger.error(`[타이머] DataChannel 전송 실패: ${error.message}`);
+        }
     }
 
     /**
