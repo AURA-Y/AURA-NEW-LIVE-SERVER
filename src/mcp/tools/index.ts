@@ -8,6 +8,7 @@ import { sequenceTool } from './sequence.tool';
 import { erdTool } from './erd.tool';
 import { architectureTool } from './architecture.tool';
 import { kanbanTool } from './kanban.tool';
+import { timerTool } from './timer.tool';
 
 // 모든 도구 배열
 export const allTools: McpTool[] = [
@@ -16,6 +17,7 @@ export const allTools: McpTool[] = [
   erdTool,
   architectureTool,
   kanbanTool,
+  timerTool,
 ];
 
 // 도구 이름으로 매핑
@@ -29,6 +31,7 @@ export const toolsByCategory = {
   document: allTools.filter((t) => t.category === 'document'),
   management: allTools.filter((t) => t.category === 'management'),
   analysis: allTools.filter((t) => t.category === 'analysis'),
+  utility: allTools.filter((t) => t.category === 'utility'),
 };
 
 // 개별 도구 export
@@ -37,3 +40,5 @@ export { sequenceTool } from './sequence.tool';
 export { erdTool } from './erd.tool';
 export { architectureTool } from './architecture.tool';
 export { kanbanTool } from './kanban.tool';
+export { timerTool, setTimerNotifyCallback } from './timer.tool';
+export type { TimerData, TimerState, TimerAction } from './timer.tool';

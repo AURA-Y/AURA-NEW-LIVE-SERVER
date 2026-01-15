@@ -39,7 +39,7 @@ export interface McpTool {
   execute: (input: ToolInput, llmCall: LlmCallFn) => Promise<ToolOutput>;
 }
 
-export type ToolCategory = 'diagram' | 'document' | 'management' | 'analysis';
+export type ToolCategory = 'diagram' | 'document' | 'management' | 'analysis' | 'utility';
 
 // LLM 호출 함수 타입 (LlmService.sendMessagePure 시그니처)
 export type LlmCallFn = (prompt: string, maxTokens?: number) => Promise<string>;
