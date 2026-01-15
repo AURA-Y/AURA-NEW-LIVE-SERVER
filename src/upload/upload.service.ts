@@ -133,4 +133,32 @@ export class UploadService {
 
     return downloadUrl;
   }
+
+  /**
+   * PDF 뷰어용 Presigned URL 생성 (inline 표시, attachment 헤더 없음)
+   */
+  async getViewerUrl(fileUrl: string): Promise<string> {
+    if (!this.s3Client) {
+      throw new Error('S3 not configured');
+    }
+
+    // S3 URL에서 key 추출
+    // 형식: https://bucket.s3.region.amazonaws.com/key
+    const url = new URL(fileUrl);
+    const s3Key = decodeURIComponent(url.pathname.slice(1)); // 앞의 / 제거
+
+    this.logger.log(`[Upload] Generating viewer URL for key: ${s3Key}`);
+
+    const viewerUrl = await getSignedUrl(
+      this.s3Client,
+      new GetObjectCommand({
+        Bucket: this.s3Bucket,
+        Key: s3Key,
+        // ResponseContentDisposition 없음 - inline 표시
+      }),
+      { expiresIn: 3600 },
+    );
+
+    return viewerUrl;
+  }
 }

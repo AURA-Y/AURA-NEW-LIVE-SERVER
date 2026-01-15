@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Body,
   Param,
   Query,
   UseInterceptors,
@@ -72,6 +73,27 @@ export class UploadController {
     } catch (error) {
       throw new HttpException(
         error.message || 'Failed to generate download URL',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * PDF 뷰어용 URL 생성 (inline 표시, 텍스트 선택 가능)
+   * POST /api/upload/viewer-url
+   */
+  @Post('viewer-url')
+  async getViewerUrl(@Body('fileUrl') fileUrl: string) {
+    if (!fileUrl) {
+      throw new HttpException('fileUrl is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const viewerUrl = await this.uploadService.getViewerUrl(fileUrl);
+      return { viewerUrl };
+    } catch (error) {
+      throw new HttpException(
+        error.message || 'Failed to generate viewer URL',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
