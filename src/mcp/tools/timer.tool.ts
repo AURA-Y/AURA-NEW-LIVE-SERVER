@@ -63,7 +63,8 @@ function startTimer(roomId: string, targetMinutes: number, warningMinutes: numbe
   // 인터벌 시작 (1초마다)
   const interval = setInterval(() => {
     const timer = timerStore.get(roomId);
-    if (!timer || timer.timerState !== 'running') {
+    // running 또는 warning 상태에서만 계속 카운트다운
+    if (!timer || (timer.timerState !== 'running' && timer.timerState !== 'warning')) {
       stopTimerInterval(roomId);
       return;
     }
@@ -72,7 +73,7 @@ function startTimer(roomId: string, targetMinutes: number, warningMinutes: numbe
 
     // 경고 시간 체크
     const warningThreshold = timer.warningMinutes * 60;
-    if (timer.remainingSeconds === warningThreshold) {
+    if (timer.remainingSeconds === warningThreshold && timer.timerState === 'running') {
       timer.timerState = 'warning';
       notifyCallback?.(roomId, 'warning', { ...timer });
     }
@@ -121,7 +122,8 @@ function resumeTimer(roomId: string): TimerData | null {
   // 인터벌 재시작
   const interval = setInterval(() => {
     const t = timerStore.get(roomId);
-    if (!t || t.timerState !== 'running') {
+    // running 또는 warning 상태에서만 계속 카운트다운
+    if (!t || (t.timerState !== 'running' && t.timerState !== 'warning')) {
       stopTimerInterval(roomId);
       return;
     }
@@ -129,7 +131,7 @@ function resumeTimer(roomId: string): TimerData | null {
     t.remainingSeconds--;
 
     const warningThreshold = t.warningMinutes * 60;
-    if (t.remainingSeconds === warningThreshold) {
+    if (t.remainingSeconds === warningThreshold && t.timerState === 'running') {
       t.timerState = 'warning';
       notifyCallback?.(roomId, 'warning', { ...t });
     }
@@ -168,7 +170,8 @@ function extendTimer(roomId: string, minutes: number): TimerData | null {
     if (!timerIntervals.has(roomId)) {
       const interval = setInterval(() => {
         const t = timerStore.get(roomId);
-        if (!t || t.timerState !== 'running') {
+        // running 또는 warning 상태에서만 계속 카운트다운
+        if (!t || (t.timerState !== 'running' && t.timerState !== 'warning')) {
           stopTimerInterval(roomId);
           return;
         }
@@ -176,7 +179,7 @@ function extendTimer(roomId: string, minutes: number): TimerData | null {
         t.remainingSeconds--;
 
         const warningThreshold = t.warningMinutes * 60;
-        if (t.remainingSeconds === warningThreshold) {
+        if (t.remainingSeconds === warningThreshold && t.timerState === 'running') {
           t.timerState = 'warning';
           notifyCallback?.(roomId, 'warning', { ...t });
         }
