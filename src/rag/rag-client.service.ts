@@ -23,6 +23,7 @@ interface PendingStatement {
     timestamp: number;
     retryCount: number;
     startTime?: number | null;  // ★ 발언 시작 시간 (동시발화 순서 보장용)
+    endTime?: number | null;    // ★ 발언 종료 시간 (타임라인용)
 }
 
 interface PendingReportRequest {
@@ -273,21 +274,24 @@ export class RagClientService implements OnModuleDestroy {
     /**
      * 일반 발언 전송 (statement) - 버퍼링 및 재시도 지원
      * @param startTime 발언 시작 시간 (밀리초 timestamp, 동시발화 순서 보장용)
+     * @param endTime 발언 종료 시간 (밀리초 timestamp, 타임라인용)
      */
-    async sendStatement(roomId: string, text: string, speaker: string, startTime?: number | null, retryCount: number = 0): Promise<void> {
+    async sendStatement(roomId: string, text: string, speaker: string, startTime?: number | null, endTime?: number | null, retryCount: number = 0): Promise<void> {
         // 연결 안 됐으면 버퍼에 저장
         if (!this.isConnected(roomId)) {
-            this.addToStatementBuffer(roomId, text, speaker, startTime);
+            this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
             return;
         }
 
         const context = this.connections.get(roomId)!;
+        const now = Date.now();
         const message = {
             type: 'statement',
             text,
             speaker,
             confidence: 1.0,
-            startTime: startTime ?? Date.now(),  // ★ 발언 시작 시간 (없으면 현재 시간)
+            startTime: startTime ?? now,  // ★ 발언 시작 시간 (없으면 현재 시간)
+            endTime: endTime ?? null,     // ★ 발언 종료 시간 (타임라인용)
         };
 
         try {
@@ -302,12 +306,12 @@ export class RagClientService implements OnModuleDestroy {
                 // 잠시 대기 후 재시도 (exponential backoff)
                 const delay = Math.min(1000 * Math.pow(2, retryCount), 5000);
                 setTimeout(() => {
-                    this.sendStatement(roomId, text, speaker, startTime, retryCount + 1);
+                    this.sendStatement(roomId, text, speaker, startTime, endTime, retryCount + 1);
                 }, delay);
             } else {
                 // 최대 재시도 초과 시 버퍼에 저장
                 this.logger.warn(`[RAG 발언 재시도 초과] ${roomId} - 버퍼에 저장`);
-                this.addToStatementBuffer(roomId, text, speaker, startTime);
+                this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
             }
         }
     }
@@ -315,7 +319,7 @@ export class RagClientService implements OnModuleDestroy {
     /**
      * 발언을 버퍼에 추가
      */
-    private addToStatementBuffer(roomId: string, text: string, speaker: string, startTime?: number | null): void {
+    private addToStatementBuffer(roomId: string, text: string, speaker: string, startTime?: number | null, endTime?: number | null): void {
         let buffer = this.statementBuffers.get(roomId);
         if (!buffer) {
             buffer = [];
@@ -335,6 +339,7 @@ export class RagClientService implements OnModuleDestroy {
             timestamp: Date.now(),
             retryCount: 0,
             startTime,  // ★ 발언 시작 시간 저장
+            endTime,    // ★ 발언 종료 시간 저장
         });
 
         this.logger.log(`[RAG 버퍼 저장] ${roomId} - 버퍼 크기: ${buffer.length}, 화자: ${speaker}, "${text.substring(0, 30)}..."`);
@@ -374,7 +379,7 @@ export class RagClientService implements OnModuleDestroy {
         // 순차적으로 전송 (순서 보장)
         for (const stmt of validStatements) {
             try {
-                await this.sendStatement(roomId, stmt.text, stmt.speaker, stmt.startTime, stmt.retryCount);
+                await this.sendStatement(roomId, stmt.text, stmt.speaker, stmt.startTime, stmt.endTime, stmt.retryCount);
                 // 전송 간 약간의 딜레이 (Rate Limit 방지)
                 await new Promise(resolve => setTimeout(resolve, 100));
             } catch (error: any) {
@@ -595,6 +600,32 @@ export class RagClientService implements OnModuleDestroy {
     }
 
     /**
+     * 회의 논점 조회 API 호출 (HTTP GET)
+     * GET /meetings/{roomId}/issues
+     * @param refresh true면 캐시 무시하고 새로 추출
+     */
+    async getIssues(roomId: string, refresh: boolean = false): Promise<{
+        success: boolean;
+        data?: any;
+        message?: string;
+    }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/issues${refresh ? '?refresh=true' : ''}`;
+
+        this.logger.log(`[RAG 논점 조회] GET ${endpoint}`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.get(endpoint);
+            this.logger.log(`[RAG 논점 조회 성공] ${roomId} - from_cache: ${response.data?.from_cache}`);
+            return { success: true, data: response.data };
+        } catch (error: any) {
+            this.logger.error(`[RAG 논점 조회 실패] ${roomId}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
+
+    /**
      * 회의 종료 API 호출 (HTTP POST)
      * POST /meetings/{roomId}/end
      */
@@ -697,6 +728,52 @@ export class RagClientService implements OnModuleDestroy {
             // 타임아웃 또는 HTTP 요청 실패
             this.pendingReportRequests.delete(roomId);
             this.logger.error(`[RAG 중간 보고서 실패] ${roomId}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
+
+    /**
+     * 참여자 입장 알림 (HTTP POST)
+     * POST /meetings/{roomId}/participants/join
+     */
+    async participantJoined(roomId: string, participant: {
+        id: string;
+        name: string;
+        role: 'host' | 'participant';
+    }): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/participants/join`;
+
+        this.logger.log(`[RAG 참여자 입장] ${participant.name} (${participant.role})`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint, participant);
+            this.logger.log(`[RAG 참여자 입장 성공] ${roomId} - ${participant.name}`);
+            return { success: true, message: response.data };
+        } catch (error: any) {
+            this.logger.warn(`[RAG 참여자 입장 실패] ${roomId}: ${error.message}`);
+            return { success: false, message: error.message };
+        }
+    }
+
+    /**
+     * 참여자 퇴장 알림 (HTTP POST)
+     * POST /meetings/{roomId}/participants/leave
+     */
+    async participantLeft(roomId: string, participantId: string): Promise<{ success: boolean; message?: string }> {
+        const ragBaseUrl = this.configService.get<string>('RAG_API_URL') || 'http://aura-rag-alb-1169123670.ap-northeast-2.elb.amazonaws.com';
+        const endpoint = `${ragBaseUrl}/meetings/${roomId}/participants/leave`;
+
+        this.logger.log(`[RAG 참여자 퇴장] ${participantId}`);
+
+        try {
+            const axios = await import('axios');
+            const response = await axios.default.post(endpoint, { participantId });
+            this.logger.log(`[RAG 참여자 퇴장 성공] ${roomId} - ${participantId}`);
+            return { success: true, message: response.data };
+        } catch (error: any) {
+            this.logger.warn(`[RAG 참여자 퇴장 실패] ${roomId}: ${error.message}`);
             return { success: false, message: error.message };
         }
     }

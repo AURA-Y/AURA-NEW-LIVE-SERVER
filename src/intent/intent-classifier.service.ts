@@ -8,6 +8,9 @@ export interface IntentAnalysis {
     isIdeaBoardIntent: boolean;  // 아이디어 보드 열기 의도
     isFlowchartIntent: boolean;  // Flowchart 보드 열기 의도
     isCalendarIntent: boolean;  // 캘린더/일정 추천 의도
+    isTimerIntent: boolean;  // 타이머 관련 의도
+    timerAction?: 'start' | 'pause' | 'resume' | 'extend' | 'stop' | 'status';  // 타이머 액션
+    timerMinutes?: number;  // 타이머 시간 (분)
     confidence: number;
     matchedPatterns: string[];
     normalizedText: string;
@@ -302,6 +305,38 @@ export class IntentClassifierService {
         /(구조도|흐름도|시퀀스)\s*(그려|열어|시작|만들어|보여)/,
         // 시스템 설계 패턴
         /시스템\s*(설계|구조)\s*(보여|그려|열어|시작)/,
+    ];
+
+    // =====================================================
+    // 타이머 관련 패턴
+    // =====================================================
+    private readonly TIMER_PATTERNS: {
+        pattern: RegExp;
+        action: 'start' | 'pause' | 'resume' | 'extend' | 'stop' | 'status';
+        extractMinutes?: boolean;
+    }[] = [
+        // 타이머 시작 패턴
+        { pattern: /타이머\s*(\d+)\s*분\s*(시작|켜|설정|맞춰|해|해줘)?/, action: 'start', extractMinutes: true },
+        { pattern: /(\d+)\s*분\s*타이머\s*(시작|켜|설정|맞춰|해|해줘)?/, action: 'start', extractMinutes: true },
+        { pattern: /회의\s*시간\s*(\d+)\s*분\s*(으로)?\s*(설정|맞춰|해|해줘)?/, action: 'start', extractMinutes: true },
+        { pattern: /타이머\s*(시작|켜|설정|맞춰)/, action: 'start' },
+        // 타이머 일시정지 패턴
+        { pattern: /타이머\s*(일시\s*정지|멈춰|중지|정지|잠깐\s*멈춰|스톱|pause)/, action: 'pause' },
+        { pattern: /(일시\s*정지|멈춰|중지|정지)\s*타이머/, action: 'pause' },
+        // 타이머 재개 패턴
+        { pattern: /타이머\s*(다시\s*시작|재개|계속|이어서|resume)/, action: 'resume' },
+        { pattern: /(다시\s*시작|재개|계속)\s*타이머/, action: 'resume' },
+        // 타이머 연장 패턴
+        { pattern: /(\d+)\s*분\s*(더|연장|추가|늘려|늘려줘)/, action: 'extend', extractMinutes: true },
+        { pattern: /(시간|타이머)\s*(\d+)\s*분\s*(연장|추가|늘려)/, action: 'extend', extractMinutes: true },
+        { pattern: /(\d+)\s*분\s*(만큼)?\s*(연장|추가|늘려|더)/, action: 'extend', extractMinutes: true },
+        { pattern: /시간\s*(좀)?\s*(더|늘려|연장)\s*(\d+)\s*분?/, action: 'extend', extractMinutes: true },
+        // 타이머 종료 패턴
+        { pattern: /타이머\s*(종료|끝|끄기|꺼|해제|취소|off)/, action: 'stop' },
+        { pattern: /(종료|끝|끄기|꺼|해제|취소)\s*타이머/, action: 'stop' },
+        // 타이머 상태 확인 패턴
+        { pattern: /타이머\s*(상태|확인|얼마나\s*남았|몇\s*분\s*남았)/, action: 'status' },
+        { pattern: /(남은\s*시간|얼마나\s*남았|몇\s*분\s*남았)/, action: 'status' },
     ];
 
     // =====================================================
@@ -656,6 +691,34 @@ export class IntentClassifierService {
             return false;
         });
 
+        // 18. 타이머 Intent 체크
+        let isTimerIntent = false;
+        let timerAction: 'start' | 'pause' | 'resume' | 'extend' | 'stop' | 'status' | undefined;
+        let timerMinutes: number | undefined;
+
+        for (const timerPattern of this.TIMER_PATTERNS) {
+            const match = timerPattern.pattern.exec(lowerNormalized);
+            if (match) {
+                isTimerIntent = true;
+                timerAction = timerPattern.action;
+                matchedPatterns.push(`Timer: ${timerPattern.action}`);
+
+                // 분 추출
+                if (timerPattern.extractMinutes) {
+                    // 패턴에서 숫자 그룹 찾기
+                    for (let i = 1; i < match.length; i++) {
+                        const num = parseInt(match[i], 10);
+                        if (!isNaN(num) && num > 0 && num <= 180) {
+                            timerMinutes = num;
+                            matchedPatterns.push(`Timer minutes: ${num}`);
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
         // 질문 의도 판단
         const isQuestionIntent = hasQuestionWord || hasCommandWord || hasQuestionPattern || hasRequestPattern;
 
@@ -681,6 +744,9 @@ export class IntentClassifierService {
             isIdeaBoardIntent,
             isFlowchartIntent,
             isCalendarIntent,
+            isTimerIntent,
+            timerAction,
+            timerMinutes,
             confidence,
             matchedPatterns,
             normalizedText,
@@ -696,7 +762,7 @@ export class IntentClassifierService {
             needsLlmCorrection,
         };
 
-        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, idea=${isIdeaBoardIntent}, flowchart=${isFlowchartIntent}, calendar=${isCalendarIntent}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
+        this.logger.debug(`[의도 분석] "${text.substring(0, 30)}..." → call=${isCallIntent}, vision=${isVisionIntent}, idea=${isIdeaBoardIntent}, flowchart=${isFlowchartIntent}, calendar=${isCalendarIntent}, timer=${isTimerIntent}${timerAction ? `(${timerAction})` : ''}, conf=${confidence.toFixed(2)}, cat=${category}, keyword=${extractedKeyword}`);
 
         return result;
     }

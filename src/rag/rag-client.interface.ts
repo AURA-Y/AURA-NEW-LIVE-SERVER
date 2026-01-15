@@ -32,8 +32,9 @@ export interface IRagClient {
     /**
      * 발언 전송 (인덱싱)
      * @param startTime 발언 시작 시간 (밀리초 timestamp, 동시발화 순서 보장용)
+     * @param endTime 발언 종료 시간 (밀리초 timestamp, 타임라인용)
      */
-    sendStatement(roomId: string, text: string, speaker: string, startTime?: number | null): Promise<void>;
+    sendStatement(roomId: string, text: string, speaker: string, startTime?: number | null, endTime?: number | null): Promise<void>;
 
     /**
      * 질문 전송 및 응답 대기
@@ -69,7 +70,27 @@ export interface IRagClient {
     /**
      * 중간 보고서 요청
      */
-    requestReport(roomId: string): Promise<{ success: boolean; message?: string }>;
+    requestReport(roomId: string): Promise<{ success: boolean; message?: string; report?: { reportContent?: string; meetingTitle?: string; summaryType?: string } }>;
+
+    /**
+     * 참여자 입장 알림
+     */
+    participantJoined(roomId: string, participant: {
+        id: string;
+        name: string;
+        role: 'host' | 'participant';
+    }): Promise<{ success: boolean; message?: string }>;
+
+    /**
+     * 참여자 퇴장 알림
+     */
+    participantLeft(roomId: string, participantId: string): Promise<{ success: boolean; message?: string }>;
+
+    /**
+     * 회의 논점 조회
+     * @param refresh true면 캐시 무시하고 새로 추출
+     */
+    getIssues(roomId: string, refresh?: boolean): Promise<{ success: boolean; data?: any; message?: string }>;
 
     // ============================================================
     // 시연용 목업 데이터 메서드
