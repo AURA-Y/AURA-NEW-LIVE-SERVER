@@ -2896,7 +2896,7 @@ ${edgesDesc}
                 context.lastInteractionTime = Date.now();
 
                 // ★ AI 상태: listening (시리 UI용)
-                this.broadcastAiState(roomId, 'listening', { transcript: processedText }).catch(() => {});
+                this.broadcastAiState(roomId, 'listening', { transcript: processedText }).catch(() => { });
 
                 // ============================================
                 // 7.5 Agent 모드 판단 (패턴 매칭 실패 시 LLM 라우팅)
@@ -2932,7 +2932,7 @@ ${edgesDesc}
                 this.logger.log(`[검색 준비] keyword="${finalSearchKeyword}", cat=${finalCategory}`);
 
                 // ★ AI 상태: processing (시리 UI용)
-                this.broadcastAiState(roomId, 'processing', { transcript: processedText }).catch(() => {});
+                this.broadcastAiState(roomId, 'processing', { transcript: processedText }).catch(() => { });
 
                 // ============================================
                 // 9. LLM 호출 (생각중 응답 포함)
@@ -4471,7 +4471,6 @@ ${transcripts}
         return Array.from(this.activeRooms.keys());
     }
 
-<<<<<<< HEAD
     // ============================================================
     // 호스트 전용 코칭 모드 메서드
     // ============================================================
@@ -4532,7 +4531,9 @@ ${transcripts}
         } catch (error) {
             this.logger.error(`[호스트 쿼리] 에러: ${error.message}`);
             await this.sendTextCardToHost(context, '죄송해요, 잠시 문제가 생겼어요.');
-=======
+        }
+    }
+
     // ==========================================
     // ★ 연속 화면 이해 모드 관련 메서드
     // ==========================================
@@ -4774,12 +4775,10 @@ ${transcripts}
             }
         } catch (error) {
             this.logger.error(`[Proactive] 분석 오류: ${error.message}`);
->>>>>>> ai_test_live
         }
     }
 
     /**
-<<<<<<< HEAD
      * Silent Participant 주기적 체크 시작
      */
     private startSilentParticipantChecker(roomId: string): void {
@@ -5164,9 +5163,11 @@ ${reportContent.substring(0, 1000)}
         );
 
         this.logger.debug(`[AI 상태] ${state}`);
-=======
-     * Proactive 인사이트를 DataChannel로 전송
-     */
+    }
+
+    /*    
+ * Proactive 인사이트를 DataChannel로 전송
+ */
     private sendProactiveInsights(context: RoomContext, insights: ProactiveInsight[]): void {
         const message: ProactiveInsightMessage = {
             type: 'PROACTIVE_INSIGHT',
@@ -5189,6 +5190,5 @@ ${reportContent.substring(0, 1000)}
         } catch (error) {
             this.logger.error(`[Proactive] DataChannel 전송 실패: ${error.message}`);
         }
->>>>>>> ai_test_live
     }
 }
