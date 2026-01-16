@@ -613,14 +613,29 @@ export class RagClientService implements OnModuleDestroy {
         const endpoint = `${ragBaseUrl}/meetings/${roomId}/issues${refresh ? '?refresh=true' : ''}`;
 
         this.logger.log(`[RAG 논점 조회] GET ${endpoint}`);
+        this.logger.log(`[RAG 논점 조회] RAG_API_URL 환경변수: ${this.configService.get<string>('RAG_API_URL') || '(default)'}`);
 
         try {
             const axios = await import('axios');
-            const response = await axios.default.get(endpoint);
-            this.logger.log(`[RAG 논점 조회 성공] ${roomId} - from_cache: ${response.data?.from_cache}`);
+            const startTime = Date.now();
+            const response = await axios.default.get(endpoint, { timeout: 30000 });
+            const latency = Date.now() - startTime;
+
+            this.logger.log(`[RAG 논점 조회 성공] ${roomId} - latency: ${latency}ms, from_cache: ${response.data?.from_cache}, status: ${response.data?.status}`);
+            this.logger.log(`[RAG 논점 조회 데이터] issues 수: ${response.data?.issues?.issues?.length || 0}`);
+
             return { success: true, data: response.data };
         } catch (error: any) {
-            this.logger.error(`[RAG 논점 조회 실패] ${roomId}: ${error.message}`);
+            this.logger.error(`[RAG 논점 조회 실패] ${roomId}`);
+            this.logger.error(`  - 에러 메시지: ${error.message}`);
+            this.logger.error(`  - 상태 코드: ${error.response?.status || 'N/A'}`);
+            this.logger.error(`  - 응답 데이터: ${JSON.stringify(error.response?.data || {}).substring(0, 200)}`);
+
+            // 네트워크 에러 상세 로깅
+            if (error.code) {
+                this.logger.error(`  - 에러 코드: ${error.code}`);
+            }
+
             return { success: false, message: error.message };
         }
     }

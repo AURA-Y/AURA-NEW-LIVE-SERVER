@@ -2553,7 +2553,7 @@ ${edgesDesc}
             // ================================================
             // 3.5. Vision Intent 처리 (화면 공유 분석)
             // ================================================
-            this.logger.debug(`[Vision 체크] isCallIntent=${intentAnalysis.isCallIntent}, isVisionIntent=${intentAnalysis.isVisionIntent}, hasScreenShare=${context.hasActiveScreenShare}, isVisionMode=${context.isVisionMode}`);
+            this.logger.log(`[Vision 체크] isCallIntent=${intentAnalysis.isCallIntent}, isVisionIntent=${intentAnalysis.isVisionIntent}, hasScreenShare=${context.hasActiveScreenShare}, isVisionMode=${context.isVisionMode}, hostOnlyMode=${context.hostOnlyMode}`);
 
             if (intentAnalysis.isCallIntent && intentAnalysis.isVisionIntent && context.hasActiveScreenShare) {
                 this.logger.log(`[Vision Intent 감지] 화면 분석 모드로 전환`);
