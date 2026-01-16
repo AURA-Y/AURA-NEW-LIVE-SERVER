@@ -4174,12 +4174,12 @@ ${firstCode.substring(0, 500)}
             clearInterval(context.timelineInterval);
         }
 
-        // 5초마다 키워드 추출 및 전송
+        // 3초마다 키워드 추출 및 전송
         context.timelineInterval = setInterval(async () => {
             await this.flushTimelineKeywords(roomId);
-        }, 5000);
+        }, 3000);
 
-        this.logger.log(`[Timeline] 5초 인터벌 시작 - roomId: ${roomId}`);
+        this.logger.log(`[Timeline] 3초 인터벌 시작 - roomId: ${roomId}`);
     }
 
     /**
