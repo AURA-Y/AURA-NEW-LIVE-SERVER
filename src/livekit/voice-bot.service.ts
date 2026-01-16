@@ -129,7 +129,7 @@ interface RoomContext {
     perplexityModeActive: boolean;
     // 호스트 전용 코칭 모드 (TTS 비활성화, Wake word 비활성화)
     hostOnlyMode: boolean;
-    hostIdentity: string | null;
+    hostIdentities: Set<string>;  // 다중 호스트 지원
     // Wake word 활성화 여부 (호스트가 토글 가능)
     wakeWordEnabled: boolean;
     // isPublishing 시작 시간 (타임아웃 감지용)
@@ -337,7 +337,7 @@ export class VoiceBotService {
                 }
 
                 // RAG 서버에 참여자 입장 전송 (호스트 모드일 때, 호스트 아닌 경우)
-                if (context?.hostOnlyMode && participant.identity !== context.hostIdentity) {
+                if (context?.hostOnlyMode && !context.hostIdentities.has(participant.identity)) {
                     this.ragClient.participantJoined(roomId, {
                         id: participant.identity,
                         name: participant.name || participant.identity,
@@ -481,16 +481,19 @@ export class VoiceBotService {
                 // 호스트 전용 코칭 모드 활성화
                 if (message.type === 'HOST_MODE_ENABLE') {
                     context.hostOnlyMode = message.enabled === true;
-                    context.hostIdentity = message.hostIdentity || participant?.identity || null;
-                    this.logger.log(`[호스트 모드] ${context.hostOnlyMode ? 'ON' : 'OFF'} - host: ${context.hostIdentity}`);
+                    const hostId = message.hostIdentity || participant?.identity || null;
+                    if (hostId) {
+                        context.hostIdentities.add(hostId);
+                    }
+                    this.logger.log(`[호스트 모드] ${context.hostOnlyMode ? 'ON' : 'OFF'} - hosts: ${Array.from(context.hostIdentities).join(', ')}`);
 
                     // RAG 서버에 모든 참여자 정보 전송 (호스트 모드 활성화 시)
-                    if (context.hostOnlyMode && context.hostIdentity) {
+                    if (context.hostOnlyMode && hostId) {
                         // 호스트 전송
-                        const hostParticipant = context.room.remoteParticipants.get(context.hostIdentity);
+                        const hostParticipant = context.room.remoteParticipants.get(hostId);
                         this.ragClient.participantJoined(roomId, {
-                            id: context.hostIdentity,
-                            name: hostParticipant?.name || context.hostIdentity,
+                            id: hostId,
+                            name: hostParticipant?.name || hostId,
                             role: 'host',
                         }).catch(err => {
                             this.logger.warn(`[RAG 호스트 입장] 전송 실패: ${err.message}`);
@@ -498,7 +501,7 @@ export class VoiceBotService {
 
                         // 기존 참여자들도 전송 (호스트 제외)
                         for (const [identity, remoteParticipant] of context.room.remoteParticipants) {
-                            if (identity !== context.hostIdentity && !identity.startsWith('ai-bot')) {
+                            if (!context.hostIdentities.has(identity) && !identity.startsWith('ai-bot')) {
                                 this.ragClient.participantJoined(roomId, {
                                     id: identity,
                                     name: remoteParticipant.name || identity,
@@ -512,10 +515,46 @@ export class VoiceBotService {
                     return;
                 }
 
+                // 호스트 추가 (다중 호스트 지원)
+                if (message.type === 'HOST_ADD' && message.host) {
+                    const hostId = message.host.identity;
+                    context.hostIdentities.add(hostId);
+                    this.logger.log(`[호스트 추가] ${hostId} - 현재 호스트: ${Array.from(context.hostIdentities).join(', ')}`);
+
+                    // RAG 서버에 역할 변경 전송
+                    const hostParticipant = context.room.remoteParticipants.get(hostId);
+                    this.ragClient.participantJoined(roomId, {
+                        id: hostId,
+                        name: hostParticipant?.name || message.host.name || hostId,
+                        role: 'host',
+                    }).catch(err => {
+                        this.logger.warn(`[RAG 호스트 역할 변경] 전송 실패: ${err.message}`);
+                    });
+                    return;
+                }
+
+                // 호스트 제거 (다중 호스트 지원)
+                if (message.type === 'HOST_REMOVE' && message.identity) {
+                    const hostId = message.identity;
+                    context.hostIdentities.delete(hostId);
+                    this.logger.log(`[호스트 제거] ${hostId} - 현재 호스트: ${Array.from(context.hostIdentities).join(', ')}`);
+
+                    // RAG 서버에 역할 변경 전송
+                    const removedParticipant = context.room.remoteParticipants.get(hostId);
+                    this.ragClient.participantJoined(roomId, {
+                        id: hostId,
+                        name: removedParticipant?.name || hostId,
+                        role: 'participant',
+                    }).catch(err => {
+                        this.logger.warn(`[RAG 참여자 역할 변경] 전송 실패: ${err.message}`);
+                    });
+                    return;
+                }
+
                 // Wake word 모드 토글 (호스트 전용)
                 if (message.type === 'WAKE_WORD_TOGGLE') {
                     // 호스트만 토글 가능
-                    if (participant?.identity === context.hostIdentity) {
+                    if (participant?.identity && context.hostIdentities.has(participant.identity)) {
                         context.wakeWordEnabled = message.enabled === true;
                         this.logger.log(`[Wake Word] ${context.wakeWordEnabled ? 'ON' : 'OFF'} by host`);
                     }
@@ -524,7 +563,7 @@ export class VoiceBotService {
 
                 // 호스트 전용 AI 쿼리 (Wake word 대체)
                 if (message.type === 'HOST_AI_QUERY') {
-                    if (context.hostOnlyMode && participant?.identity === context.hostIdentity) {
+                    if (context.hostOnlyMode && participant?.identity && context.hostIdentities.has(participant.identity)) {
                         this.logger.log(`[호스트 AI 쿼리] ${message.query}`);
                         // 호스트가 직접 AI 질문 - 처리 로직 호출 (비동기)
                         this.processHostQuery(roomId, message.query, participant.identity).catch(err => {
@@ -824,7 +863,7 @@ export class VoiceBotService {
                 perplexityModeActive: false,
                 // 호스트 전용 코칭 모드 초기화 (기본 활성화)
                 hostOnlyMode: true,
-                hostIdentity: null,
+                hostIdentities: new Set(),  // 다중 호스트 지원
                 wakeWordEnabled: false,
                 // isPublishing 타임아웃 감지용
                 publishingStartTime: 0,
@@ -3037,13 +3076,13 @@ ${edgesDesc}
 
                     const encoder = new TextEncoder();
 
-                    if (context.hostOnlyMode && context.hostIdentity) {
-                        // 호스트에게만 전송
+                    if (context.hostOnlyMode && context.hostIdentities.size > 0) {
+                        // 호스트들에게만 전송
                         await context.room.localParticipant.publishData(
                             encoder.encode(JSON.stringify(searchMessage)),
-                            { reliable: true, destination_identities: [context.hostIdentity] }
+                            { reliable: true, destination_identities: Array.from(context.hostIdentities) }
                         );
-                        this.logger.log(`[DataChannel] 검색 결과 호스트에게 전송 (${llmResult.searchResults.length}개)`);
+                        this.logger.log(`[DataChannel] 검색 결과 호스트들에게 전송 (${llmResult.searchResults.length}개)`);
                     } else {
                         // 모든 참여자에게 전송
                         await context.room.localParticipant.publishData(
@@ -3194,7 +3233,7 @@ ${edgesDesc}
         }
 
         // 호스트 전용 모드면 TTS 대신 텍스트 카드 전송
-        if (context.hostOnlyMode && context.hostIdentity) {
+        if (context.hostOnlyMode && context.hostIdentities.size > 0) {
             // 검색 결과와 함께 이미 전송된 경우 텍스트 카드 스킵
             if (options?.skipTextCard) {
                 this.logger.log(`[텍스트 카드 스킵] 검색 결과에 이미 포함됨`);
@@ -4557,10 +4596,10 @@ ${transcripts}
     // ============================================================
 
     /**
-     * 호스트에게만 텍스트 카드 전송 (TTS 대체)
+     * 호스트들에게만 텍스트 카드 전송 (TTS 대체)
      */
     private async sendTextCardToHost(context: RoomContext, message: string): Promise<void> {
-        if (!context.hostIdentity) return;
+        if (context.hostIdentities.size === 0) return;
 
         const textCardMessage = {
             type: 'AI_TEXT_RESPONSE',
@@ -4570,16 +4609,16 @@ ${transcripts}
 
         const encoder = new TextEncoder();
 
-        // 호스트에게만 전송
+        // 호스트들에게만 전송
         await context.room.localParticipant.publishData(
             encoder.encode(JSON.stringify(textCardMessage)),
             {
                 reliable: true,
-                destination_identities: [context.hostIdentity]
+                destination_identities: Array.from(context.hostIdentities)
             }
         );
 
-        this.logger.log(`[텍스트 카드] 호스트에게 전송 완료`);
+        this.logger.log(`[텍스트 카드] 호스트들에게 전송 완료 (${context.hostIdentities.size}명)`);
     }
 
     /**
@@ -4881,7 +4920,7 @@ ${transcripts}
             }
 
             // 호스트 전용 모드가 아니면 스킵
-            if (!context.hostOnlyMode || !context.hostIdentity) {
+            if (!context.hostOnlyMode || context.hostIdentities.size === 0) {
                 return;
             }
 
@@ -4892,7 +4931,7 @@ ${transcripts}
                 const identity = participant.identity;
 
                 // AI 봇이나 호스트는 제외
-                if (identity.startsWith('ai-bot') || identity === context.hostIdentity) {
+                if (identity.startsWith('ai-bot') || context.hostIdentities.has(identity)) {
                     continue;
                 }
 
@@ -4941,7 +4980,7 @@ ${transcripts}
         silentDurationMs: number
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
-        if (!context || !context.hostOnlyMode || !context.hostIdentity) return;
+        if (!context || !context.hostOnlyMode || context.hostIdentities.size === 0) return;
 
         const alertMessage = {
             type: 'SILENT_PARTICIPANT_ALERT',
@@ -4958,11 +4997,11 @@ ${transcripts}
             encoder.encode(JSON.stringify(alertMessage)),
             {
                 reliable: true,
-                destination_identities: [context.hostIdentity]
+                destination_identities: Array.from(context.hostIdentities)
             }
         );
 
-        this.logger.log(`[Silent 알림] ${participantName} (${Math.floor(silentDurationMs / 60000)}분) → 호스트에게 전송`);
+        this.logger.log(`[Silent 알림] ${participantName} (${Math.floor(silentDurationMs / 60000)}분) → 호스트들에게 전송`);
     }
 
     /**
@@ -5009,7 +5048,7 @@ ${transcripts}
             }
 
             // 호스트 전용 모드가 아니면 스킵
-            if (!context.hostOnlyMode || !context.hostIdentity) {
+            if (!context.hostOnlyMode || context.hostIdentities.size === 0) {
                 return;
             }
 
@@ -5047,7 +5086,7 @@ ${transcripts}
             // 발언 시간 순으로 정렬
             statsArray.sort((a, b) => b.speakingDurationMs - a.speakingDurationMs);
 
-            // 호스트에게 통계 전송
+            // 호스트들에게 통계 전송
             const statsMessage = {
                 type: 'PARTICIPANT_STATS',
                 stats: statsArray,
@@ -5062,7 +5101,7 @@ ${transcripts}
                     encoder.encode(JSON.stringify(statsMessage)),
                     {
                         reliable: true,
-                        destination_identities: [context.hostIdentity]
+                        destination_identities: Array.from(context.hostIdentities)
                     }
                 );
 
@@ -5083,12 +5122,12 @@ ${transcripts}
                             encoder.encode(JSON.stringify(dominantAlert)),
                             {
                                 reliable: true,
-                                destination_identities: [context.hostIdentity]
+                                destination_identities: Array.from(context.hostIdentities)
                             }
                         );
 
                         context.dominantAlertSent = true;
-                        this.logger.log(`[Dominant 알림] ${topSpeaker.participantName} (${Math.round(topSpeaker.speakingRatio * 100)}%) → 호스트에게 전송`);
+                        this.logger.log(`[Dominant 알림] ${topSpeaker.participantName} (${Math.round(topSpeaker.speakingRatio * 100)}%) → 호스트들에게 전송`);
                     }
                 }
 
@@ -5129,7 +5168,7 @@ ${transcripts}
             }
 
             // 호스트 전용 모드가 아니면 스킵
-            if (!context.hostOnlyMode || !context.hostIdentity) {
+            if (!context.hostOnlyMode || context.hostIdentities.size === 0) {
                 return;
             }
 
@@ -5193,7 +5232,7 @@ ${reportContent.substring(0, 1000)}
         summary: string
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
-        if (!context || !context.hostOnlyMode || !context.hostIdentity) return;
+        if (!context || !context.hostOnlyMode || context.hostIdentities.size === 0) return;
 
         const topicMessage = {
             type: 'TOPIC_SUMMARY',
@@ -5208,11 +5247,11 @@ ${reportContent.substring(0, 1000)}
             encoder.encode(JSON.stringify(topicMessage)),
             {
                 reliable: true,
-                destination_identities: [context.hostIdentity]
+                destination_identities: Array.from(context.hostIdentities)
             }
         );
 
-        this.logger.log(`[논점 요약] "${topic}" → 호스트에게 전송`);
+        this.logger.log(`[논점 요약] "${topic}" → 호스트들에게 전송`);
     }
 
     /**
