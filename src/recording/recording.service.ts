@@ -278,17 +278,41 @@ export class RecordingService {
     roomId: string,
     file: Express.Multer.File,
   ): Promise<{ fileUrl: string; fileName: string; fileSize: number }> {
-    this.logger.log(`[녹화 업로드] roomId: ${roomId}, fileName: ${file.originalname}, size: ${file.size}`);
+    this.logger.log(`\n========== [S3 업로드 서비스] ==========`);
+    this.logger.log(`[1] 입력 데이터:`);
+    this.logger.log(`  - roomId: ${roomId}`);
+    this.logger.log(`  - fileName: ${file?.originalname}`);
+    this.logger.log(`  - size: ${file?.size} bytes`);
+    this.logger.log(`  - mimetype: ${file?.mimetype}`);
+    this.logger.log(`  - bufferLength: ${file?.buffer?.length || 0} bytes`);
+
+    // S3 설정 확인 (디버깅용)
+    this.logger.log(`[2] S3 설정 확인:`);
+    this.logger.log(`  - bucket: ${this.s3Bucket || 'NOT SET'}`);
+    this.logger.log(`  - region: ${this.s3Region || 'NOT SET'}`);
+    this.logger.log(`  - accessKey: ${this.s3AccessKey ? `${this.s3AccessKey.substring(0, 4)}***` : 'NOT SET'}`);
+    this.logger.log(`  - secretKey: ${this.s3SecretKey ? '***SET***' : 'NOT SET'}`);
 
     if (!this.s3Bucket || !this.s3AccessKey || !this.s3SecretKey) {
-      throw new Error('S3 credentials not configured');
+      this.logger.error(`[ERROR] S3 credentials not configured`);
+      this.logger.error(`  환경변수 확인 필요:`);
+      this.logger.error(`  - AURA_S3_BUCKET: ${process.env.AURA_S3_BUCKET || 'NOT SET'}`);
+      this.logger.error(`  - AWS_ACCESS_KEY_ID_S3: ${process.env.AWS_ACCESS_KEY_ID_S3 ? 'SET' : 'NOT SET'}`);
+      this.logger.error(`  - AWS_ACCESS_KEY_ID: ${process.env.AWS_ACCESS_KEY_ID ? 'SET' : 'NOT SET'}`);
+      this.logger.error(`  - AWS_SECRET_ACCESS_KEY_S3: ${process.env.AWS_SECRET_ACCESS_KEY_S3 ? 'SET' : 'NOT SET'}`);
+      this.logger.error(`  - AWS_SECRET_ACCESS_KEY: ${process.env.AWS_SECRET_ACCESS_KEY ? 'SET' : 'NOT SET'}`);
+      throw new Error('S3 credentials not configured. Check AURA_S3_BUCKET, AWS_ACCESS_KEY_ID_S3/AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY_S3/AWS_SECRET_ACCESS_KEY environment variables.');
     }
 
-    try {
-      const timestamp = Date.now();
-      const fileName = `recording-${timestamp}.webm`;
-      const s3Key = `${this.s3Prefix}${roomId}/recordings/${fileName}`;
+    const timestamp = Date.now();
+    const fileName = `recording-${timestamp}.webm`;
+    const s3Key = `${this.s3Prefix}${roomId}/recordings/${fileName}`;
 
+    this.logger.log(`[3] S3 업로드 준비:`);
+    this.logger.log(`  - s3Key: ${s3Key}`);
+    this.logger.log(`  - bucket: ${this.s3Bucket}`);
+
+    try {
       const s3Client = new S3Client({
         region: this.s3Region,
         credentials: {
@@ -296,6 +320,8 @@ export class RecordingService {
           secretAccessKey: this.s3SecretKey,
         },
       });
+
+      this.logger.log(`[4] S3Client 생성 완료, PutObjectCommand 실행 중...`);
 
       await s3Client.send(
         new PutObjectCommand({
@@ -308,7 +334,9 @@ export class RecordingService {
 
       const fileUrl = `https://${this.s3Bucket}.s3.${this.s3Region}.amazonaws.com/${s3Key}`;
 
-      this.logger.log(`[녹화 업로드 완료] ${fileUrl}`);
+      this.logger.log(`[5] S3 업로드 완료!`);
+      this.logger.log(`  - fileUrl: ${fileUrl}`);
+      this.logger.log(`========== [S3 업로드 성공] ==========\n`);
 
       return {
         fileUrl,
@@ -316,7 +344,15 @@ export class RecordingService {
         fileSize: file.size,
       };
     } catch (error) {
-      this.logger.error(`[녹화 업로드 실패] ${error.message}`);
+      this.logger.error(`\n[ERROR] S3 업로드 실패`);
+      this.logger.error(`  - Error name: ${error.name}`);
+      this.logger.error(`  - Error message: ${error.message}`);
+      this.logger.error(`  - Error code: ${error.Code || error.code || 'N/A'}`);
+      this.logger.error(`  - HTTP status: ${error.$metadata?.httpStatusCode || 'N/A'}`);
+      if (error.stack) {
+        this.logger.error(`  - Stack: ${error.stack}`);
+      }
+      this.logger.error(`========== [S3 업로드 실패] ==========\n`);
       throw new Error(`S3 upload failed: ${error.message}`);
     }
   }

@@ -11,6 +11,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { UploadService } from './upload.service';
 
 @Controller('upload')
@@ -24,6 +25,7 @@ export class UploadController {
   @Post(':roomId/chat')
   @UseInterceptors(
     FileInterceptor('file', {
+      storage: memoryStorage(),
       limits: {
         fileSize: 50 * 1024 * 1024, // 50MB 제한
       },
