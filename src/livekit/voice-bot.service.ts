@@ -484,8 +484,9 @@ export class VoiceBotService {
                     context.hostIdentity = message.hostIdentity || participant?.identity || null;
                     this.logger.log(`[호스트 모드] ${context.hostOnlyMode ? 'ON' : 'OFF'} - host: ${context.hostIdentity}`);
 
-                    // RAG 서버에 호스트 입장 전송
+                    // RAG 서버에 모든 참여자 정보 전송 (호스트 모드 활성화 시)
                     if (context.hostOnlyMode && context.hostIdentity) {
+                        // 호스트 전송
                         const hostParticipant = context.room.remoteParticipants.get(context.hostIdentity);
                         this.ragClient.participantJoined(roomId, {
                             id: context.hostIdentity,
@@ -494,6 +495,19 @@ export class VoiceBotService {
                         }).catch(err => {
                             this.logger.warn(`[RAG 호스트 입장] 전송 실패: ${err.message}`);
                         });
+
+                        // 기존 참여자들도 전송 (호스트 제외)
+                        for (const [identity, remoteParticipant] of context.room.remoteParticipants) {
+                            if (identity !== context.hostIdentity && !identity.startsWith('ai-bot')) {
+                                this.ragClient.participantJoined(roomId, {
+                                    id: identity,
+                                    name: remoteParticipant.name || identity,
+                                    role: 'participant',
+                                }).catch(err => {
+                                    this.logger.warn(`[RAG 참여자 입장] 전송 실패: ${err.message}`);
+                                });
+                            }
+                        }
                     }
                     return;
                 }
