@@ -32,26 +32,24 @@ import type { LivekitService } from './livekit.service';
 enum BotState {
     SLEEP = 'SLEEP',
     ARMED = 'ARMED',
-    SPEAKING = 'SPEAKING'
+    SPEAKING = 'SPEAKING',
 }
-
-
 
 // 대화 히스토리 타입
 interface ConversationTurn {
     role: 'user' | 'assistant';
     content: string;
     timestamp: number;
-    speaker?: string;  // 발화자 ID (user인 경우)
+    speaker?: string; // 발화자 ID (user인 경우)
 }
 
 // 참여자 발언 통계 타입
 interface ParticipantSpeakingStats {
     participantId: string;
     participantName: string;
-    speakingDurationMs: number;  // 총 발언 시간 (밀리초)
-    speakingCount: number;       // 발언 횟수
-    lastSpokenAt: number;        // 마지막 발언 시간
+    speakingDurationMs: number; // 총 발언 시간 (밀리초)
+    speakingCount: number; // 발언 횟수
+    lastSpokenAt: number; // 마지막 발언 시간
 }
 
 interface RoomContext {
@@ -63,15 +61,16 @@ interface RoomContext {
     currentRequestId: number;
     botState: BotState;
     lastInteractionTime: number;
-    lastSttTimeByUser: Map<string, number>;  // 사용자별 STT 쿨다운
+    lastSttTimeByUser: Map<string, number>; // 사용자별 STT 쿨다운
     lastResponseTime: number;
     lastSpeechTime: number;
     speakingStartTime: number;
     activeUserId: string | null;
     // Vision (화면 공유 분석) 관련
-    hasActiveScreenShare: boolean;           // 화면 공유 활성 여부
-    isVisionMode: boolean;                   // Vision 모드 활성 여부
-    pendingVisionRequest?: {                 // 대기 중인 Vision 요청
+    hasActiveScreenShare: boolean; // 화면 공유 활성 여부
+    isVisionMode: boolean; // Vision 모드 활성 여부
+    pendingVisionRequest?: {
+        // 대기 중인 Vision 요청
         requestId: number;
         userQuestion: string;
         userId: string;
@@ -81,10 +80,10 @@ interface RoomContext {
     lastIdeaModeChange: number;
     shutdownTimeout?: NodeJS.Timeout;
     // ★ 대화 메모리 및 팔로업 윈도우
-    conversationHistory: ConversationTurn[];  // 최근 대화 히스토리
-    isInFollowUpWindow: boolean;              // 팔로업 윈도우 활성 여부
-    followUpExpiresAt: number;                // 팔로업 윈도우 만료 시간
-    lastBotQuestion: string | null;           // 마지막 봇 질문 (컨텍스트용)
+    conversationHistory: ConversationTurn[]; // 최근 대화 히스토리
+    isInFollowUpWindow: boolean; // 팔로업 윈도우 활성 여부
+    followUpExpiresAt: number; // 팔로업 윈도우 만료 시간
+    lastBotQuestion: string | null; // 마지막 봇 질문 (컨텍스트용)
     // Event Storm 모드
     eventStormModeActive: boolean;
     eventStormInitiator: string | null;
@@ -99,7 +98,13 @@ interface RoomContext {
     flowchartOpenTime: number;
     // Flowchart 컨텍스트 (현재 화면 상태)
     flowchartContext?: {
-        nodes: Array<{ id: string; content: string; nodeType: string; depth: number; branch: number }>;
+        nodes: Array<{
+            id: string;
+            content: string;
+            nodeType: string;
+            depth: number;
+            branch: number;
+        }>;
         edges: Array<{ from: string; to: string; label?: string }>;
         summary: string;
     };
@@ -129,7 +134,7 @@ interface RoomContext {
     perplexityModeActive: boolean;
     // 호스트 전용 코칭 모드 (TTS 비활성화, Wake word 비활성화)
     hostOnlyMode: boolean;
-    hostIdentities: Set<string>;  // 다중 호스트 지원
+    hostIdentities: Set<string>; // 다중 호스트 지원
     // Wake word 활성화 여부 (호스트가 토글 가능)
     wakeWordEnabled: boolean;
     // isPublishing 시작 시간 (타임아웃 감지용)
@@ -145,7 +150,11 @@ interface RoomContext {
     // 타임라인 키워드 기능 (30초 단위)
     timelineStartTime: number;
     // 현재 분의 발화 수집 (5초마다 LLM으로 키워드 추출)
-    pendingTranscripts: Array<{ speaker: string; text: string; timestamp: number }>;
+    pendingTranscripts: Array<{
+        speaker: string;
+        text: string;
+        timestamp: number;
+    }>;
     timelineInterval?: NodeJS.Timeout;
     lastTimelineMinuteIndex: number;
 
@@ -159,7 +168,7 @@ interface RoomContext {
         enabled: boolean;
         lastAnalysisTime: number;
         lastScreenTextHash: string;
-        lastConversationHash: string;  // 대화 해시 추가
+        lastConversationHash: string; // 대화 해시 추가
         analysisTimer?: NodeJS.Timeout;
     };
 
@@ -185,8 +194,8 @@ export class VoiceBotService {
     private readonly ARMED_TIMEOUT_MS = 30000;
 
     // ★ 대화 메모리 및 팔로업 관련 상수
-    private readonly FOLLOW_UP_WINDOW_MS = 15000;     // 질문 후 15초간 웨이크워드 없이 응답 가능
-    private readonly MAX_CONVERSATION_TURNS = 30;     // 최근 30턴까지 기억
+    private readonly FOLLOW_UP_WINDOW_MS = 15000; // 질문 후 15초간 웨이크워드 없이 응답 가능
+    private readonly MAX_CONVERSATION_TURNS = 30; // 최근 30턴까지 기억
     private readonly CONVERSATION_EXPIRE_MS = 300000; // 5분 지나면 대화 리셋
 
     constructor(
@@ -238,17 +247,17 @@ export class VoiceBotService {
 
             try {
                 const encoder = new TextEncoder();
-                await context.room.localParticipant.publishData(
-                    encoder.encode(JSON.stringify(timerMessage)),
-                    { reliable: true }
-                );
+                await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(timerMessage)), {
+                    reliable: true,
+                });
                 this.logger.log(`[DataChannel] 타이머 알림 전송: ${event}`);
 
                 // TTS로 알림 (AI 음소거가 아닌 경우)
                 if (!context.aiMuted) {
-                    const message = event === 'warning'
-                        ? `회의 종료 ${data.warningMinutes}분 전입니다.`
-                        : '회의 시간이 종료되었습니다.';
+                    const message =
+                        event === 'warning'
+                            ? `회의 종료 ${data.warningMinutes}분 전입니다.`
+                            : '회의 시간이 종료되었습니다.';
 
                     const requestId = ++context.currentRequestId;
                     context.botState = BotState.SPEAKING;
@@ -274,42 +283,56 @@ export class VoiceBotService {
         this.logger.log(`\n========== [AI 봇 시작] ==========`);
         this.logger.log(`방: ${roomId}, URL: ${livekitUrl}`);
 
-        room.on(RoomEvent.TrackSubscribed, async (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            // 마이크 오디오만 STT 처리 (화면 공유 오디오는 제외)
-            const isScreenShareAudio = publication.source === TrackSource.SOURCE_SCREENSHARE_AUDIO;
-            if (track.kind === TrackKind.KIND_AUDIO && !participant.identity.startsWith('ai-bot') && !isScreenShareAudio) {
-                this.logger.log(`[오디오 트랙 구독] ${participant.identity} (source: ${publication.source})`);
-                await this.handleAudioTrack(roomId, track, participant.identity);
-            }
-            // 화면 공유 트랙 감지
-            if (publication.source === TrackSource.SOURCE_SCREENSHARE) {
-                this.logger.log(`[화면 공유 시작] ${participant.identity}`);
-                const context = this.activeRooms.get(roomId);
-                if (context) {
-                    context.hasActiveScreenShare = true;
+        room.on(
+            RoomEvent.TrackSubscribed,
+            async (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
+                // 마이크 오디오만 STT 처리 (화면 공유 오디오는 제외)
+                const isScreenShareAudio = publication.source === TrackSource.SOURCE_SCREENSHARE_AUDIO;
+                if (
+                    track.kind === TrackKind.KIND_AUDIO &&
+                    !participant.identity.startsWith('ai-bot') &&
+                    !isScreenShareAudio
+                ) {
+                    this.logger.log(`[오디오 트랙 구독] ${participant.identity} (source: ${publication.source})`);
+                    await this.handleAudioTrack(roomId, track, participant.identity);
                 }
-            }
-        });
+                // 화면 공유 트랙 감지
+                if (publication.source === TrackSource.SOURCE_SCREENSHARE) {
+                    this.logger.log(`[화면 공유 시작] ${participant.identity}`);
+                    const context = this.activeRooms.get(roomId);
+                    if (context) {
+                        context.hasActiveScreenShare = true;
+                    }
+                }
+            },
+        );
 
         // 화면 공유 종료 감지
-        room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
-            if (publication.source === TrackSource.SOURCE_SCREENSHARE) {
-                this.logger.log(`[화면 공유 종료] ${participant.identity}`);
-                const context = this.activeRooms.get(roomId);
-                if (context) {
-                    context.hasActiveScreenShare = false;
-                    context.isVisionMode = false;
+        room.on(
+            RoomEvent.TrackUnsubscribed,
+            (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
+                if (publication.source === TrackSource.SOURCE_SCREENSHARE) {
+                    this.logger.log(`[화면 공유 종료] ${participant.identity}`);
+                    const context = this.activeRooms.get(roomId);
+                    if (context) {
+                        context.hasActiveScreenShare = false;
+                        context.isVisionMode = false;
+                    }
                 }
-            }
-        });
+            },
+        );
 
         // DataChannel 메시지 수신 (Vision 캡처 응답, 타이머 명령 등)
         room.on(RoomEvent.DataReceived, async (payload: Uint8Array, participant?: RemoteParticipant) => {
             try {
                 const message = JSON.parse(new TextDecoder().decode(payload));
-                this.logger.debug(`[DataChannel] 메시지 수신 from ${participant?.identity || 'unknown'}: type=${message.type}`);
+                this.logger.debug(
+                    `[DataChannel] 메시지 수신 from ${participant?.identity || 'unknown'}: type=${message.type}`,
+                );
                 if (message.type === 'vision_capture_response') {
-                    this.logger.log(`[Vision] 캡처 응답 수신 - requestId: ${message.requestId}, 이미지 크기: ${(message.imageBase64?.length / 1024).toFixed(1)}KB`);
+                    this.logger.log(
+                        `[Vision] 캡처 응답 수신 - requestId: ${message.requestId}, 이미지 크기: ${(message.imageBase64?.length / 1024).toFixed(1)}KB`,
+                    );
                     await this.handleVisionCaptureResponse(roomId, message);
                 }
 
@@ -338,13 +361,15 @@ export class VoiceBotService {
 
                 // RAG 서버에 참여자 입장 전송 (호스트 모드일 때, 호스트 아닌 경우)
                 if (context?.hostOnlyMode && !context.hostIdentities.has(participant.identity)) {
-                    this.ragClient.participantJoined(roomId, {
-                        id: participant.identity,
-                        name: participant.name || participant.identity,
-                        role: 'participant',
-                    }).catch(err => {
-                        this.logger.warn(`[RAG 참여자 입장] 전송 실패: ${err.message}`);
-                    });
+                    this.ragClient
+                        .participantJoined(roomId, {
+                            id: participant.identity,
+                            name: participant.name || participant.identity,
+                            role: 'participant',
+                        })
+                        .catch(err => {
+                            this.logger.warn(`[RAG 참여자 입장] 전송 실패: ${err.message}`);
+                        });
                 }
 
                 // 새 참여자에게 현재 타이머 상태 전송
@@ -363,10 +388,9 @@ export class VoiceBotService {
                             },
                         };
                         const encoder = new TextEncoder();
-                        await context.room.localParticipant.publishData(
-                            encoder.encode(JSON.stringify(timerMessage)),
-                            { reliable: true }
-                        );
+                        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(timerMessage)), {
+                            reliable: true,
+                        });
                         this.logger.log(`[타이머 동기화] 새 참여자 ${participant.identity}에게 타이머 상태 전송`);
                     }
                 } catch (error) {
@@ -388,8 +412,9 @@ export class VoiceBotService {
                 }
             }
 
-            const humanCount = Array.from(room.remoteParticipants.values())
-                .filter(p => !p.identity.startsWith('ai-bot')).length;
+            const humanCount = Array.from(room.remoteParticipants.values()).filter(
+                p => !p.identity.startsWith('ai-bot'),
+            ).length;
 
             if (humanCount === 0) {
                 const context = this.activeRooms.get(roomId);
@@ -403,8 +428,9 @@ export class VoiceBotService {
                         // 타임아웃 실행 시점에도 여전히 사람이 없으면 종료
                         const currentContext = this.activeRooms.get(roomId);
                         if (currentContext) {
-                            const currentHumanCount = Array.from(context.room.remoteParticipants.values())
-                                .filter(p => !p.identity.startsWith('ai-bot')).length;
+                            const currentHumanCount = Array.from(context.room.remoteParticipants.values()).filter(
+                                p => !p.identity.startsWith('ai-bot'),
+                            ).length;
 
                             if (currentHumanCount === 0) {
                                 this.logger.log(`[자동 퇴장 실행] 유예 시간 30초 경과 - cleanup 포함`);
@@ -446,7 +472,9 @@ export class VoiceBotService {
                 const message = JSON.parse(new TextDecoder().decode(payload));
 
                 // ★ 모든 DataChannel 메시지 로그
-                this.logger.debug(`[DataChannel 수신] type=${message.type}, from=${participant?.identity || 'unknown'}`);
+                this.logger.debug(
+                    `[DataChannel 수신] type=${message.type}, from=${participant?.identity || 'unknown'}`,
+                );
 
                 const context = this.activeRooms.get(roomId);
                 if (!context) {
@@ -474,7 +502,9 @@ export class VoiceBotService {
                     if (muted) {
                         context.shouldInterrupt = true;
                     }
-                    this.logger.log(`[AI 음소거] ${muted ? 'ON (오디오 중단)' : 'OFF'} by ${participant?.identity || 'unknown'}`);
+                    this.logger.log(
+                        `[AI 음소거] ${muted ? 'ON (오디오 중단)' : 'OFF'} by ${participant?.identity || 'unknown'}`,
+                    );
                     return;
                 }
 
@@ -485,30 +515,36 @@ export class VoiceBotService {
                     if (hostId) {
                         context.hostIdentities.add(hostId);
                     }
-                    this.logger.log(`[호스트 모드] ${context.hostOnlyMode ? 'ON' : 'OFF'} - hosts: ${Array.from(context.hostIdentities).join(', ')}`);
+                    this.logger.log(
+                        `[호스트 모드] ${context.hostOnlyMode ? 'ON' : 'OFF'} - hosts: ${Array.from(context.hostIdentities).join(', ')}`,
+                    );
 
                     // RAG 서버에 모든 참여자 정보 전송 (호스트 모드 활성화 시)
                     if (context.hostOnlyMode && hostId) {
                         // 호스트 전송
                         const hostParticipant = context.room.remoteParticipants.get(hostId);
-                        this.ragClient.participantJoined(roomId, {
-                            id: hostId,
-                            name: hostParticipant?.name || hostId,
-                            role: 'host',
-                        }).catch(err => {
-                            this.logger.warn(`[RAG 호스트 입장] 전송 실패: ${err.message}`);
-                        });
+                        this.ragClient
+                            .participantJoined(roomId, {
+                                id: hostId,
+                                name: hostParticipant?.name || hostId,
+                                role: 'host',
+                            })
+                            .catch(err => {
+                                this.logger.warn(`[RAG 호스트 입장] 전송 실패: ${err.message}`);
+                            });
 
                         // 기존 참여자들도 전송 (호스트 제외)
                         for (const [identity, remoteParticipant] of context.room.remoteParticipants) {
                             if (!context.hostIdentities.has(identity) && !identity.startsWith('ai-bot')) {
-                                this.ragClient.participantJoined(roomId, {
-                                    id: identity,
-                                    name: remoteParticipant.name || identity,
-                                    role: 'participant',
-                                }).catch(err => {
-                                    this.logger.warn(`[RAG 참여자 입장] 전송 실패: ${err.message}`);
-                                });
+                                this.ragClient
+                                    .participantJoined(roomId, {
+                                        id: identity,
+                                        name: remoteParticipant.name || identity,
+                                        role: 'participant',
+                                    })
+                                    .catch(err => {
+                                        this.logger.warn(`[RAG 참여자 입장] 전송 실패: ${err.message}`);
+                                    });
                             }
                         }
                     }
@@ -519,17 +555,21 @@ export class VoiceBotService {
                 if (message.type === 'HOST_ADD' && message.host) {
                     const hostId = message.host.identity;
                     context.hostIdentities.add(hostId);
-                    this.logger.log(`[호스트 추가] ${hostId} - 현재 호스트: ${Array.from(context.hostIdentities).join(', ')}`);
+                    this.logger.log(
+                        `[호스트 추가] ${hostId} - 현재 호스트: ${Array.from(context.hostIdentities).join(', ')}`,
+                    );
 
                     // RAG 서버에 역할 변경 전송
                     const hostParticipant = context.room.remoteParticipants.get(hostId);
-                    this.ragClient.participantJoined(roomId, {
-                        id: hostId,
-                        name: hostParticipant?.name || message.host.name || hostId,
-                        role: 'host',
-                    }).catch(err => {
-                        this.logger.warn(`[RAG 호스트 역할 변경] 전송 실패: ${err.message}`);
-                    });
+                    this.ragClient
+                        .participantJoined(roomId, {
+                            id: hostId,
+                            name: hostParticipant?.name || message.host.name || hostId,
+                            role: 'host',
+                        })
+                        .catch(err => {
+                            this.logger.warn(`[RAG 호스트 역할 변경] 전송 실패: ${err.message}`);
+                        });
                     return;
                 }
 
@@ -537,17 +577,21 @@ export class VoiceBotService {
                 if (message.type === 'HOST_REMOVE' && message.identity) {
                     const hostId = message.identity;
                     context.hostIdentities.delete(hostId);
-                    this.logger.log(`[호스트 제거] ${hostId} - 현재 호스트: ${Array.from(context.hostIdentities).join(', ')}`);
+                    this.logger.log(
+                        `[호스트 제거] ${hostId} - 현재 호스트: ${Array.from(context.hostIdentities).join(', ')}`,
+                    );
 
                     // RAG 서버에 역할 변경 전송
                     const removedParticipant = context.room.remoteParticipants.get(hostId);
-                    this.ragClient.participantJoined(roomId, {
-                        id: hostId,
-                        name: removedParticipant?.name || hostId,
-                        role: 'participant',
-                    }).catch(err => {
-                        this.logger.warn(`[RAG 참여자 역할 변경] 전송 실패: ${err.message}`);
-                    });
+                    this.ragClient
+                        .participantJoined(roomId, {
+                            id: hostId,
+                            name: removedParticipant?.name || hostId,
+                            role: 'participant',
+                        })
+                        .catch(err => {
+                            this.logger.warn(`[RAG 참여자 역할 변경] 전송 실패: ${err.message}`);
+                        });
                     return;
                 }
 
@@ -563,7 +607,11 @@ export class VoiceBotService {
 
                 // 호스트 전용 AI 쿼리 (Wake word 대체)
                 if (message.type === 'HOST_AI_QUERY') {
-                    if (context.hostOnlyMode && participant?.identity && context.hostIdentities.has(participant.identity)) {
+                    if (
+                        context.hostOnlyMode &&
+                        participant?.identity &&
+                        context.hostIdentities.has(participant.identity)
+                    ) {
                         this.logger.log(`[호스트 AI 쿼리] ${message.query}`);
                         // 호스트가 직접 AI 질문 - 처리 로직 호출 (비동기)
                         this.processHostQuery(roomId, message.query, participant.identity).catch(err => {
@@ -633,7 +681,7 @@ export class VoiceBotService {
                         roomId,
                         message.content || '',
                         message.preserveExisting ?? true,
-                        message.requesterId || participant?.identity || 'unknown'
+                        message.requesterId || participant?.identity || 'unknown',
                     );
                 } else if (message.type === 'CDR_ANALYSIS_REQUEST') {
                     // CDR 종합 분석 요청 (Domain Model + Flowchart + ER Diagram)
@@ -642,7 +690,7 @@ export class VoiceBotService {
                         roomId,
                         message.content || '',
                         message.preserveExisting ?? true,
-                        message.requesterId || participant?.identity || 'unknown'
+                        message.requesterId || participant?.identity || 'unknown',
                     );
                 } else if (message.type === 'SKELETON_CODE_REQUEST') {
                     // Skeleton 코드 생성 요청
@@ -652,11 +700,13 @@ export class VoiceBotService {
                         message.nodes || [],
                         message.edges || [],
                         message.language || 'python',
-                        message.requesterId || participant?.identity || 'unknown'
+                        message.requesterId || participant?.identity || 'unknown',
                     );
                 } else if (message.type === 'FLOWCHART_CONTEXT') {
                     // Flowchart 컨텍스트 업데이트 (현재 화면 상태)
-                    this.logger.log(`[Flowchart 컨텍스트] 업데이트 - 노드: ${message.nodes?.length || 0}, 엣지: ${message.edges?.length || 0}`);
+                    this.logger.log(
+                        `[Flowchart 컨텍스트] 업데이트 - 노드: ${message.nodes?.length || 0}, 엣지: ${message.edges?.length || 0}`,
+                    );
                     context.flowchartContext = {
                         nodes: message.nodes || [],
                         edges: message.edges || [],
@@ -705,30 +755,32 @@ export class VoiceBotService {
                     }
                 } else if (message.type === 'PDF_QUESTION') {
                     // PDF 텍스트 선택 후 AI 질문
-                    this.logger.log(`[PDF 질문] 수신 - question: "${message.question?.substring(0, 50)}...", context: ${message.context}`);
+                    this.logger.log(
+                        `[PDF 질문] 수신 - question: "${message.question?.substring(0, 50)}...", context: ${message.context}`,
+                    );
                     this.handlePdfQuestion(
                         roomId,
                         message.question || '',
                         message.context || '',
-                        participant?.identity || 'unknown'
+                        participant?.identity || 'unknown',
                     );
                 } else if (message.type === 'BOARD_TRANSFORM_REQUEST') {
                     // 공유 보드 스케치 → 다이어그램 변환 요청
-                    this.logger.log(`[공유 보드 변환] 요청 수신 - 이미지 크기: ${(message.imageBase64?.length / 1024).toFixed(1)}KB`);
-                    this.handleBoardTransform(
-                        roomId,
-                        message.imageBase64 || '',
-                        participant?.identity || 'unknown'
+                    this.logger.log(
+                        `[공유 보드 변환] 요청 수신 - 이미지 크기: ${(message.imageBase64?.length / 1024).toFixed(1)}KB`,
                     );
+                    this.handleBoardTransform(roomId, message.imageBase64 || '', participant?.identity || 'unknown');
                 } else if (message.type === 'QUIZ_GENERATE_REQUEST') {
                     // 스터디 퀴즈 생성 요청
-                    this.logger.log(`[스터디 퀴즈] 생성 요청 - 문제수: ${message.questionCount}, 유형: ${message.quizType}, QA히스토리: ${message.qaHistory?.length || 0}개`);
+                    this.logger.log(
+                        `[스터디 퀴즈] 생성 요청 - 문제수: ${message.questionCount}, 유형: ${message.quizType}, QA히스토리: ${message.qaHistory?.length || 0}개`,
+                    );
                     this.handleQuizGenerate(
                         roomId,
                         message.questionCount || 5,
                         message.quizType || 'mixed',
                         message.qaHistory || [],
-                        participant?.identity || 'unknown'
+                        participant?.identity || 'unknown',
                     );
                 } else if (message.type === 'QUIZ_EVALUATE_REQUEST') {
                     // 퀴즈 답변 평가 요청
@@ -737,7 +789,7 @@ export class VoiceBotService {
                         roomId,
                         message.question,
                         message.userAnswer || '',
-                        participant?.identity || 'unknown'
+                        participant?.identity || 'unknown',
                     );
                 }
                 // ============================================================
@@ -753,7 +805,7 @@ export class VoiceBotService {
 
                     // 참여자 추가 (remoteParticipants + 메시지 발신자)
                     const addedParticipants: string[] = [];
-                    room.remoteParticipants.forEach((p) => {
+                    room.remoteParticipants.forEach(p => {
                         if (!p.identity.includes('bot') && !p.identity.includes('agent')) {
                             this.perplexityService.addParticipant(roomId, p.identity, p.name || p.identity);
                             addedParticipants.push(p.identity);
@@ -763,12 +815,18 @@ export class VoiceBotService {
                     // 메시지 발신자도 추가 (중복 방지)
                     if (participant && !addedParticipants.includes(participant.identity)) {
                         if (!participant.identity.includes('bot') && !participant.identity.includes('agent')) {
-                            this.perplexityService.addParticipant(roomId, participant.identity, participant.name || participant.identity);
+                            this.perplexityService.addParticipant(
+                                roomId,
+                                participant.identity,
+                                participant.name || participant.identity,
+                            );
                             addedParticipants.push(participant.identity);
                         }
                     }
 
-                    this.logger.log(`[Perplexity] 모드 ON by ${participant?.identity || 'unknown'} - 참여자: ${addedParticipants.join(', ')}`);
+                    this.logger.log(
+                        `[Perplexity] 모드 ON by ${participant?.identity || 'unknown'} - 참여자: ${addedParticipants.join(', ')}`,
+                    );
                 } else if (message.type === 'PERPLEXITY_END') {
                     if (!context.perplexityModeActive) {
                         this.logger.debug(`[Perplexity] END 무시 (이미 OFF)`);
@@ -804,9 +862,10 @@ export class VoiceBotService {
             }
 
             // RAG 연결은 비동기로 처리 (방 입장을 블로킹하지 않음)
-            this.ragClient.connect(roomId)
+            this.ragClient
+                .connect(roomId)
                 .then(() => this.logger.log(`[RAG 연결 완료] ${roomId}`))
-                .catch((error) => this.logger.warn(`[RAG 연결 실패] ${roomId}: ${error.message} - RAG 없이 계속 진행`));
+                .catch(error => this.logger.warn(`[RAG 연결 실패] ${roomId}: ${error.message} - RAG 없이 계속 진행`));
 
             const audioSource = new AudioSource(16000, 1);
             const localAudioTrack = LocalAudioTrack.createAudioTrack('ai-voice', audioSource);
@@ -863,7 +922,7 @@ export class VoiceBotService {
                 perplexityModeActive: false,
                 // 호스트 전용 코칭 모드 초기화 (기본 활성화)
                 hostOnlyMode: true,
-                hostIdentities: new Set(),  // 다중 호스트 지원
+                hostIdentities: new Set(), // 다중 호스트 지원
                 wakeWordEnabled: false,
                 // isPublishing 타임아웃 감지용
                 publishingStartTime: 0,
@@ -886,7 +945,7 @@ export class VoiceBotService {
                     enabled: false,
                     lastAnalysisTime: 0,
                     lastScreenTextHash: '',
-                    lastConversationHash: '',  // 대화 해시 초기화
+                    lastConversationHash: '', // 대화 해시 초기화
                     analysisTimer: undefined,
                 },
                 // ★ 대기 모드 초기화
@@ -961,7 +1020,6 @@ export class VoiceBotService {
         }
     }
 
-
     // 아이디어 감지 및 브로드캐스트
     // =====================================================
 
@@ -974,7 +1032,7 @@ export class VoiceBotService {
         roomId: string,
         context: RoomContext,
         transcript: string,
-        userId: string
+        userId: string,
     ): Promise<void> {
         // 너무 짧은 발화 스킵 (3글자 이하)
         if (transcript.length <= 3) {
@@ -983,7 +1041,8 @@ export class VoiceBotService {
         }
 
         // 단순 인사/추임새 필터링 (최소한만)
-        const skipPatterns = /^(안녕|네|응|어|음|아|예|오케이|ㅇㅇ|ㅋ+|하하|그래|알겠|뭐지|뭐야|아아|으으|에에)[\.\?\!]?$/i;
+        const skipPatterns =
+            /^(안녕|네|응|어|음|아|예|오케이|ㅇㅇ|ㅋ+|하하|그래|알겠|뭐지|뭐야|아아|으으|에에)[\.\?\!]?$/i;
         if (skipPatterns.test(transcript.trim())) {
             this.logger.log(`[아이디어] 스킵 - 추임새: "${transcript}"`);
             return;
@@ -1015,10 +1074,9 @@ export class VoiceBotService {
         };
 
         const encoder = new TextEncoder();
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(ideaMessage)),
-            { reliable: true }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(ideaMessage)), {
+            reliable: true,
+        });
 
         this.logger.log(`[아이디어 전송] "${ideaContent}" by ${userId}`);
     }
@@ -1058,16 +1116,22 @@ export class VoiceBotService {
      */
     private async parseCDRToFlowchart(cdrContent: string): Promise<{
         success: boolean;
-        nodes: { id: string; content: string; nodeType: string; order: number; depth: number; branch: number }[];
+        nodes: {
+            id: string;
+            content: string;
+            nodeType: string;
+            order: number;
+            depth: number;
+            branch: number;
+        }[];
         edges: { from: string; to: string; label?: string }[];
         summary?: string;
         error?: string;
     }> {
         try {
             // CDR 텍스트 전처리 (너무 긴 경우 압축)
-            const processedContent = cdrContent.length > 5000
-                ? cdrContent.substring(0, 5000) + '\n... (이하 생략)'
-                : cdrContent;
+            const processedContent =
+                cdrContent.length > 5000 ? cdrContent.substring(0, 5000) + '\n... (이하 생략)' : cdrContent;
 
             const prompt = `CDR(요구사항 문서)를 Flowchart로 변환해주세요.
 
@@ -1100,23 +1164,28 @@ ${processedContent}
             const jsonMatch = answer.match(/\{[\s\S]*\}/);
             if (!jsonMatch) {
                 this.logger.warn(`[CDR→Flowchart] JSON 패턴 없음`);
-                return { success: false, nodes: [], edges: [], error: 'JSON 패턴을 찾을 수 없습니다' };
+                return {
+                    success: false,
+                    nodes: [],
+                    edges: [],
+                    error: 'JSON 패턴을 찾을 수 없습니다',
+                };
             }
 
             const parsed = JSON.parse(jsonMatch[0]);
 
             // 기본 노드/엣지 파싱
-            const rawNodes = (parsed.nodes || []).filter((n: any) =>
-                n && n.id && n.content && this.FLOWCHART_NODE_TYPES.includes(n.nodeType)
+            const rawNodes = (parsed.nodes || []).filter(
+                (n: any) => n && n.id && n.content && this.FLOWCHART_NODE_TYPES.includes(n.nodeType),
             );
 
-            const edges = (parsed.edges || []).filter((e: any) =>
-                e && e.from && e.to
-            ).map((e: any) => ({
-                from: e.from,
-                to: e.to,
-                label: e.label,
-            }));
+            const edges = (parsed.edges || [])
+                .filter((e: any) => e && e.from && e.to)
+                .map((e: any) => ({
+                    from: e.from,
+                    to: e.to,
+                    label: e.label,
+                }));
 
             // ★ 그래프 분석하여 depth와 branch 계산
             const nodeMap = new Map<string, any>();
@@ -1141,7 +1210,7 @@ ${processedContent}
 
             if (startNodeId) {
                 const queue: { id: string; depth: number; branch: number }[] = [
-                    { id: startNodeId, depth: 0, branch: 0 }
+                    { id: startNodeId, depth: 0, branch: 0 },
                 ];
                 const visited = new Set<string>();
 
@@ -1162,7 +1231,7 @@ ${processedContent}
                     } else if (outEdges.length >= 2) {
                         // 분기 (Yes/No 또는 여러 경로)
                         outEdges.forEach((e: any, idx: number) => {
-                            const branchOffset = idx === 0 ? -1 : (idx === 1 ? 1 : idx - 1);
+                            const branchOffset = idx === 0 ? -1 : idx === 1 ? 1 : idx - 1;
                             queue.push({ id: e.to, depth: depth + 1, branch: branchOffset });
                         });
                     }
@@ -1205,7 +1274,7 @@ ${processedContent}
         roomId: string,
         question: string,
         pdfContext: string,
-        requesterId: string
+        requesterId: string,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
@@ -1226,7 +1295,7 @@ ${pdfContext}
             const response = await this.llmService.answerWithContext(
                 `다음 PDF에서 선택한 텍스트에 대해 설명해주세요:\n\n"${question}"`,
                 fullContext,
-                'PDF 문서'
+                'PDF 문서',
             );
 
             // DataChannel로 응답 전송 (search_answer 형식 사용)
@@ -1240,15 +1309,14 @@ ${pdfContext}
 
             const encoder = new TextEncoder();
             // 질문한 사람에게만 응답 전송 (개인 학습용 - 방 전체 브로드캐스트 X)
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(searchMessage)),
-                { reliable: true, destination_identities: [requesterId] }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(searchMessage)), {
+                reliable: true,
+                destination_identities: [requesterId],
+            });
 
             this.logger.log(`[PDF 질문] 응답 전송 완료 (to: ${requesterId}): ${response.substring(0, 50)}...`);
 
             // TTS 읽기 비활성화 - 인라인 텍스트로만 표시
-
         } catch (error) {
             this.logger.error(`[PDF 질문] 처리 실패: ${error.message}`);
 
@@ -1264,10 +1332,10 @@ ${pdfContext}
                     };
 
                     const encoder = new TextEncoder();
-                    await context.room.localParticipant.publishData(
-                        encoder.encode(JSON.stringify(errorMessage)),
-                        { reliable: true, destination_identities: [requesterId] }
-                    );
+                    await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(errorMessage)), {
+                        reliable: true,
+                        destination_identities: [requesterId],
+                    });
                 }
             } catch (publishError) {
                 // 연결 끊김 등의 에러는 무시
@@ -1279,11 +1347,7 @@ ${pdfContext}
     /**
      * 공유 보드 스케치 → 다이어그램 변환 처리
      */
-    private async handleBoardTransform(
-        roomId: string,
-        imageBase64: string,
-        requesterId: string
-    ): Promise<void> {
+    private async handleBoardTransform(roomId: string, imageBase64: string, requesterId: string): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
 
@@ -1310,11 +1374,10 @@ ${pdfContext}
 
 손글씨가 알아보기 어려우면 최대한 추측해서 변환하세요. 그림이 명확하지 않으면 기본 흐름도로 만들어주세요.`;
 
-            const visionResult = await this.visionService.analyzeScreenShare(
-                imageBase64,
-                sketchPrompt,
-                { screenWidth: 1920, screenHeight: 1080 }
-            );
+            const visionResult = await this.visionService.analyzeScreenShare(imageBase64, sketchPrompt, {
+                screenWidth: 1920,
+                screenHeight: 1080,
+            });
 
             this.logger.log(`[공유 보드 변환] Vision 응답: ${visionResult.text.substring(0, 100)}...`);
 
@@ -1346,13 +1409,11 @@ ${pdfContext}
             };
 
             const encoder = new TextEncoder();
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(transformResult)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(transformResult)), {
+                reliable: true,
+            });
 
             this.logger.log(`[공유 보드 변환] 결과 전송 완료`);
-
         } catch (error) {
             this.logger.error(`[공유 보드 변환] 실패: ${error.message}`);
 
@@ -1366,10 +1427,9 @@ ${pdfContext}
             };
 
             const encoder = new TextEncoder();
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(errorResult)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(errorResult)), {
+                reliable: true,
+            });
         }
     }
 
@@ -1380,13 +1440,20 @@ ${pdfContext}
         roomId: string,
         questionCount: number,
         quizType: 'multiple_choice' | 'short_answer' | 'ox' | 'mixed',
-        qaHistory: Array<{ question: string; answer: string; context?: string; timestamp?: number }>,
-        requesterId: string
+        qaHistory: Array<{
+            question: string;
+            answer: string;
+            context?: string;
+            timestamp?: number;
+        }>,
+        requesterId: string,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
 
-        this.logger.log(`[스터디 퀴즈] 생성 시작 - ${questionCount}문제, 유형: ${quizType}, QA히스토리: ${qaHistory.length}개`);
+        this.logger.log(
+            `[스터디 퀴즈] 생성 시작 - ${questionCount}문제, 유형: ${quizType}, QA히스토리: ${qaHistory.length}개`,
+        );
 
         const encoder = new TextEncoder();
 
@@ -1447,14 +1514,17 @@ ${typeInstructions[quizType]}
             // Q&A 히스토리 기반 즉시 생성 (fallback)
             const qaPromise = (async () => {
                 if (qaHistory.length > 0) {
-                    const qaContent = qaHistory.map((qa, idx) =>
-                        `### 질문 ${idx + 1}\nQ: ${qa.question}\nA: ${qa.answer}${qa.context ? `\n참고: ${qa.context.substring(0, 500)}` : ''}`
-                    ).join('\n\n');
+                    const qaContent = qaHistory
+                        .map(
+                            (qa, idx) =>
+                                `### 질문 ${idx + 1}\nQ: ${qa.question}\nA: ${qa.answer}${qa.context ? `\n참고: ${qa.context.substring(0, 500)}` : ''}`,
+                        )
+                        .join('\n\n');
 
                     this.logger.log(`[스터디 퀴즈] Q&A 히스토리 기반 생성 시작`);
                     return await generateQuizFromContent(
                         `### 문서 Q&A 히스토리\n${qaContent.substring(0, 4000)}`,
-                        'Q&A히스토리'
+                        'Q&A히스토리',
                     );
                 }
                 return null;
@@ -1469,26 +1539,26 @@ ${typeInstructions[quizType]}
                     }
 
                     // 10초 타임아웃
-                    const timeoutPromise = new Promise<null>((resolve) => {
+                    const timeoutPromise = new Promise<null>(resolve => {
                         setTimeout(() => resolve(null), 10000);
                     });
 
                     const ragQueryPromise = (async () => {
                         const ragResult = await this.ragClient.sendQuestionWithSources(
                             roomId,
-                            '지금까지 회의에서 논의된 주요 내용과 PDF에서 다룬 핵심 개념을 알려줘'
+                            '지금까지 회의에서 논의된 주요 내용과 PDF에서 다룬 핵심 개념을 알려줘',
                         );
 
                         if (ragResult && ragResult.sources && ragResult.sources.length > 0) {
                             const meetingContext = ragResult.sources
-                                .map((s) => `[${s.speaker || '발언자'}] ${s.text}`)
+                                .map(s => `[${s.speaker || '발언자'}] ${s.text}`)
                                 .join('\n\n');
 
                             this.logger.log(`[스터디 퀴즈] RAG 컨텍스트 ${ragResult.sources.length}개 조회됨`);
 
                             return await generateQuizFromContent(
                                 `### 회의 및 PDF 내용\n${meetingContext.substring(0, 4000)}`,
-                                'RAG'
+                                'RAG',
                             );
                         }
                         return null;
@@ -1529,13 +1599,11 @@ ${typeInstructions[quizType]}
                 source,
             };
 
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(quizResult)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(quizResult)), {
+                reliable: true,
+            });
 
             this.logger.log(`[스터디 퀴즈] ${questions.length}개 문제 생성 완료 (출처: ${source})`);
-
         } catch (error) {
             this.logger.error(`[스터디 퀴즈] 생성 실패: ${error.message}`);
 
@@ -1546,10 +1614,9 @@ ${typeInstructions[quizType]}
                 error: error.message || '퀴즈 생성 중 오류가 발생했습니다. 다시 시도해주세요.',
             };
 
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(errorResult)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(errorResult)), {
+                reliable: true,
+            });
         }
     }
 
@@ -1560,12 +1627,14 @@ ${typeInstructions[quizType]}
         roomId: string,
         question: any,
         userAnswer: string,
-        requesterId: string
+        requesterId: string,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
 
-        this.logger.log(`[스터디 퀴즈] 평가 시작 - 질문: "${question?.question?.substring(0, 30)}...", 답변: "${userAnswer.substring(0, 30)}..."`);
+        this.logger.log(
+            `[스터디 퀴즈] 평가 시작 - 질문: "${question?.question?.substring(0, 30)}...", 답변: "${userAnswer.substring(0, 30)}..."`,
+        );
 
         try {
             const prompt = `당신은 학습 피드백 전문가입니다. 다음 퀴즈 답변을 평가하고 피드백을 제공해주세요.
@@ -1624,8 +1693,11 @@ ${question?.relatedContent || '없음'}
             } catch (parseError) {
                 this.logger.warn(`[스터디 퀴즈] 평가 JSON 파싱 실패: ${parseError.message}`);
                 // 단순 비교로 폴백
-                evaluation.isCorrect = userAnswer.trim().toLowerCase() === question?.correctAnswer?.trim().toLowerCase();
-                evaluation.feedback = evaluation.isCorrect ? '정답입니다!' : `틀렸습니다. 정답은 "${question?.correctAnswer}"입니다.`;
+                evaluation.isCorrect =
+                    userAnswer.trim().toLowerCase() === question?.correctAnswer?.trim().toLowerCase();
+                evaluation.feedback = evaluation.isCorrect
+                    ? '정답입니다!'
+                    : `틀렸습니다. 정답은 "${question?.correctAnswer}"입니다.`;
                 evaluation.studyGuide = !evaluation.isCorrect ? question?.explanation || '' : '';
             }
 
@@ -1636,13 +1708,11 @@ ${question?.relatedContent || '없음'}
             };
 
             const encoder = new TextEncoder();
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(evalResult)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(evalResult)), {
+                reliable: true,
+            });
 
             this.logger.log(`[스터디 퀴즈] 평가 완료 - 정답: ${evaluation.isCorrect}`);
-
         } catch (error) {
             this.logger.error(`[스터디 퀴즈] 평가 실패: ${error.message}`);
 
@@ -1655,15 +1725,14 @@ ${question?.relatedContent || '없음'}
                     userAnswer,
                     isCorrect,
                     feedback: isCorrect ? '정답입니다!' : `틀렸습니다. 정답은 "${question?.correctAnswer}"입니다.`,
-                    studyGuide: !isCorrect ? (question?.explanation || '해당 내용을 다시 복습해보세요.') : '',
+                    studyGuide: !isCorrect ? question?.explanation || '해당 내용을 다시 복습해보세요.' : '',
                 },
             };
 
             const encoder = new TextEncoder();
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(evalResult)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(evalResult)), {
+                reliable: true,
+            });
         }
     }
 
@@ -1673,7 +1742,7 @@ ${question?.relatedContent || '없음'}
     private async handlePerplexityMessage(
         roomId: string,
         message: PerplexityMessage,
-        senderId?: string
+        senderId?: string,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context || !context.perplexityModeActive) return;
@@ -1709,10 +1778,9 @@ ${question?.relatedContent || '없음'}
                 };
 
                 const encoder = new TextEncoder();
-                await context.room.localParticipant.publishData(
-                    encoder.encode(JSON.stringify(actionMessage)),
-                    { reliable: true }
-                );
+                await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(actionMessage)), {
+                    reliable: true,
+                });
 
                 // AI 응답이 있으면 TTS로 말하기
                 if (result.response) {
@@ -1749,7 +1817,7 @@ ${question?.relatedContent || '없음'}
         roomId: string,
         content: string,
         preserveExisting: boolean,
-        requesterId: string
+        requesterId: string,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
@@ -1766,10 +1834,9 @@ ${question?.relatedContent || '없음'}
         };
 
         const encoder = new TextEncoder();
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(responseMessage)),
-            { reliable: true }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(responseMessage)), {
+            reliable: true,
+        });
 
         this.logger.log(`[CDR→Flowchart] 응답 전송: ${result.nodes.length}개 노드`);
     }
@@ -1785,16 +1852,25 @@ ${question?.relatedContent || '없음'}
         success: boolean;
         domainModel?: {
             entities: { name: string; attributes: string[]; description?: string }[];
-            actions: { name: string; actor: string; target: string; description?: string }[];
+            actions: {
+                name: string;
+                actor: string;
+                target: string;
+                description?: string;
+            }[];
             conditions: { name: string; trueAction: string; falseAction: string }[];
-            relations: { from: string; to: string; type: '1:1' | '1:N' | 'N:M'; label?: string }[];
+            relations: {
+                from: string;
+                to: string;
+                type: '1:1' | '1:N' | 'N:M';
+                label?: string;
+            }[];
         };
         error?: string;
     }> {
         try {
-            const processedContent = cdrContent.length > 5000
-                ? cdrContent.substring(0, 5000) + '\n... (이하 생략)'
-                : cdrContent;
+            const processedContent =
+                cdrContent.length > 5000 ? cdrContent.substring(0, 5000) + '\n... (이하 생략)' : cdrContent;
 
             const prompt = `CDR(요구사항 문서)에서 도메인 모델을 추출해주세요.
 
@@ -1865,7 +1941,9 @@ JSON만 출력:
                 })),
             };
 
-            this.logger.log(`[Domain Model 완료] 엔티티: ${domainModel.entities.length}, 액션: ${domainModel.actions.length}`);
+            this.logger.log(
+                `[Domain Model 완료] 엔티티: ${domainModel.entities.length}, 액션: ${domainModel.actions.length}`,
+            );
             return { success: true, domainModel };
         } catch (error) {
             this.logger.error(`[Domain Model 실패] ${error.message}`);
@@ -1928,7 +2006,7 @@ JSON만 출력:
         roomId: string,
         content: string,
         preserveExisting: boolean,
-        requesterId: string
+        requesterId: string,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
@@ -1942,10 +2020,14 @@ JSON만 출력:
         ]);
 
         // ER Diagram 생성 (Domain Model 결과 사용)
-        let erDiagramResult: { success: boolean; mermaidCode: string; error?: string } = {
+        let erDiagramResult: {
+            success: boolean;
+            mermaidCode: string;
+            error?: string;
+        } = {
             success: false,
             mermaidCode: '',
-            error: 'Domain Model 추출 실패'
+            error: 'Domain Model 추출 실패',
         };
         if (domainModelResult.success && domainModelResult.domainModel) {
             erDiagramResult = this.generateERDiagram(domainModelResult.domainModel);
@@ -1955,14 +2037,18 @@ JSON만 출력:
         const responseMessage = {
             type: 'CDR_ANALYSIS_RESPONSE',
             domainModel: domainModelResult.success ? domainModelResult.domainModel : null,
-            flowchart: flowchartResult.success ? {
-                nodes: flowchartResult.nodes,
-                edges: flowchartResult.edges,
-                summary: flowchartResult.summary,
-            } : null,
-            erDiagram: erDiagramResult.success ? {
-                mermaidCode: erDiagramResult.mermaidCode,
-            } : null,
+            flowchart: flowchartResult.success
+                ? {
+                      nodes: flowchartResult.nodes,
+                      edges: flowchartResult.edges,
+                      summary: flowchartResult.summary,
+                  }
+                : null,
+            erDiagram: erDiagramResult.success
+                ? {
+                      mermaidCode: erDiagramResult.mermaidCode,
+                  }
+                : null,
             preserveExisting,
             errors: {
                 domainModel: domainModelResult.error,
@@ -1972,12 +2058,13 @@ JSON만 출력:
         };
 
         const encoder = new TextEncoder();
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(responseMessage)),
-            { reliable: true }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(responseMessage)), {
+            reliable: true,
+        });
 
-        this.logger.log(`[CDR 분석] 응답 전송 - DM: ${domainModelResult.success}, FC: ${flowchartResult.success}, ER: ${erDiagramResult.success}`);
+        this.logger.log(
+            `[CDR 분석] 응답 전송 - DM: ${domainModelResult.success}, FC: ${flowchartResult.success}, ER: ${erDiagramResult.success}`,
+        );
     }
 
     /**
@@ -1986,7 +2073,7 @@ JSON만 출력:
     private async generateSkeletonCode(
         nodes: { id: string; content: string; nodeType: string }[],
         edges: { from: string; to: string; label?: string }[],
-        language: string = 'python'
+        language: string = 'python',
     ): Promise<{ success: boolean; code: string; error?: string }> {
         try {
             const flowchartDesc = nodes.map(n => `- ${n.id}: ${n.content} (${n.nodeType})`).join('\n');
@@ -2032,7 +2119,7 @@ ${edgesDesc}
         nodes: any[],
         edges: any[],
         language: string,
-        requesterId: string
+        requesterId: string,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
@@ -2048,10 +2135,9 @@ ${edgesDesc}
         };
 
         const encoder = new TextEncoder();
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(responseMessage)),
-            { reliable: true }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(responseMessage)), {
+            reliable: true,
+        });
 
         this.logger.log(`[Skeleton] 응답 전송: ${result.success ? '성공' : '실패'}`);
     }
@@ -2077,14 +2163,14 @@ ${edgesDesc}
         let voiceCount = 0;
 
         // ★ Pre-buffer: 음성 감지 전 프레임 저장 (첫 음절 손실 방지)
-        const PRE_BUFFER_FRAMES = 15;  // ~150ms 선행 저장
+        const PRE_BUFFER_FRAMES = 15; // ~150ms 선행 저장
         let preBuffer: Buffer[] = [];
-        let isRecording = false;  // 실제 녹음 시작 여부
-        let speechStartTime: number | null = null;  // ★ 발언 시작 시간 (동시발화 순서 보장용)
+        let isRecording = false; // 실제 녹음 시작 여부
+        let speechStartTime: number | null = null; // ★ 발언 시작 시간 (동시발화 순서 보장용)
 
-        const SILENCE_THRESHOLD = 50;  // 무음 프레임 수 (~500ms)
-        const MIN_AUDIO_LENGTH = 16000;  // 최소 0.5초 (16000/32000)
-        const MAX_AUDIO_LENGTH = 192000;  // 최대 6초 (192000/32000) - 긴 문장 완전 인식
+        const SILENCE_THRESHOLD = 50; // 무음 프레임 수 (~500ms)
+        const MIN_AUDIO_LENGTH = 16000; // 최소 0.5초 (16000/32000)
+        const MAX_AUDIO_LENGTH = 192000; // 최대 6초 (192000/32000) - 긴 문장 완전 인식
         const MIN_VOICE_FRAMES = 8;
         const BARGE_IN_DECIBEL_THRESHOLD = -20;
         const STRONG_VOICE_THRESHOLD = -24;
@@ -2108,9 +2194,7 @@ ${edgesDesc}
             const frameBuffer = Buffer.from(frame.data.buffer);
             const samples = new Int16Array(frame.data.buffer);
 
-            const rms = Math.sqrt(
-                samples.reduce((sum, s) => sum + s * s, 0) / samples.length
-            );
+            const rms = Math.sqrt(samples.reduce((sum, s) => sum + s * s, 0) / samples.length);
             const decibel = 20 * Math.log10(rms / 32768);
             const avgAmplitude = samples.reduce((sum, s) => sum + Math.abs(s), 0) / samples.length;
 
@@ -2124,7 +2208,8 @@ ${edgesDesc}
                     continue;
                 } else {
                     if (calibrationSamples.length > 0) {
-                        backgroundNoiseDB = calibrationSamples.reduce((sum, db) => sum + db, 0) / calibrationSamples.length;
+                        backgroundNoiseDB =
+                            calibrationSamples.reduce((sum, db) => sum + db, 0) / calibrationSamples.length;
                         MIN_DECIBEL_THRESHOLD = backgroundNoiseDB + VOICE_MARGIN_DB;
                         const noiseRMS = 32768 * Math.pow(10, backgroundNoiseDB / 20);
                         VOICE_AMPLITUDE_THRESHOLD = Math.max(300, Math.min(800, noiseRMS * 3));
@@ -2161,7 +2246,9 @@ ${edgesDesc}
             if (context?.isPublishing && context.publishingStartTime > 0) {
                 const publishingDuration = Date.now() - context.publishingStartTime;
                 if (publishingDuration > PUBLISHING_TIMEOUT_MS) {
-                    this.logger.warn(`[오디오] isPublishing 타임아웃 (${(publishingDuration / 1000).toFixed(1)}초) - 강제 리셋`);
+                    this.logger.warn(
+                        `[오디오] isPublishing 타임아웃 (${(publishingDuration / 1000).toFixed(1)}초) - 강제 리셋`,
+                    );
                     context.isPublishing = false;
                     context.publishingStartTime = 0;
                 }
@@ -2181,9 +2268,13 @@ ${edgesDesc}
                     continue;
                 }
 
-                if (isVoice && voiceCount >= MIN_VOICE_FRAMES && !context.shouldInterrupt &&
+                if (
+                    isVoice &&
+                    voiceCount >= MIN_VOICE_FRAMES &&
+                    !context.shouldInterrupt &&
                     decibel > BARGE_IN_DECIBEL_THRESHOLD &&
-                    (context.activeUserId === null || context.activeUserId === userId)) {
+                    (context.activeUserId === null || context.activeUserId === userId)
+                ) {
                     this.logger.log(`[Barge-in] ${userId} 끼어들기 감지`);
                     context.shouldInterrupt = true;
                 }
@@ -2203,7 +2294,7 @@ ${edgesDesc}
                 // ★ 음성 시작 시 pre-buffer 포함
                 if (!isRecording && voiceCount >= 2) {
                     isRecording = true;
-                    speechStartTime = Date.now();  // ★ 발언 시작 시간 기록
+                    speechStartTime = Date.now(); // ★ 발언 시작 시간 기록
                     // pre-buffer의 모든 프레임을 audioBuffer 앞에 추가
                     audioBuffer.push(...preBuffer);
                     preBuffer = [];
@@ -2247,13 +2338,10 @@ ${edgesDesc}
                 const triggerReason = triggeredByMaxLength ? '⚠️MAX_LENGTH' : '✅SILENCE';
                 this.logger.log(`[VAD] ${triggerReason} | 오디오: ${audioSec}초 (${fullAudio.length} bytes)`);
 
-                const fullSamples = new Int16Array(fullAudio.buffer.slice(
-                    fullAudio.byteOffset,
-                    fullAudio.byteOffset + fullAudio.byteLength
-                ));
-                const fullRms = Math.sqrt(
-                    fullSamples.reduce((sum, s) => sum + s * s, 0) / fullSamples.length
+                const fullSamples = new Int16Array(
+                    fullAudio.buffer.slice(fullAudio.byteOffset, fullAudio.byteOffset + fullAudio.byteLength),
                 );
+                const fullRms = Math.sqrt(fullSamples.reduce((sum, s) => sum + s * s, 0) / fullSamples.length);
                 const fullDecibel = 20 * Math.log10(fullRms / 32768);
 
                 // ★ 발언 시작 시간 저장 (리셋 전에)
@@ -2262,9 +2350,9 @@ ${edgesDesc}
                 audioBuffer = [];
                 silenceCount = 0;
                 voiceCount = 0;
-                isRecording = false;  // ★ 녹음 상태 리셋
-                speechStartTime = null;  // ★ 발언 시작 시간 리셋
-                preBuffer = [];       // ★ pre-buffer도 초기화
+                isRecording = false; // ★ 녹음 상태 리셋
+                speechStartTime = null; // ★ 발언 시작 시간 리셋
+                preBuffer = []; // ★ pre-buffer도 초기화
 
                 if (fullDecibel > MIN_DECIBEL_THRESHOLD - 5) {
                     // 봇 context 없으면 처리 스킵
@@ -2292,7 +2380,12 @@ ${edgesDesc}
      * STT → RAG 임베딩 → Intent 분석 → (LLM 교정) → 검색/응답 → TTS
      * @param startTime 발언 시작 시간 (동시발화 순서 보장용)
      */
-    private async processAndRespond(roomId: string, audioBuffer: Buffer, userId: string, startTime: number | null = null) {
+    private async processAndRespond(
+        roomId: string,
+        audioBuffer: Buffer,
+        userId: string,
+        startTime: number | null = null,
+    ) {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
 
@@ -2313,8 +2406,8 @@ ${edgesDesc}
         // 1. STT (음성 → 텍스트) - 항상 수행 (isPublishing과 무관)
         // ================================================
         const sttStart = Date.now();
-        let transcript: string;      // 교정된 결과 (일반 용도)
-        let rawTranscript: string;   // 원본 (타임라인 용도)
+        let transcript: string; // 교정된 결과 (일반 용도)
+        let rawTranscript: string; // 원본 (타임라인 용도)
         try {
             const sttResult = await this.sttService.transcribeFromBufferStreamWithRaw(audioBuffer, 'live-audio.pcm');
             transcript = sttResult.corrected;
@@ -2413,7 +2506,9 @@ ${edgesDesc}
 
         const RESPONSE_COOLDOWN_MS = 3000;
         if (context.lastResponseTime > 0 && Date.now() - context.lastResponseTime < RESPONSE_COOLDOWN_MS) {
-            this.logger.log(`[스킵] 응답 쿨다운 (${(RESPONSE_COOLDOWN_MS - (Date.now() - context.lastResponseTime)) / 1000}초 남음)`);
+            this.logger.log(
+                `[스킵] 응답 쿨다운 (${(RESPONSE_COOLDOWN_MS - (Date.now() - context.lastResponseTime)) / 1000}초 남음)`,
+            );
             return;
         }
 
@@ -2455,11 +2550,7 @@ ${edgesDesc}
                 context.botState = BotState.SPEAKING;
 
                 // LLM에 flowchart 컨텍스트와 함께 질문 전달
-                const response = await this.llmService.answerWithContext(
-                    transcript,
-                    flowchartContextStr,
-                    '플로우차트'
-                );
+                const response = await this.llmService.answerWithContext(transcript, flowchartContextStr, '플로우차트');
 
                 await this.speakAndPublish(context, roomId, requestId, response);
                 context.botState = BotState.ARMED;
@@ -2494,7 +2585,7 @@ ${edgesDesc}
                     const response = await this.llmService.answerWithContext(
                         transcript,
                         diagramContext,
-                        '설계 다이어그램'
+                        '설계 다이어그램',
                     );
 
                     await this.speakAndPublish(context, roomId, requestId, response);
@@ -2510,7 +2601,7 @@ ${edgesDesc}
                         context,
                         roomId,
                         requestId,
-                        '지금은 설계 보드가 열려 있어요. 다이어그램에 관한 질문을 해주시면 도와드릴게요.'
+                        '지금은 설계 보드가 열려 있어요. 다이어그램에 관한 질문을 해주시면 도와드릴게요.',
                     );
                     context.botState = BotState.ARMED;
                     context.lastResponseTime = Date.now();
@@ -2525,12 +2616,14 @@ ${edgesDesc}
             // 2. Intent 분석 (패턴 + 퍼지 매칭) ~5ms
             // ================================================
             const intentStart = Date.now();
-            const intentAnalysis = intentForContext;  // 이미 위에서 분석함
-            this.logger.log(`[2.Intent] ${Date.now() - intentStart}ms - call=${intentAnalysis.isCallIntent}, conf=${intentAnalysis.confidence.toFixed(2)}, cat=${intentAnalysis.category}, needsLlm=${intentAnalysis.needsLlmCorrection}`);
+            const intentAnalysis = intentForContext; // 이미 위에서 분석함
+            this.logger.log(
+                `[2.Intent] ${Date.now() - intentStart}ms - call=${intentAnalysis.isCallIntent}, conf=${intentAnalysis.confidence.toFixed(2)}, cat=${intentAnalysis.category}, needsLlm=${intentAnalysis.needsLlmCorrection}`,
+            );
 
             // 짧은 텍스트 필터링
             const hasStopWord = this.STOP_WORDS.some(w =>
-                intentAnalysis.normalizedText.toLowerCase().includes(w.toLowerCase())
+                intentAnalysis.normalizedText.toLowerCase().includes(w.toLowerCase()),
             );
             if (transcript.trim().length <= 2 && !intentAnalysis.isCallIntent && !hasStopWord) {
                 this.logger.log(`[스킵] 짧은 추임새`);
@@ -2543,7 +2636,7 @@ ${edgesDesc}
             if (context.botState !== BotState.SLEEP && hasStopWord) {
                 this.logger.log(`[스톱워드] → SLEEP`);
                 context.botState = BotState.SPEAKING;
-                await this.speakAndPublish(context, roomId, requestId, "알겠습니다. 다시 불러주세요.");
+                await this.speakAndPublish(context, roomId, requestId, '알겠습니다. 다시 불러주세요.');
                 context.botState = BotState.SLEEP;
                 context.activeUserId = null;
                 context.lastResponseTime = Date.now();
@@ -2553,15 +2646,13 @@ ${edgesDesc}
             // ================================================
             // 3.5. Vision Intent 처리 (화면 공유 분석)
             // ================================================
-            this.logger.debug(`[Vision 체크] isCallIntent=${intentAnalysis.isCallIntent}, isVisionIntent=${intentAnalysis.isVisionIntent}, hasScreenShare=${context.hasActiveScreenShare}, isVisionMode=${context.isVisionMode}`);
+            this.logger.debug(
+                `[Vision 체크] isCallIntent=${intentAnalysis.isCallIntent}, isVisionIntent=${intentAnalysis.isVisionIntent}, hasScreenShare=${context.hasActiveScreenShare}, isVisionMode=${context.isVisionMode}`,
+            );
 
             if (intentAnalysis.isCallIntent && intentAnalysis.isVisionIntent && context.hasActiveScreenShare) {
                 this.logger.log(`[Vision Intent 감지] 화면 분석 모드로 전환`);
-                const visionHandled = await this.processVisionIntent(
-                    roomId,
-                    intentAnalysis.normalizedText,
-                    userId
-                );
+                const visionHandled = await this.processVisionIntent(roomId, intentAnalysis.normalizedText, userId);
                 if (visionHandled) {
                     // Vision 처리가 시작되면 여기서 리턴 (캡처 응답은 DataChannel로 받음)
                     this.logger.log(`[Vision] 캡처 요청 전송됨 - 응답 대기 중`);
@@ -2581,14 +2672,18 @@ ${edgesDesc}
                 // DataChannel로 보드 열기 메시지 전송
                 const openMessage = { type: 'OPEN_IDEA_BOARD' };
                 const encoder = new TextEncoder();
-                await context.room.localParticipant.publishData(
-                    encoder.encode(JSON.stringify(openMessage)),
-                    { reliable: true }
-                );
+                await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(openMessage)), {
+                    reliable: true,
+                });
 
                 // 음성 응답
                 context.botState = BotState.SPEAKING;
-                await this.speakAndPublish(context, roomId, requestId, "아이디어 보드를 열었습니다. 아이디어를 말씀해주세요!");
+                await this.speakAndPublish(
+                    context,
+                    roomId,
+                    requestId,
+                    '아이디어 보드를 열었습니다. 아이디어를 말씀해주세요!',
+                );
                 context.botState = BotState.ARMED;
                 context.lastResponseTime = Date.now();
                 return;
@@ -2607,14 +2702,13 @@ ${edgesDesc}
                 // DataChannel로 보드 열기 메시지 전송
                 const openMessage = { type: 'OPEN_FLOWCHART_BOARD', initiator: userId };
                 const encoder = new TextEncoder();
-                await context.room.localParticipant.publishData(
-                    encoder.encode(JSON.stringify(openMessage)),
-                    { reliable: true }
-                );
+                await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(openMessage)), {
+                    reliable: true,
+                });
 
                 // 음성 응답
                 context.botState = BotState.SPEAKING;
-                await this.speakAndPublish(context, roomId, requestId, "설계 보드를 열었습니다.");
+                await this.speakAndPublish(context, roomId, requestId, '설계 보드를 열었습니다.');
                 context.botState = BotState.ARMED;
                 context.lastResponseTime = Date.now();
                 return;
@@ -2639,9 +2733,7 @@ ${edgesDesc}
                     const { timeMin, timeMax } = this.calendarService.getNextWeekRange();
 
                     // 참여자들의 userId 추출 (닉네임에서 _로 구분된 경우)
-                    const userIds = participants
-                        .filter(p => p && !p.startsWith('ai-bot'))
-                        .map(p => p.split('_')[0]); // 임시로 닉네임 사용
+                    const userIds = participants.filter(p => p && !p.startsWith('ai-bot')).map(p => p.split('_')[0]); // 임시로 닉네임 사용
 
                     this.logger.log(`[캘린더] 참여자 ${participantCount}명의 일정 분석 시작`);
 
@@ -2651,7 +2743,7 @@ ${edgesDesc}
                         context,
                         roomId,
                         requestId,
-                        `${participantCount}명의 참여자 일정을 분석하고 일정을 생성하겠습니다.`
+                        `${participantCount}명의 참여자 일정을 분석하고 일정을 생성하겠습니다.`,
                     );
 
                     // 공통 빈 시간 검색 (내부 API 키 사용)
@@ -2667,7 +2759,7 @@ ${edgesDesc}
                             context,
                             roomId,
                             requestId,
-                            `${participantCount}명의 일정을 확인했지만, 공통으로 비어 있는 시간을 찾지 못했습니다.`
+                            `${participantCount}명의 일정을 확인했지만, 공통으로 비어 있는 시간을 찾지 못했습니다.`,
                         );
                         context.botState = BotState.ARMED;
                         context.lastResponseTime = Date.now();
@@ -2729,10 +2821,9 @@ ${edgesDesc}
                         result: createResult,
                     };
                     const encoder = new TextEncoder();
-                    await context.room.localParticipant.publishData(
-                        encoder.encode(JSON.stringify(calendarMessage)),
-                        { reliable: true }
-                    );
+                    await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(calendarMessage)), {
+                        reliable: true,
+                    });
 
                     return;
                 } catch (error) {
@@ -2741,7 +2832,7 @@ ${edgesDesc}
                         context,
                         roomId,
                         requestId,
-                        "죄송합니다. 일정 생성 중 오류가 발생했습니다. Google 캘린더 연동이 필요할 수 있습니다."
+                        '죄송합니다. 일정 생성 중 오류가 발생했습니다. Google 캘린더 연동이 필요할 수 있습니다.',
                     );
                     context.botState = BotState.ARMED;
                     return;
@@ -2752,10 +2843,13 @@ ${edgesDesc}
             // 3.8. 타이머 Intent 처리
             // ================================================
             if (intentAnalysis.isCallIntent && intentAnalysis.isTimerIntent) {
-                this.logger.log(`[타이머] Intent 감지 - action: ${intentAnalysis.timerAction}, minutes: ${intentAnalysis.timerMinutes}`);
+                this.logger.log(
+                    `[타이머] Intent 감지 - action: ${intentAnalysis.timerAction}, minutes: ${intentAnalysis.timerMinutes}`,
+                );
 
                 try {
-                    const { startTimer, pauseTimer, resumeTimer, extendTimer, stopTimer, getTimerStatus } = await import('../mcp/tools/timer.tool');
+                    const { startTimer, pauseTimer, resumeTimer, extendTimer, stopTimer, getTimerStatus } =
+                        await import('../mcp/tools/timer.tool');
 
                     let result: any = null;
                     let message = '';
@@ -2808,18 +2902,19 @@ ${edgesDesc}
                     const timerMessage = {
                         type: 'TIMER_UPDATE',
                         action,
-                        data: result ? {
-                            targetMinutes: result.targetMinutes,
-                            warningMinutes: result.warningMinutes,
-                            remainingSeconds: result.remainingSeconds,
-                            timerState: result.timerState,
-                        } : null,
+                        data: result
+                            ? {
+                                  targetMinutes: result.targetMinutes,
+                                  warningMinutes: result.warningMinutes,
+                                  remainingSeconds: result.remainingSeconds,
+                                  timerState: result.timerState,
+                              }
+                            : null,
                     };
                     const encoder = new TextEncoder();
-                    await context.room.localParticipant.publishData(
-                        encoder.encode(JSON.stringify(timerMessage)),
-                        { reliable: true }
-                    );
+                    await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(timerMessage)), {
+                        reliable: true,
+                    });
                     this.logger.log(`[DataChannel] 타이머 상태 전송: ${action}`);
 
                     // 음성 응답
@@ -2831,12 +2926,7 @@ ${edgesDesc}
                     return;
                 } catch (error) {
                     this.logger.error(`[타이머] 처리 실패: ${error.message}`);
-                    await this.speakAndPublish(
-                        context,
-                        roomId,
-                        requestId,
-                        "타이머 처리 중 오류가 발생했습니다."
-                    );
+                    await this.speakAndPublish(context, roomId, requestId, '타이머 처리 중 오류가 발생했습니다.');
                     context.botState = BotState.ARMED;
                     return;
                 }
@@ -2887,7 +2977,7 @@ ${edgesDesc}
                         context,
                         requestId,
                         processedText,
-                        userId
+                        userId,
                     );
 
                     if (opinionResult) {
@@ -2906,7 +2996,8 @@ ${edgesDesc}
                 context.lastInteractionTime = Date.now();
 
                 // 질문이 있는지 확인
-                const hasQuestion = intentAnalysis.isQuestionIntent ||
+                const hasQuestion =
+                    intentAnalysis.isQuestionIntent ||
                     intentAnalysis.hasCommandWord ||
                     intentAnalysis.hasRequestPattern ||
                     (searchKeyword && searchKeyword.length >= 2);
@@ -2915,7 +3006,7 @@ ${edgesDesc}
                 if (!hasQuestion) {
                     this.logger.log(`[웨이크워드만] 안내 응답`);
                     context.botState = BotState.SPEAKING;
-                    await this.speakAndPublish(context, roomId, requestId, "네, 무엇을 도와드릴까요?");
+                    await this.speakAndPublish(context, roomId, requestId, '네, 무엇을 도와드릴까요?');
                     context.botState = BotState.ARMED;
                     context.lastResponseTime = Date.now();
                     return;
@@ -2949,10 +3040,12 @@ ${edgesDesc}
                 }
 
                 // 질문/명령 체크
-                if (!intentAnalysis.isQuestionIntent &&
+                if (
+                    !intentAnalysis.isQuestionIntent &&
                     !intentAnalysis.hasCommandWord &&
                     !intentAnalysis.hasRequestPattern &&
-                    (!searchKeyword || searchKeyword.length < 2)) {
+                    (!searchKeyword || searchKeyword.length < 2)
+                ) {
                     this.logger.log(`[스킵] 질문/명령 아님`);
                     return;
                 }
@@ -2960,7 +3053,9 @@ ${edgesDesc}
                 context.lastInteractionTime = Date.now();
 
                 // ★ AI 상태: listening (시리 UI용)
-                this.broadcastAiState(roomId, 'listening', { transcript: processedText }).catch(() => { });
+                this.broadcastAiState(roomId, 'listening', {
+                    transcript: processedText,
+                }).catch(() => {});
 
                 // ============================================
                 // 7.5 Agent 모드 판단 (패턴 매칭 실패 시 LLM 라우팅)
@@ -2969,14 +3064,7 @@ ${edgesDesc}
 
                 if (useAgentMode) {
                     this.logger.log(`[Agent 모드] LLM 라우팅 시작`);
-                    await this.processWithAgent(
-                        context,
-                        roomId,
-                        requestId,
-                        processedText,
-                        userId,
-                        startTime
-                    );
+                    await this.processWithAgent(context, roomId, requestId, processedText, userId, startTime);
                     return;
                 }
 
@@ -2996,7 +3084,9 @@ ${edgesDesc}
                 this.logger.log(`[검색 준비] keyword="${finalSearchKeyword}", cat=${finalCategory}`);
 
                 // ★ AI 상태: processing (시리 UI용)
-                this.broadcastAiState(roomId, 'processing', { transcript: processedText }).catch(() => { });
+                this.broadcastAiState(roomId, 'processing', {
+                    transcript: processedText,
+                }).catch(() => {});
 
                 // ============================================
                 // 9. LLM 호출 (생각중 응답 포함)
@@ -3006,8 +3096,14 @@ ${edgesDesc}
                     if (category === '날씨') {
                         return ['어 잠깐만요~', '날씨 볼게요~'][Math.floor(Math.random() * 2)];
                     }
-                    if (['카페', '맛집', '술집', '분식', '치킨', '피자', '빵집', '디저트', '쇼핑'].includes(category || '')) {
-                        return ['어디 좋을까... 잠깐만요', '음 찾아볼게요~', '어 잠깐요~'][Math.floor(Math.random() * 3)];
+                    if (
+                        ['카페', '맛집', '술집', '분식', '치킨', '피자', '빵집', '디저트', '쇼핑'].includes(
+                            category || '',
+                        )
+                    ) {
+                        return ['어디 좋을까... 잠깐만요', '음 찾아볼게요~', '어 잠깐요~'][
+                            Math.floor(Math.random() * 3)
+                        ];
                     }
                     if (['뉴스', '주식', '스포츠'].includes(category || '')) {
                         return ['어 잠깐 볼게요~', '음...'][Math.floor(Math.random() * 2)];
@@ -3024,11 +3120,11 @@ ${edgesDesc}
                 let llmResolved = false;
 
                 const llmStart = Date.now();
-                const llmPromise = this.llmService.sendMessage(
-                    processedText,
-                    intentAnalysis.searchDomain,
-                    roomId
-                ).finally(() => { llmResolved = true; });
+                const llmPromise = this.llmService
+                    .sendMessage(processedText, intentAnalysis.searchDomain, roomId)
+                    .finally(() => {
+                        llmResolved = true;
+                    });
 
                 // 700ms 후에도 응답 없으면 "생각중" 발화 (hostOnlyMode에서는 스킵 - Dynamic Island로 대체)
                 const thinkingTask = (async () => {
@@ -3052,7 +3148,7 @@ ${edgesDesc}
                 // thinking 발화 후 연결어 자연스럽게
                 let finalResponse = llmResult.text;
                 if (thinkingSpoken) {
-                    const connectors = ['', '아 ', '어 '];  // 빈 문자열 = 그냥 바로 말함
+                    const connectors = ['', '아 ', '어 ']; // 빈 문자열 = 그냥 바로 말함
                     const connector = connectors[Math.floor(Math.random() * connectors.length)];
                     finalResponse = `${connector}${llmResult.text.trim()}`;
                 }
@@ -3078,17 +3174,18 @@ ${edgesDesc}
 
                     if (context.hostOnlyMode && context.hostIdentities.size > 0) {
                         // 호스트들에게만 전송
-                        await context.room.localParticipant.publishData(
-                            encoder.encode(JSON.stringify(searchMessage)),
-                            { reliable: true, destination_identities: Array.from(context.hostIdentities) }
+                        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(searchMessage)), {
+                            reliable: true,
+                            destination_identities: Array.from(context.hostIdentities),
+                        });
+                        this.logger.log(
+                            `[DataChannel] 검색 결과 호스트들에게 전송 (${llmResult.searchResults.length}개)`,
                         );
-                        this.logger.log(`[DataChannel] 검색 결과 호스트들에게 전송 (${llmResult.searchResults.length}개)`);
                     } else {
                         // 모든 참여자에게 전송
-                        await context.room.localParticipant.publishData(
-                            encoder.encode(JSON.stringify(searchMessage)),
-                            { reliable: true }
-                        );
+                        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(searchMessage)), {
+                            reliable: true,
+                        });
                         this.logger.log(`[DataChannel] 검색 결과 전송 (${llmResult.searchResults.length}개)`);
                     }
                 }
@@ -3106,18 +3203,19 @@ ${edgesDesc}
                             content: source.text,
                             sourceFile: source.speaker ? `${source.speaker}의 발언` : '회의 기록',
                             relevance: `"${processedText.substring(0, 20)}..." 질문에 대한 관련 내용`,
-                            highlights: [{
-                                text: source.text.substring(0, 200),
-                                color: '#fef08a'
-                            }]
-                        }))
+                            highlights: [
+                                {
+                                    text: source.text.substring(0, 200),
+                                    color: '#fef08a',
+                                },
+                            ],
+                        })),
                     };
 
                     const encoder = new TextEncoder();
-                    await context.room.localParticipant.publishData(
-                        encoder.encode(JSON.stringify(documentMessage)),
-                        { reliable: true }
-                    );
+                    await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(documentMessage)), {
+                        reliable: true,
+                    });
                     this.logger.log(`[DataChannel] AI 문서 패널 전송 (${llmResult.ragSources.length}개 출처)`);
                 }
 
@@ -3129,7 +3227,7 @@ ${edgesDesc}
                 // 검색 결과가 있고 hostOnlyMode면 텍스트 카드 스킵 (이미 search_answer에 포함됨)
                 const hasSearchResults = llmResult.searchResults && llmResult.searchResults.length > 0;
                 await this.speakAndPublish(context, roomId, requestId, finalResponse, {
-                    skipTextCard: hasSearchResults && context.hostOnlyMode
+                    skipTextCard: hasSearchResults && context.hostOnlyMode,
                 });
 
                 // 응답 완료 → SLEEP
@@ -3139,7 +3237,6 @@ ${edgesDesc}
 
                 this.logger.log(`========== [완료] 총 ${Date.now() - responseStartTime}ms ==========\n`);
             }
-
         } catch (error) {
             this.logger.error(`[에러] ${error.message}`, error.stack);
             // 에러 시 안전하게 SLEEP 복귀
@@ -3155,7 +3252,7 @@ ${edgesDesc}
 
     private async publishAudio(roomId: string, audioSource: AudioSource, pcmBuffer: Buffer): Promise<void> {
         const SAMPLE_RATE = 16000;
-        const FRAME_SIZE = 480;  // 30ms at 16kHz
+        const FRAME_SIZE = 480; // 30ms at 16kHz
         const BYTES_PER_SAMPLE = 2;
         const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE;
         const FRAME_DURATION_MS = 30;
@@ -3177,7 +3274,7 @@ ${edgesDesc}
         }
 
         // 일정한 간격으로 프레임 전송 (setInterval 사용)
-        return new Promise((resolve) => {
+        return new Promise(resolve => {
             let frameIndex = 0;
             const startTime = Date.now();
 
@@ -3196,7 +3293,7 @@ ${edgesDesc}
                 }
 
                 // 프레임 전송 (논블로킹)
-                audioSource.captureFrame(frames[frameIndex]).catch(() => { });
+                audioSource.captureFrame(frames[frameIndex]).catch(() => {});
                 frameIndex++;
 
                 // 다음 프레임 스케줄 (드리프트 보정)
@@ -3224,7 +3321,7 @@ ${edgesDesc}
         roomId: string,
         requestId: number,
         message: string,
-        options?: { skipTextCard?: boolean }
+        options?: { skipTextCard?: boolean },
     ): Promise<void> {
         // AI 음소거 상태면 TTS 스킵
         if (context.aiMuted) {
@@ -3293,17 +3390,14 @@ ${edgesDesc}
      * Agent 모드 사용 여부 판단
      * 패턴 매칭으로 명확히 분류되지 않는 경우 LLM 라우팅 사용
      */
-    private shouldUseAgentMode(
-        text: string,
-        intentAnalysis: ReturnType<IntentClassifierService['classify']>
-    ): boolean {
+    private shouldUseAgentMode(text: string, intentAnalysis: ReturnType<IntentClassifierService['classify']>): boolean {
         // 1. 애매한 패턴 먼저 체크 (최우선)
         // 예: "저번에 그거 어떻게 됐어?", "전에 했던 얘기 맞냐?", "뭐라고 했더라?"
         const ambiguousPatterns = [
-            /전에|아까|방금|이전|지난번|저번/,  // 시간 참조 (저번 추가)
-            /그거|그게|이거|저거/,               // 대명사 (뭐는 너무 광범위해서 제외)
-            /했(던|었|는)|말(했|한)/,           // 과거 참조
-            /뭐라고|뭐라|뭔가/,                  // 불명확한 질문
+            /전에|아까|방금|이전|지난번|저번/, // 시간 참조 (저번 추가)
+            /그거|그게|이거|저거/, // 대명사 (뭐는 너무 광범위해서 제외)
+            /했(던|었|는)|말(했|한)/, // 과거 참조
+            /뭐라고|뭐라|뭔가/, // 불명확한 질문
         ];
 
         const hasAmbiguousPattern = ambiguousPatterns.some(p => p.test(text));
@@ -3314,9 +3408,10 @@ ${edgesDesc}
         }
 
         // 2. 명확한 카테고리가 있으면 기존 로직 사용
-        if (intentAnalysis.category && [
-            '날씨', '맛집', '카페', '술집', '뉴스', '주식', '스포츠'
-        ].includes(intentAnalysis.category)) {
+        if (
+            intentAnalysis.category &&
+            ['날씨', '맛집', '카페', '술집', '뉴스', '주식', '스포츠'].includes(intentAnalysis.category)
+        ) {
             return false;
         }
 
@@ -3349,7 +3444,7 @@ ${edgesDesc}
         requestId: number,
         processedText: string,
         userId: string,
-        startTime: number
+        startTime: number,
     ): Promise<void> {
         try {
             // 1. 대화 히스토리 준비
@@ -3366,17 +3461,13 @@ ${edgesDesc}
                 processedText,
                 conversationHistory,
                 { title: roomId },
-                screenContext || undefined
+                screenContext || undefined,
             );
 
             this.logger.log(`[Agent] Tool: ${decision.tool}, Params: ${JSON.stringify(decision.params)}`);
 
             // 4. 도구 실행
-            const toolResult = await this.agentRouter.executeTool(
-                decision,
-                roomId,
-                processedText
-            );
+            const toolResult = await this.agentRouter.executeTool(decision, roomId, processedText);
 
             // 5. 최종 응답 생성
             const response = await this.agentRouter.generateResponse(
@@ -3384,7 +3475,7 @@ ${edgesDesc}
                 decision,
                 toolResult,
                 conversationHistory,
-                screenContext || undefined
+                screenContext || undefined,
             );
 
             if (context.currentRequestId !== requestId) {
@@ -3405,10 +3496,9 @@ ${edgesDesc}
                 };
 
                 const encoder = new TextEncoder();
-                await context.room.localParticipant.publishData(
-                    encoder.encode(JSON.stringify(searchMessage)),
-                    { reliable: true }
-                );
+                await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(searchMessage)), {
+                    reliable: true,
+                });
                 this.logger.log(`[Agent] DataChannel 전송 (${toolResult.searchResults.length}개 결과)`);
             }
 
@@ -3423,7 +3513,6 @@ ${edgesDesc}
             context.lastResponseTime = Date.now();
 
             this.logger.log(`[Agent 완료] 총 ${Date.now() - startTime}ms`);
-
         } catch (error) {
             this.logger.error(`[Agent 에러] ${error.message}`, error.stack);
             // 에러 시 간단한 응답
@@ -3441,13 +3530,13 @@ ${edgesDesc}
         context: RoomContext,
         userMessage: string,
         botResponse: string,
-        userId: string
+        userId: string,
     ): void {
         const now = Date.now();
 
         // 오래된 대화 제거 (5분 이상)
         context.conversationHistory = context.conversationHistory.filter(
-            turn => now - turn.timestamp < this.CONVERSATION_EXPIRE_MS
+            turn => now - turn.timestamp < this.CONVERSATION_EXPIRE_MS,
         );
 
         // 의미 있는 발화만 저장 (추임새, 빈 텍스트 필터링)
@@ -3491,21 +3580,19 @@ ${edgesDesc}
         if (!text) return '';
 
         // 1. 웨이크워드 제거
-        let cleaned = text
-            .replace(/^(아우라야?|헤이\s*아우라|오케이\s*아우라)\s*/gi, '')
-            .trim();
+        let cleaned = text.replace(/^(아우라야?|헤이\s*아우라|오케이\s*아우라)\s*/gi, '').trim();
 
         // 2. 추임새만 있는지 체크
         const fillerPatterns = [
-            /^(음+|어+|아+|으+|에+|응+|네+|예+|야+)[\.\?\!]*$/,  // 단독 추임새
-            /^(음+|어+|아+|으+)[\s\.\,]*$/,                      // 추임새 + 공백/구두점
-            /^(그+|저+|이+)[\s\.\,]*$/,                          // 지시사만
-            /^[\.\?\!\,\s]+$/,                                   // 구두점만
+            /^(음+|어+|아+|으+|에+|응+|네+|예+|야+)[\.\?\!]*$/, // 단독 추임새
+            /^(음+|어+|아+|으+)[\s\.\,]*$/, // 추임새 + 공백/구두점
+            /^(그+|저+|이+)[\s\.\,]*$/, // 지시사만
+            /^[\.\?\!\,\s]+$/, // 구두점만
         ];
 
         for (const pattern of fillerPatterns) {
             if (pattern.test(cleaned)) {
-                return '';  // 추임새만 있으면 빈 문자열 반환
+                return ''; // 추임새만 있으면 빈 문자열 반환
             }
         }
 
@@ -3554,13 +3641,13 @@ ${edgesDesc}
 
         // fmt subchunk
         header.write('fmt ', 12);
-        header.writeUInt32LE(16, 16);           // Subchunk1Size (16 for PCM)
-        header.writeUInt16LE(1, 20);            // AudioFormat (1 = PCM)
-        header.writeUInt16LE(channels, 22);     // NumChannels
-        header.writeUInt32LE(sampleRate, 24);   // SampleRate
-        header.writeUInt32LE(byteRate, 28);     // ByteRate
-        header.writeUInt16LE(blockAlign, 32);   // BlockAlign
-        header.writeUInt16LE(bitsPerSample, 34);// BitsPerSample
+        header.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
+        header.writeUInt16LE(1, 20); // AudioFormat (1 = PCM)
+        header.writeUInt16LE(channels, 22); // NumChannels
+        header.writeUInt32LE(sampleRate, 24); // SampleRate
+        header.writeUInt32LE(byteRate, 28); // ByteRate
+        header.writeUInt16LE(blockAlign, 32); // BlockAlign
+        header.writeUInt16LE(bitsPerSample, 34); // BitsPerSample
 
         // data subchunk
         header.write('data', 36);
@@ -3679,7 +3766,7 @@ ${edgesDesc}
             const response = await axios.default.post(
                 `${backendUrl}/restapi/internal/room-cleanup`,
                 { roomId },
-                { timeout: 5000 }
+                { timeout: 5000 },
             );
             this.logger.log(`[DB 정리 완료] roomId: ${roomId}, result: ${JSON.stringify(response.data)}`);
         } catch (error) {
@@ -3702,7 +3789,7 @@ ${edgesDesc}
         roomId: string,
         requestId: number,
         userQuestion: string,
-        userId: string
+        userId: string,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
@@ -3723,10 +3810,9 @@ ${edgesDesc}
         };
 
         const encoder = new TextEncoder();
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(captureRequest)),
-            { reliable: true }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(captureRequest)), {
+            reliable: true,
+        });
 
         this.logger.log(`[Vision] 캡처 요청 전송 - requestId: ${requestId}`);
     }
@@ -3744,7 +3830,7 @@ ${edgesDesc}
             highlightedText?: string;
             screenWidth: number;
             screenHeight: number;
-        }
+        },
     ): Promise<void> {
         this.logger.log(`[Vision HTTP] 처리 시작 - room: ${roomId}, requestId: ${message.requestId}`);
         await this.handleVisionCaptureResponse(roomId, message);
@@ -3755,7 +3841,7 @@ ${edgesDesc}
      */
     private async handleTimerCommand(
         roomId: string,
-        message: { action: string; minutes?: number; warningMinutes?: number }
+        message: { action: string; minutes?: number; warningMinutes?: number },
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) {
@@ -3763,7 +3849,8 @@ ${edgesDesc}
             return;
         }
 
-        const { startTimer, pauseTimer, resumeTimer, extendTimer, stopTimer, getTimerStatus } = await import('../mcp/tools/timer.tool');
+        const { startTimer, pauseTimer, resumeTimer, extendTimer, stopTimer, getTimerStatus } =
+            await import('../mcp/tools/timer.tool');
 
         let result: any = null;
         const { action, minutes, warningMinutes } = message;
@@ -3806,20 +3893,21 @@ ${edgesDesc}
         const timerMessage = {
             type: 'TIMER_UPDATE',
             action,
-            data: result ? {
-                targetMinutes: result.targetMinutes,
-                warningMinutes: result.warningMinutes,
-                remainingSeconds: result.remainingSeconds,
-                timerState: result.timerState,
-            } : null,
+            data: result
+                ? {
+                      targetMinutes: result.targetMinutes,
+                      warningMinutes: result.warningMinutes,
+                      remainingSeconds: result.remainingSeconds,
+                      timerState: result.timerState,
+                  }
+                : null,
         };
 
         try {
             const encoder = new TextEncoder();
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(timerMessage)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(timerMessage)), {
+                reliable: true,
+            });
             this.logger.log(`[DataChannel] 타이머 상태 브로드캐스트: ${action}`);
         } catch (error) {
             this.logger.error(`[타이머] DataChannel 전송 실패: ${error.message}`);
@@ -3839,7 +3927,7 @@ ${edgesDesc}
             highlightedText?: string;
             screenWidth: number;
             screenHeight: number;
-        }
+        },
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context || !context.pendingVisionRequest) {
@@ -3889,7 +3977,12 @@ ${edgesDesc}
             const validation = this.visionService.validateAndCompressImage(message.imageBase64);
             if (!validation.valid) {
                 this.logger.error(`[Vision] 이미지 검증 실패: ${validation.error}`);
-                await this.speakAndPublish(context, roomId, requestId, "화면을 캡처하는데 문제가 있어요. 다시 한번 말씀해주세요.");
+                await this.speakAndPublish(
+                    context,
+                    roomId,
+                    requestId,
+                    '화면을 캡처하는데 문제가 있어요. 다시 한번 말씀해주세요.',
+                );
                 return;
             }
 
@@ -3906,11 +3999,7 @@ ${edgesDesc}
 
             // "잠깐만요" 먼저 말하기 (Vision API 호출 시간 벌기) - hostOnlyMode에서는 스킵
             if (!context.hostOnlyMode) {
-                const thinkingPhrases = [
-                    '잠깐 볼게요~',
-                    '한번 볼게요',
-                    '잠깐만요~',
-                ];
+                const thinkingPhrases = ['잠깐 볼게요~', '한번 볼게요', '잠깐만요~'];
                 const thinkingPhrase = thinkingPhrases[Math.floor(Math.random() * thinkingPhrases.length)];
                 await this.speakAndPublish(context, roomId, requestId, thinkingPhrase);
             }
@@ -3919,7 +4008,7 @@ ${edgesDesc}
             const result = await this.visionService.analyzeScreenShare(
                 validation.compressed!,
                 userQuestion,
-                visionContext
+                visionContext,
             );
 
             this.logger.log(`[Vision] 분석 완료 - 타입: ${result.analysisType}`);
@@ -3933,20 +4022,23 @@ ${edgesDesc}
             };
 
             const encoder = new TextEncoder();
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(visionResultMessage)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(visionResultMessage)), {
+                reliable: true,
+            });
 
             // TTS 발화
             await this.speakAndPublish(context, roomId, requestId, result.text);
 
             this.logger.log(`[Vision] 완료`);
-
         } catch (error) {
             this.logger.error(`[Vision] 처리 에러: ${error.message}`);
             try {
-                await this.speakAndPublish(context, roomId, requestId, "화면 분석 중에 문제가 생겼어요. 다시 한번 해볼게요.");
+                await this.speakAndPublish(
+                    context,
+                    roomId,
+                    requestId,
+                    '화면 분석 중에 문제가 생겼어요. 다시 한번 해볼게요.',
+                );
             } catch (ttsError) {
                 this.logger.error(`[Vision] 에러 TTS 실패: ${ttsError.message}`);
             }
@@ -3974,11 +4066,7 @@ ${edgesDesc}
     /**
      * Vision Intent 감지 시 처리
      */
-    async processVisionIntent(
-        roomId: string,
-        userQuestion: string,
-        userId: string
-    ): Promise<boolean> {
+    async processVisionIntent(roomId: string, userQuestion: string, userId: string): Promise<boolean> {
         const context = this.activeRooms.get(roomId);
         if (!context) return false;
 
@@ -4018,7 +4106,13 @@ ${edgesDesc}
     // ============================================================
 
     private buildFlowchartContextPrompt(flowchartContext: {
-        nodes: Array<{ id: string; content: string; nodeType: string; depth: number; branch: number }>;
+        nodes: Array<{
+            id: string;
+            content: string;
+            nodeType: string;
+            depth: number;
+            branch: number;
+        }>;
         edges: Array<{ from: string; to: string; label?: string }>;
         summary: string;
     }): string {
@@ -4087,7 +4181,7 @@ ${edgesDesc}
     private async explainGeneratedDiagrams(
         roomId: string,
         types: string[],
-        mermaidCodes: Record<string, string>
+        mermaidCodes: Record<string, string>,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context || !context.designModeActive) {
@@ -4164,27 +4258,62 @@ ${firstCode.substring(0, 500)}
     private isDiagramRelatedQuestion(transcript: string): boolean {
         const diagramKeywords = [
             // 다이어그램 타입
-            '플로우차트', 'flowchart', '흐름도', '순서도',
-            'erd', '이알디', '엔티티', '테이블', '데이터베이스', 'db',
-            '시퀀스', 'sequence', '상호작용',
-            '아키텍처', 'architecture', '구조',
+            '플로우차트',
+            'flowchart',
+            '흐름도',
+            '순서도',
+            'erd',
+            '이알디',
+            '엔티티',
+            '테이블',
+            '데이터베이스',
+            'db',
+            '시퀀스',
+            'sequence',
+            '상호작용',
+            '아키텍처',
+            'architecture',
+            '구조',
             // 다이어그램 관련 질문
-            '다이어그램', '차트', '그림', '도표', '도식',
-            '설계', '모델', '스키마', '관계',
+            '다이어그램',
+            '차트',
+            '그림',
+            '도표',
+            '도식',
+            '설계',
+            '모델',
+            '스키마',
+            '관계',
             // 다이어그램 동작
-            '설명', '분석', '의미', '뜻', '내용',
-            '노드', '엣지', '연결', '화살표', '박스',
-            '프로세스', '단계', '흐름', '분기',
+            '설명',
+            '분석',
+            '의미',
+            '뜻',
+            '내용',
+            '노드',
+            '엣지',
+            '연결',
+            '화살표',
+            '박스',
+            '프로세스',
+            '단계',
+            '흐름',
+            '분기',
             // 수정/편집 관련
-            '수정', '변경', '추가', '삭제', '편집',
+            '수정',
+            '변경',
+            '추가',
+            '삭제',
+            '편집',
             // 질문 패턴
-            '이게 뭐야', '뭘 의미', '어떤 의미', '왜 이렇게',
+            '이게 뭐야',
+            '뭘 의미',
+            '어떤 의미',
+            '왜 이렇게',
         ];
 
         const normalizedTranscript = transcript.toLowerCase();
-        return diagramKeywords.some(keyword =>
-            normalizedTranscript.includes(keyword.toLowerCase())
-        );
+        return diagramKeywords.some(keyword => normalizedTranscript.includes(keyword.toLowerCase()));
     }
 
     // ============================================================
@@ -4236,11 +4365,7 @@ ${firstCode.substring(0, 500)}
     /**
      * STT 발화를 수집 (키워드 추출은 5초마다 일괄 처리)
      */
-    private collectTranscriptForTimeline(
-        roomId: string,
-        transcript: string,
-        speaker: string
-    ): void {
+    private collectTranscriptForTimeline(roomId: string, transcript: string, speaker: string): void {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
 
@@ -4284,13 +4409,11 @@ ${firstCode.substring(0, 500)}
 
         try {
             // 발화자별로 키워드 추출 (병렬 처리)
-            const speakerKeywordsPromises = Array.from(speakerTranscripts.entries()).map(
-                async ([speaker, texts]) => {
-                    const allText = texts.join(' ');
-                    const keywords = await this.extractKeywordsWithLLM(allText);
-                    return { speaker, keywords };
-                }
-            );
+            const speakerKeywordsPromises = Array.from(speakerTranscripts.entries()).map(async ([speaker, texts]) => {
+                const allText = texts.join(' ');
+                const keywords = await this.extractKeywordsWithLLM(allText);
+                return { speaker, keywords };
+            });
 
             const speakerKeywordsResults = await Promise.all(speakerKeywordsPromises);
 
@@ -4313,10 +4436,9 @@ ${firstCode.substring(0, 500)}
             };
 
             const encoder = new TextEncoder();
-            await context.room.localParticipant.publishData(
-                encoder.encode(JSON.stringify(message)),
-                { reliable: true }
-            );
+            await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(message)), {
+                reliable: true,
+            });
 
             const logSummary = validResults.map(r => `${r.speaker}: [${r.keywords.join(', ')}]`).join(' | ');
             this.logger.log(`[Timeline] 키워드 갱신 (minute: ${minuteIndex}) - ${logSummary}`);
@@ -4329,41 +4451,89 @@ ${firstCode.substring(0, 500)}
     }
 
     /**
-     * LLM으로 핵심 키워드 최대 5개 추출
+     * LLM으로 핵심 키워드 최대 5개 추출 (STT 오인식 교정 포함)
      */
     private async extractKeywordsWithLLM(transcripts: string): Promise<string[]> {
-        const prompt = `다음 대화에서 핵심 키워드를 최대 5개 추출하세요.
+        const prompt = `다음은 회의 중 음성인식(STT) 결과입니다. STT 오인식을 교정하여 올바른 키워드를 최대 5개 추출하세요.
 
-규칙:
-- 명사 또는 명사구만 추출
-- 의미 없는 추임새나 감탄사만 제외 (예: 네, 아, 음, 어)
-- 대화에서 언급된 주요 토픽이나 주제어 추출
-- 중복 키워드 제외
-- 키워드가 없으면 빈 줄 출력
-- 각 키워드를 한 줄에 하나씩 출력 (번호나 설명 없이)
+## 규칙
+1. STT 오인식을 먼저 교정한 후 키워드 추출
+2. 명사 또는 명사구만 추출
+3. 각 키워드를 한 줄에 하나씩 출력
+4. 키워드가 없으면 빈 줄 출력
 
-발화 내용:
+## 출력 금지 (절대 포함하지 말 것)
+- 괄호: (), [], {} 등
+- 추임새: 네, 아, 음, 어, 응, 예, 뭐, 그, 저, 아... 등
+- 번호: 1. 2. 등
+- 설명: "~입니다", "~키워드" 등
+- 특수문자: -, •, *, : 등
+
+## STT 오인식 교정 예시
+- 리액트/리엑트 → React
+- 타입스크립트 → TypeScript
+- 도커/독커/독거 → Docker
+- 쿠버네티스/후보네티스 → Kubernetes
+- 웹소켓 → WebSocket
+- 에이피아이 → API
+- 엘엘엠 → LLM
+- 지피티 → GPT
+- 유즈메모/유저메모 → useMemo
+- 유즈이펙트 → useEffect
+- 프론트엔드 → Frontend
+- 라이브킷 → LiveKit
+- 클로바/글로바 → Clova
+- 휴리스틱/히스틱 → 휴리스틱
+- 인식률/인식율 → 인식률
+- 헤이록/헤이록생 → 회의록
+- 생선 속도/성공 속도 → 생성 속도
+- 비동작 → 비동기
+- 콜백/퀄백 → callback
+- 청여자 → 참여자
+- 발화량/발화 량 → 발화량
+- 성숙 → 성수 (지역명일 경우)
+- 유아이유엑스 → UI/UX
+- 트랙 아이디/드랙 아이디 → 트랙 ID
+- AI 초언/AI 초원 → AI 조언
+- 화면분석 → 화면 분석
+- 고도화/고 도화 → 고도화
+- 의존성/일존성 → 의존성
+
+## STT 원본
 ${transcripts}
 
-핵심 키워드:`;
+## 교정된 키워드 (최대 5개)`;
 
         const result = await this.llmService.sendMessagePure(prompt, 100);
 
         // 결과 파싱: 줄바꿈으로 분리하고 정리
         const keywords = result
             .split('\n')
-            .map(line => line.trim().replace(/^[-•*\d.)\s]+/, '').trim())
-            .filter(kw =>
-                kw.length >= 2 &&
-                kw.length <= 20 &&  // 너무 긴 문장 제외
-                kw !== 'NONE' &&
-                !kw.includes(':') &&
-                !kw.includes('키워드') &&  // 설명 문구 제외
-                !kw.includes('추출') &&
-                !kw.includes('불가능') &&
-                !kw.includes('없습니다') &&
-                !kw.includes('명사')
+            .map(line =>
+                line
+                    .trim()
+                    .replace(/^[-•*\d.)\s]+/, '') // 앞 번호/기호 제거
+                    .replace(/[()[\]{}]/g, '') // 괄호 제거
+                    .replace(/[~～]/g, '') // 물결 제거
+                    .trim(),
             )
+            .filter(kw => {
+                // 추임새 목록
+                const fillerWords = ['네', '아', '음', '어', '응', '예', '뭐', '그', '저', '넵', '넹', '아...'];
+                return (
+                    kw.length >= 2 &&
+                    kw.length <= 20 && // 너무 긴 문장 제외
+                    kw !== 'NONE' &&
+                    !kw.includes(':') &&
+                    !kw.includes('키워드') &&
+                    !kw.includes('추출') &&
+                    !kw.includes('불가능') &&
+                    !kw.includes('없습니다') &&
+                    !kw.includes('명사') &&
+                    !kw.includes('입니다') &&
+                    !fillerWords.includes(kw)
+                );
+            })
             .slice(0, 5);
 
         return keywords;
@@ -4380,7 +4550,13 @@ ${transcripts}
      * @param startTime 발언 시작 시간 (동시발화 순서 보장용)
      * @param endTime 발언 종료 시간 (타임라인용, Clova STT에서 제공)
      */
-    private sendToRagForEmbedding(roomId: string, text: string, speaker: string, startTime: number | null = null, endTime: number | null = null): void {
+    private sendToRagForEmbedding(
+        roomId: string,
+        text: string,
+        speaker: string,
+        startTime: number | null = null,
+        endTime: number | null = null,
+    ): void {
         // 너무 짧은 텍스트 필터링 (3글자 이하)
         if (text.trim().length <= 3) {
             return;
@@ -4388,13 +4564,36 @@ ${transcripts}
 
         // 추임새 단어 목록 (단독으로 쓰일 때만 의미 없는 단어들)
         const fillerWords = new Set([
-            '음', '어', '아', '네', '응', '예', '오케이', '그래', '하하',
-            '뭐', '에', '으', '아아', '어어', '음음', '으으', '에에',
-            '네네', '응응', '예예', 'ㅋㅋ', 'ㅋㅋㅋ', '흠', '허', '헐'
+            '음',
+            '어',
+            '아',
+            '네',
+            '응',
+            '예',
+            '오케이',
+            '그래',
+            '하하',
+            '뭐',
+            '에',
+            '으',
+            '아아',
+            '어어',
+            '음음',
+            '으으',
+            '에에',
+            '네네',
+            '응응',
+            '예예',
+            'ㅋㅋ',
+            'ㅋㅋㅋ',
+            '흠',
+            '허',
+            '헐',
         ]);
 
         // 공백/구두점으로 단어 분리
-        const words = text.trim()
+        const words = text
+            .trim()
             .split(/[\s,.\?\!…]+/)
             .filter(w => w.length > 0);
 
@@ -4415,7 +4614,8 @@ ${transcripts}
         }
 
         // 비동기로 RAG에 전송 (응답 대기 없음)
-        this.ragClient.sendStatement(roomId, text, speaker, startTime, endTime)
+        this.ragClient
+            .sendStatement(roomId, text, speaker, startTime, endTime)
             .then(() => {
                 this.logger.debug(`[RAG 임베딩] 전송 완료: "${text.substring(0, 30)}..." by ${speaker}`);
             })
@@ -4432,13 +4632,16 @@ ${transcripts}
      * 이전 회의 컨텍스트 설정 (시연용)
      * AURA가 "지난 회의 브리핑해줘" 등에 응답할 때 사용
      */
-    setPreviousMeetingContext(roomId: string, context: {
-        meetingTitle: string;
-        summary: string;
-        keyDecisions: string[];
-        actionItems: string[];
-        date: string;
-    }): { success: boolean } {
+    setPreviousMeetingContext(
+        roomId: string,
+        context: {
+            meetingTitle: string;
+            summary: string;
+            keyDecisions: string[];
+            actionItems: string[];
+            date: string;
+        },
+    ): { success: boolean } {
         const roomContext = this.activeRooms.get(roomId);
         if (!roomContext) {
             this.logger.warn(`[이전 회의 컨텍스트] 방을 찾을 수 없음: ${roomId}`);
@@ -4528,11 +4731,7 @@ ${transcripts}
         }
 
         try {
-            const result = await this.opinionService.analyzeAndRespond(
-                roomId,
-                conversationContext,
-                userId,
-            );
+            const result = await this.opinionService.analyzeAndRespond(roomId, conversationContext, userId);
 
             if (!result.shouldSpeak || !result.response) {
                 this.logger.debug(`[AI 의견] 제시 조건 미충족: ${result.silenceReason || 'unknown'}`);
@@ -4544,17 +4743,16 @@ ${transcripts}
             // 의견 제시 발화
             context.botState = BotState.SPEAKING;
             await this.speakAndPublish(context, roomId, requestId, result.response);
-            context.botState = BotState.SLEEP;  // 의견 제시 후 다시 SLEEP으로
+            context.botState = BotState.SLEEP; // 의견 제시 후 다시 SLEEP으로
             context.lastResponseTime = Date.now();
 
             // DataChannel로 Evidence 정보 전송 (UI에서 출처 링크 표시용)
             if (result.evidence) {
                 const evidenceMessage = this.opinionService.formatForDataChannel(result.evidence);
                 const encoder = new TextEncoder();
-                await context.room.localParticipant.publishData(
-                    encoder.encode(JSON.stringify(evidenceMessage)),
-                    { reliable: true }
-                );
+                await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(evidenceMessage)), {
+                    reliable: true,
+                });
                 this.logger.log(`[DataChannel] Evidence 정보 전송: ${result.evidence.sourceName}`);
             }
 
@@ -4610,13 +4808,10 @@ ${transcripts}
         const encoder = new TextEncoder();
 
         // 호스트들에게만 전송
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(textCardMessage)),
-            {
-                reliable: true,
-                destination_identities: Array.from(context.hostIdentities)
-            }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(textCardMessage)), {
+            reliable: true,
+            destination_identities: Array.from(context.hostIdentities),
+        });
 
         this.logger.log(`[텍스트 카드] 호스트들에게 전송 완료 (${context.hostIdentities.size}명)`);
     }
@@ -4661,10 +4856,7 @@ ${transcripts}
     /**
      * 화면 컨텍스트 추가 (HTTP 엔드포인트에서 호출)
      */
-    addScreenContext(
-        roomId: string,
-        capture: ScreenCapture
-    ): { success: boolean; message: string } {
+    addScreenContext(roomId: string, capture: ScreenCapture): { success: boolean; message: string } {
         const context = this.activeRooms.get(roomId);
         if (!context) {
             this.logger.warn(`[화면 컨텍스트] 방 없음: ${roomId}`);
@@ -4686,7 +4878,7 @@ ${transcripts}
 
         this.logger.log(
             `[화면 컨텍스트] Room ${roomId}: 캡처 ${capture.captureIndex + 1} 추가 ` +
-            `(텍스트 길이: ${capture.extractedText.length}자, 총 ${context.screenContextHistory.length}개)`
+                `(텍스트 길이: ${capture.extractedText.length}자, 총 ${context.screenContextHistory.length}개)`,
         );
 
         // ★ Proactive 분석 시작 (첫 캡처 시)
@@ -4740,7 +4932,7 @@ ${transcripts}
             const time = new Date(capture.timestamp).toLocaleTimeString('ko-KR', {
                 hour: '2-digit',
                 minute: '2-digit',
-                second: '2-digit'
+                second: '2-digit',
             });
             prompt += `--- [캡처 ${capture.captureIndex + 1}] ${time} ---\n`;
             prompt += capture.extractedText.trim() || '(텍스트 없음)';
@@ -4771,10 +4963,7 @@ ${transcripts}
             return { isActive: false, captureCount: 0, totalTextLength: 0 };
         }
 
-        const totalTextLength = context.screenContextHistory.reduce(
-            (sum, c) => sum + c.extractedText.length,
-            0
-        );
+        const totalTextLength = context.screenContextHistory.reduce((sum, c) => sum + c.extractedText.length, 0);
 
         return {
             isActive: context.screenUnderstandingMode,
@@ -4846,9 +5035,7 @@ ${transcripts}
         }
 
         // 화면 텍스트 해시 생성 (최근 3개)
-        const recentScreenTexts = context.screenContextHistory
-            .slice(-3)
-            .map(c => c.extractedText);
+        const recentScreenTexts = context.screenContextHistory.slice(-3).map(c => c.extractedText);
 
         const currentScreenHash = this.proactiveAnalysisService.hashTexts(recentScreenTexts);
 
@@ -4952,11 +5139,13 @@ ${transcripts}
                     const participantName = participant.name || identity;
                     await this.sendSilentParticipantAlert(roomId, identity, participantName, silentDuration);
                     alreadyAlerted.add(identity);
-                    this.logger.log(`[Silent 감지] ${participantName} - ${Math.floor(silentDuration / 60000)}분 동안 발언 없음`);
+                    this.logger.log(
+                        `[Silent 감지] ${participantName} - ${Math.floor(silentDuration / 60000)}분 동안 발언 없음`,
+                    );
                 }
 
                 // 발언하면 알림 리셋
-                if (lastSttTime > 0 && (now - lastSttTime) < SILENT_THRESHOLD_MS) {
+                if (lastSttTime > 0 && now - lastSttTime < SILENT_THRESHOLD_MS) {
                     alreadyAlerted.delete(identity);
                 }
             }
@@ -4977,7 +5166,7 @@ ${transcripts}
         roomId: string,
         participantId: string,
         participantName: string,
-        silentDurationMs: number
+        silentDurationMs: number,
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context || !context.hostOnlyMode || context.hostIdentities.size === 0) return;
@@ -4993,15 +5182,14 @@ ${transcripts}
 
         const encoder = new TextEncoder();
 
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(alertMessage)),
-            {
-                reliable: true,
-                destination_identities: Array.from(context.hostIdentities)
-            }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(alertMessage)), {
+            reliable: true,
+            destination_identities: Array.from(context.hostIdentities),
+        });
 
-        this.logger.log(`[Silent 알림] ${participantName} (${Math.floor(silentDurationMs / 60000)}분) → 호스트들에게 전송`);
+        this.logger.log(
+            `[Silent 알림] ${participantName} (${Math.floor(silentDurationMs / 60000)}분) → 호스트들에게 전송`,
+        );
     }
 
     /**
@@ -5011,7 +5199,7 @@ ${transcripts}
         context: RoomContext,
         participantId: string,
         participantName: string,
-        durationMs: number
+        durationMs: number,
     ): void {
         const existing = context.participantSpeakingStats.get(participantId);
 
@@ -5097,13 +5285,10 @@ ${transcripts}
             const encoder = new TextEncoder();
 
             try {
-                await context.room.localParticipant.publishData(
-                    encoder.encode(JSON.stringify(statsMessage)),
-                    {
-                        reliable: true,
-                        destination_identities: Array.from(context.hostIdentities)
-                    }
-                );
+                await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(statsMessage)), {
+                    reliable: true,
+                    destination_identities: Array.from(context.hostIdentities),
+                });
 
                 // Dominant speaker 체크 (60% 이상, 2명 이상 참여자)
                 if (statsArray.length >= 2 && !context.dominantAlertSent) {
@@ -5118,31 +5303,29 @@ ${transcripts}
                             timestamp: Date.now(),
                         };
 
-                        await context.room.localParticipant.publishData(
-                            encoder.encode(JSON.stringify(dominantAlert)),
-                            {
-                                reliable: true,
-                                destination_identities: Array.from(context.hostIdentities)
-                            }
-                        );
+                        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(dominantAlert)), {
+                            reliable: true,
+                            destination_identities: Array.from(context.hostIdentities),
+                        });
 
                         context.dominantAlertSent = true;
-                        this.logger.log(`[Dominant 알림] ${topSpeaker.participantName} (${Math.round(topSpeaker.speakingRatio * 100)}%) → 호스트들에게 전송`);
+                        this.logger.log(
+                            `[Dominant 알림] ${topSpeaker.participantName} (${Math.round(topSpeaker.speakingRatio * 100)}%) → 호스트들에게 전송`,
+                        );
                     }
                 }
 
                 // 비율이 60% 미만으로 떨어지면 다시 알림 가능
                 if (statsArray.length >= 2 && context.dominantAlertSent) {
                     const topSpeaker = statsArray[0];
-                    if (topSpeaker.speakingRatio < DOMINANT_THRESHOLD - 0.1) { // 50% 미만이면 리셋
+                    if (topSpeaker.speakingRatio < DOMINANT_THRESHOLD - 0.1) {
+                        // 50% 미만이면 리셋
                         context.dominantAlertSent = false;
                     }
                 }
-
             } catch (error) {
                 this.logger.debug(`[발언 통계] 전송 실패: ${error.message}`);
             }
-
         }, STATS_INTERVAL_MS);
 
         // 인터벌 참조 저장 (cleanup용)
@@ -5226,11 +5409,7 @@ ${reportContent.substring(0, 1000)}
     /**
      * 논점 요약 전송 (호스트에게만)
      */
-    async sendTopicSummary(
-        roomId: string,
-        topic: string,
-        summary: string
-    ): Promise<void> {
+    async sendTopicSummary(roomId: string, topic: string, summary: string): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context || !context.hostOnlyMode || context.hostIdentities.size === 0) return;
 
@@ -5243,13 +5422,10 @@ ${reportContent.substring(0, 1000)}
 
         const encoder = new TextEncoder();
 
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(topicMessage)),
-            {
-                reliable: true,
-                destination_identities: Array.from(context.hostIdentities)
-            }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(topicMessage)), {
+            reliable: true,
+            destination_identities: Array.from(context.hostIdentities),
+        });
 
         this.logger.log(`[논점 요약] "${topic}" → 호스트들에게 전송`);
     }
@@ -5261,7 +5437,7 @@ ${reportContent.substring(0, 1000)}
     async broadcastAiState(
         roomId: string,
         state: 'idle' | 'listening' | 'processing' | 'speaking',
-        data?: { transcript?: string; response?: string }
+        data?: { transcript?: string; response?: string },
     ): Promise<void> {
         const context = this.activeRooms.get(roomId);
         if (!context) return;
@@ -5277,17 +5453,16 @@ ${reportContent.substring(0, 1000)}
         const encoder = new TextEncoder();
 
         // 모든 참여자에게 브로드캐스트 (시리 UI는 모두에게 보임)
-        await context.room.localParticipant.publishData(
-            encoder.encode(JSON.stringify(stateMessage)),
-            { reliable: true }
-        );
+        await context.room.localParticipant.publishData(encoder.encode(JSON.stringify(stateMessage)), {
+            reliable: true,
+        });
 
         this.logger.debug(`[AI 상태] ${state}`);
     }
 
-    /*    
- * Proactive 인사이트를 DataChannel로 전송
- */
+    /*
+     * Proactive 인사이트를 DataChannel로 전송
+     */
     private sendProactiveInsights(context: RoomContext, insights: ProactiveInsight[]): void {
         const message: ProactiveInsightMessage = {
             type: 'PROACTIVE_INSIGHT',
@@ -5304,9 +5479,7 @@ ${reportContent.substring(0, 1000)}
                 reliable: true,
             });
 
-            this.logger.log(
-                `[Proactive] 인사이트 전송: ${insights.map(i => i.type).join(', ')}`
-            );
+            this.logger.log(`[Proactive] 인사이트 전송: ${insights.map(i => i.type).join(', ')}`);
         } catch (error) {
             this.logger.error(`[Proactive] DataChannel 전송 실패: ${error.message}`);
         }
