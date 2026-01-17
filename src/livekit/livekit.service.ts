@@ -1,4 +1,12 @@
-import { Injectable, Logger, forwardRef, Inject } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+  forwardRef,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   AccessToken,
@@ -180,7 +188,7 @@ export class LivekitService {
 
     try {
       if (!roomId) {
-        throw new Error('roomId is required');
+        throw new BadRequestException('roomId is required');
       }
 
       // 방 존재 여부 확인
@@ -188,7 +196,7 @@ export class LivekitService {
       const room = allRooms.find(r => r.name === roomId);
       if (!room) {
         this.logger.error(`Room not found: ${roomId}`);
-        throw new Error('Room not found');
+        throw new NotFoundException('Room not found');
       }
 
       this.logger.log(`Joining room via LiveKit: ${this.livekitUrl}`);
@@ -206,7 +214,10 @@ export class LivekitService {
       if (error.cause) {
         this.logger.error(`Join cause: ${error.cause}`);
       }
-      throw new Error(`Failed to join room: ${error.message}`);
+      if (error instanceof BadRequestException || error instanceof NotFoundException) {
+        throw error;
+      }
+      throw new InternalServerErrorException(`Failed to join room: ${error.message}`);
     }
   }
 
