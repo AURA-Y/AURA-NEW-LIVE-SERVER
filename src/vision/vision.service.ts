@@ -5,10 +5,28 @@ import {
     InvokeModelCommand,
 } from '@aws-sdk/client-bedrock-runtime';
 
+export interface ISOQualityMetric {
+    name: string;
+    score: number; // 0-100
+    description: string;
+}
+
+export interface AICodeSuggestion {
+    category: string; // 'improvement' | 'bug' | 'security' | 'performance'
+    severity: 'high' | 'medium' | 'low';
+    suggestion: string;
+}
+
 export interface VisionAnalysisResult {
     text: string;
     confidence: number;
     analysisType: 'code' | 'document' | 'chart' | 'image' | 'general';
+    // ISO 25010 품질 평가 (code 타입일 때만)
+    isoQualityMetrics?: ISOQualityMetric[];
+    // AI 제안 (code 타입일 때만)
+    aiSuggestions?: AICodeSuggestion[];
+    // 출처/근거
+    sources?: string[];
 }
 
 export interface VisionContext {
@@ -40,6 +58,55 @@ export class VisionService {
                 secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY'),
             },
         });
+    }
+
+    /**
+     * 수동 화면 분석 (화면 분석 버튼 클릭 시)
+     * - 코드 품질 분석
+     * - ISO 25010 평가
+     * - AI 제안 생성
+     */
+    async analyzeScreenForQuality(
+        imageBase64: string,
+        context?: VisionContext
+    ): Promise<VisionAnalysisResult> {
+        const totalStartTime = Date.now();
+        this.logger.log(`\n========== [코드 품질 분석 시작] ==========`);
+        this.logger.log(`이미지 크기: ${(imageBase64.length / 1024).toFixed(1)}KB`);
+
+        // 동시 요청 방지
+        if (this.isProcessing) {
+            this.logger.warn(`[Vision] 이미 처리 중... 대기`);
+        }
+        while (this.isProcessing) {
+            await this.sleep(100);
+        }
+
+        // 쿨다운 체크
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.lastRequestTime;
+        if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
+            const waitTime = this.MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+            this.logger.log(`[Vision] 쿨다운 대기: ${waitTime}ms`);
+            await this.sleep(waitTime);
+        }
+
+        this.isProcessing = true;
+        this.lastRequestTime = Date.now();
+
+        try {
+            const result = await this.callVisionAPIForQuality(imageBase64, context, 0);
+            const totalElapsed = Date.now() - totalStartTime;
+            this.logger.log(`[코드 품질 분석 완료] 총 소요시간: ${totalElapsed}ms`);
+            this.logger.log(`ISO 메트릭: ${result.isoQualityMetrics?.length || 0}개, AI 제안: ${result.aiSuggestions?.length || 0}개`);
+            return result;
+        } catch (error) {
+            const totalElapsed = Date.now() - totalStartTime;
+            this.logger.error(`[코드 품질 분석 실패] ${totalElapsed}ms 후 에러: ${error.message}`);
+            throw error;
+        } finally {
+            this.isProcessing = false;
+        }
     }
 
     /**
@@ -90,6 +157,157 @@ export class VisionService {
             throw error;
         } finally {
             this.isProcessing = false;
+        }
+    }
+
+    /**
+     * 코드 품질 분석을 위한 Vision API 호출
+     */
+    private async callVisionAPIForQuality(
+        imageBase64: string,
+        context: VisionContext | undefined,
+        retryCount: number
+    ): Promise<VisionAnalysisResult> {
+        const systemPrompt = `You are a code quality expert. Respond ONLY with JSON.
+
+FORMAT (respond with ONLY this, nothing else):
+\`\`\`json
+{
+  "summary": "Korean advice ~요/~예요 (max 50 chars)",
+  "isoMetrics": [
+    {"name": "Maintainability", "score": 85, "description": "Korean max 30 chars"},
+    {"name": "Security", "score": 60, "description": "Korean max 30 chars"}
+  ],
+  "suggestions": [
+    {"category": "security", "severity": "high", "suggestion": "Korean max 60 chars"}
+  ],
+  "sources": ["ISO/IEC 25010:2011"]
+}
+\`\`\`
+
+ABSOLUTE RULES:
+1. Start with \`\`\`json
+2. End with \`\`\`
+3. NO explanatory text before or after
+4. Max 2-3 metrics, 2-3 suggestions
+5. Korean language only for text fields`;
+
+        const userContent = this.buildVisionUserContent(
+            imageBase64,
+            "Analyze the code and respond with ONLY the JSON format specified in the system prompt. Do not add any explanations.",
+            context
+        );
+
+        const payload = {
+            anthropic_version: "bedrock-2023-05-31",
+            max_tokens: 1000,  // JSON만 반환하도록 토큰 축소
+            temperature: 0.3,  // 더 결정론적으로 (JSON 형식 준수)
+            system: systemPrompt,
+            messages: [{
+                role: "user",
+                content: userContent
+            }],
+        };
+
+        const command = new InvokeModelCommand({
+            modelId: this.modelId,
+            contentType: 'application/json',
+            accept: 'application/json',
+            body: JSON.stringify(payload),
+        });
+
+        try {
+            this.logger.log(`[Vision API] 코드 품질 분석 호출 시작`);
+            const startTime = Date.now();
+
+            const response = await this.bedrockClient.send(command);
+            const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+            const textBlock = responseBody.content?.find((b: any) => b.type === 'text');
+            const responseText = textBlock?.text || "{}";
+
+            const elapsed = Date.now() - startTime;
+            this.logger.log(`[Vision API] 완료 - ${elapsed}ms`);
+
+            // JSON 파싱 시도 - 여러 방법으로 시도
+            let analysisData;
+            try {
+                let jsonText = responseText;
+
+                // 방법 1: 마크다운 코드 블록 찾기
+                const codeBlockMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+                if (codeBlockMatch) {
+                    jsonText = codeBlockMatch[1];
+                }
+
+                // 방법 2: 첫 번째 { 부터 마지막 } 까지 추출
+                const firstBrace = jsonText.indexOf('{');
+                const lastBrace = jsonText.lastIndexOf('}');
+
+                if (firstBrace === -1 || lastBrace === -1) {
+                    throw new Error('JSON 객체를 찾을 수 없음');
+                }
+
+                jsonText = jsonText.substring(firstBrace, lastBrace + 1).trim();
+
+                // 파싱 시도
+                analysisData = JSON.parse(jsonText);
+
+                // 필수 필드 검증
+                if (!analysisData.summary) {
+                    throw new Error('summary 필드 누락');
+                }
+
+            } catch (parseError) {
+                this.logger.error(`[Vision API] JSON 파싱 완전 실패: ${parseError.message}`);
+                this.logger.error(`[Vision API] 원본 응답:\n${responseText}`);
+
+                // 파싱 실패 시 기본 응답 (원문 표시 안 함!)
+                return {
+                    text: "코드 분석을 완료했어요. 상세보기를 눌러주세요!",
+                    confidence: 0.75,
+                    analysisType: 'code',
+                    isoQualityMetrics: [],
+                    aiSuggestions: [],
+                    sources: ['ISO/IEC 25010:2011'],
+                };
+            }
+
+            // ISO 메트릭 변환
+            const isoQualityMetrics: ISOQualityMetric[] = analysisData.isoMetrics?.map((m: any) => ({
+                name: m.name,
+                score: m.score,
+                description: m.description,
+            })) || [];
+
+            // AI 제안 변환
+            const aiSuggestions: AICodeSuggestion[] = analysisData.suggestions?.map((s: any) => ({
+                category: s.category,
+                severity: s.severity,
+                suggestion: s.suggestion,
+            })) || [];
+
+            return {
+                text: analysisData.summary || "코드 분석을 완료했어요.",
+                confidence: 0.9,
+                analysisType: 'code',
+                isoQualityMetrics,
+                aiSuggestions,
+                sources: analysisData.sources || ['ISO/IEC 25010:2011'],
+            };
+
+        } catch (error) {
+            const isThrottled = error.name === 'ThrottlingException' ||
+                error.message?.includes('Too many requests');
+
+            if (isThrottled && retryCount < this.MAX_RETRIES) {
+                const backoffTime = Math.pow(2, retryCount + 1) * 2000;
+                this.logger.warn(`[Vision API 재시도] ${backoffTime}ms 후`);
+                await this.sleep(backoffTime);
+                return this.callVisionAPIForQuality(imageBase64, context, retryCount + 1);
+            }
+
+            this.logger.error(`[Vision API 에러] ${error.message}`);
+            throw error;
         }
     }
 

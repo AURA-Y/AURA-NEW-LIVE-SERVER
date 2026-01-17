@@ -6,6 +6,7 @@ import { VoiceBotService } from './voice-bot.service';
 import { SttService } from '../stt/stt.service';
 import { LlmService } from '../llm/llm.service';
 import { TtsService } from '../tts/tts.service';
+import { VisionService } from '../vision/vision.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { EmbedFilesDto } from './dto/embed-files.dto';
@@ -19,6 +20,7 @@ export class LivekitController {
     private readonly sttService: SttService,
     private readonly llmService: LlmService,
     private readonly ttsService: TtsService,
+    private readonly visionService: VisionService,
     @Inject(RAG_CLIENT) private readonly ragClient: IRagClient,
   ) { }
 
@@ -87,6 +89,56 @@ export class LivekitController {
     } catch (error) {
       console.error(`[Vision HTTP] 에러: ${error.message}`);
       throw new HttpException(`Vision 캡처 처리 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // 화면 분석 (수동 트리거 - 화면 분석 버튼 클릭 시)
+  @Post('voice-bot/:roomId/analyze-screen')
+  async analyzeScreen(
+    @Param('roomId') roomId: string,
+    @Body() body: {
+      imageBase64: string;
+      cursorPosition?: { x: number; y: number };
+      highlightedText?: string;
+      screenWidth: number;
+      screenHeight: number;
+    }
+  ) {
+    const normalizedRoomId = roomId.trim();
+    console.log(`[화면 분석] 요청 - room: ${normalizedRoomId}, 크기: ${(body.imageBase64?.length / 1024).toFixed(1)}KB`);
+
+    try {
+      // 이미지 검증
+      const validation = this.visionService.validateAndCompressImage(body.imageBase64);
+      if (!validation.valid) {
+        throw new HttpException(validation.error || '이미지 검증 실패', HttpStatus.BAD_REQUEST);
+      }
+
+      // 코드 품질 분석 수행
+      const result = await this.visionService.analyzeScreenForQuality(
+        body.imageBase64,
+        {
+          cursorPosition: body.cursorPosition,
+          highlightedText: body.highlightedText,
+          screenWidth: body.screenWidth,
+          screenHeight: body.screenHeight,
+        }
+      );
+
+      console.log(`[화면 분석] 완료 - ISO 메트릭: ${result.isoQualityMetrics?.length || 0}개, AI 제안: ${result.aiSuggestions?.length || 0}개`);
+
+      return {
+        success: true,
+        text: result.text,
+        confidence: result.confidence,
+        analysisType: result.analysisType,
+        isoQualityMetrics: result.isoQualityMetrics || [],
+        aiSuggestions: result.aiSuggestions || [],
+        sources: result.sources || [],
+      };
+    } catch (error) {
+      console.error(`[화면 분석] 에러: ${error.message}`);
+      throw new HttpException(`화면 분석 실패: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
