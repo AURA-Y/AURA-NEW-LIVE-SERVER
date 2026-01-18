@@ -91,22 +91,20 @@ export class LivekitService {
    */
   private parseRoomMetadata(metadata: string | undefined): {
     topic: string;
-    description: string;
     createdBy: string;
   } {
     if (!metadata) {
-      return { topic: '', description: '', createdBy: '' };
+      return { topic: '', createdBy: '' };
     }
     try {
       const parsed = JSON.parse(metadata);
       // title → topic 마이그레이션 지원
       return {
         topic: parsed.topic || parsed.title || '',
-        description: parsed.description || '',
         createdBy: parsed.createdBy || '',
       };
     } catch {
-      return { topic: '', description: '', createdBy: '' };
+      return { topic: '', createdBy: '' };
     }
   }
 
@@ -114,7 +112,6 @@ export class LivekitService {
     const {
       userName,
       roomTopic,
-      description = '',
       maxParticipants = 20
     } = createRoomDto;
 
@@ -132,7 +129,6 @@ export class LivekitService {
       // 메타데이터에 표시용 정보 저장
       const metadata = JSON.stringify({
         topic: roomTopic,
-        description: description,
         createdBy: userName,
       });
       log(`메타데이터 준비 완료`);
@@ -167,7 +163,6 @@ export class LivekitService {
         roomId: room.name,
         roomUrl: `${wsUrl}/${room.name}`,
         roomTopic: roomTopic,
-        description: description,
         maxParticipants: room.maxParticipants,
         userName: userName,
         token: token,
@@ -230,7 +225,6 @@ export class LivekitService {
         return {
           roomId: room.name,
           roomTopic: meta.topic || room.name,
-          description: meta.description,
           maxParticipants: room.maxParticipants,
           createdBy: meta.createdBy,
           createdAt: new Date(Number(room.creationTime) * 1000).toISOString(),
@@ -302,7 +296,6 @@ export class LivekitService {
       return {
         roomId: room.name,
         roomTopic: meta.topic || room.name,
-        description: meta.description,
         maxParticipants: room.maxParticipants,
         createdBy: meta.createdBy,
         createdAt: new Date(Number(room.creationTime) * 1000).toISOString(),
@@ -413,13 +406,11 @@ export class LivekitService {
     roomId: string,
     files: { bucket: string; key: string }[],
     topic: string,
-    description?: string,
   ): Promise<{ success: boolean; message?: string }> {
     this.logger.log(`[파일 임베딩] roomId: ${roomId}, topic: ${topic}, files: ${files.length}개`);
 
     const result = await this.ragClient.startMeeting(roomId, {
       roomTopic: topic,
-      description: description || '',
       files,
     });
 
