@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { LivekitController, ApiController } from './livekit.controller';
 import { LivekitService } from './livekit.service';
 import { VoiceBotService } from './voice-bot.service';
+import { TimelineService } from './timeline.service';
 import { SttModule } from '../stt/stt.module';
 import { LlmModule } from '../llm/llm.module';
 import { TtsModule } from '../tts/tts.module';
@@ -16,7 +17,7 @@ import { CalendarModule } from '../calendar/calendar.module';
   imports: [SttModule, LlmModule, TtsModule, IntentModule, RagModule, VisionModule, AgentModule, PerplexityModule, CalendarModule],
 
   controllers: [LivekitController, ApiController],
-  providers: [LivekitService, VoiceBotService],
+  providers: [LivekitService, VoiceBotService, TimelineService],
   exports: [LivekitService, VoiceBotService],
 })
 export class LivekitModule { }
