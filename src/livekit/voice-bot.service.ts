@@ -3768,6 +3768,9 @@ ${edgesDesc}
             clearTimeout(context.shutdownTimeout);
         }
         this.activeRooms.delete(roomId);
+
+        // 타임라인 컨텍스트 버퍼 정리
+        this.timelineService.clearBuffer(roomId);
     }
 
     // ★ 대기 모드 진입 (요약 후 STT/응답 비활성화, 리소스 절약)
@@ -3822,6 +3825,10 @@ ${edgesDesc}
 
             await context.room.disconnect();
             this.activeRooms.delete(roomId);
+
+            // 타임라인 컨텍스트 버퍼 정리
+            this.timelineService.clearBuffer(roomId);
+
             this.logger.log(`[봇 종료] ${roomId}`);
         }
     }
