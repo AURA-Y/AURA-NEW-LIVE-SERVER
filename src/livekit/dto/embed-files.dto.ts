@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsArray, ValidateNested } from 'class-validator';
+import { IsString, IsNotEmpty, IsArray, ValidateNested, IsOptional } from 'class-validator';
 import { Type } from 'class-transformer';
 
 class FileReference {
@@ -9,6 +9,16 @@ class FileReference {
   @IsString()
   @IsNotEmpty()
   key: string;
+}
+
+class ExpectedAttendee {
+  @IsString()
+  @IsNotEmpty()
+  userId: string;
+
+  @IsString()
+  @IsNotEmpty()
+  nickName: string;
 }
 
 export class EmbedFilesDto {
@@ -24,4 +34,10 @@ export class EmbedFilesDto {
   @IsString()
   @IsNotEmpty()
   topic: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ExpectedAttendee)
+  @IsOptional()
+  expectedAttendees?: ExpectedAttendee[];  // 예정 참여자 (불참자 확인용)
 }
