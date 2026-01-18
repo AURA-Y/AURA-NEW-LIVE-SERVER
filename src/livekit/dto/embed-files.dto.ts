@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsArray, ValidateNested, IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, IsArray, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 class FileReference {
@@ -24,8 +24,4 @@ export class EmbedFilesDto {
   @IsString()
   @IsNotEmpty()
   topic: string;
-
-  @IsString()
-  @IsOptional()
-  description?: string;
 }
