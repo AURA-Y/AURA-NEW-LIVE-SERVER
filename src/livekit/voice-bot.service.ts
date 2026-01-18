@@ -52,6 +52,24 @@ interface ParticipantSpeakingStats {
     lastSpokenAt: number; // 마지막 발언 시간
 }
 
+// 다이어그램 컨텍스트 타입 (설계보드 자동 생성용)
+type DiagramType = 'flowchart' | 'sequence' | 'erd' | 'architecture';
+
+interface DiagramStatement {
+    speaker: string;
+    text: string;
+    keywords: string[];
+    timestamp: number;
+}
+
+interface DiagramContext {
+    keywords: string[]; // 감지된 키워드
+    statements: DiagramStatement[]; // 관련 발화
+    lastUpdated: number;
+}
+
+type DiagramContexts = Record<DiagramType, DiagramContext>;
+
 interface RoomContext {
     room: Room;
     audioSource: AudioSource;
@@ -174,6 +192,9 @@ interface RoomContext {
 
     // ★ 대기 모드 (요약 후 STT/응답 비활성화, 리소스 절약)
     standbyMode: boolean;
+
+    // ★ 다이어그램 컨텍스트 (설계보드 자동 생성용)
+    diagramContexts: DiagramContexts;
 }
 
 // 화면 캡처 컨텍스트 타입
@@ -197,6 +218,59 @@ export class VoiceBotService {
     private readonly FOLLOW_UP_WINDOW_MS = 15000; // 질문 후 15초간 웨이크워드 없이 응답 가능
     private readonly MAX_CONVERSATION_TURNS = 30; // 최근 30턴까지 기억
     private readonly CONVERSATION_EXPIRE_MS = 300000; // 5분 지나면 대화 리셋
+
+    // ★ 다이어그램 타입별 키워드 (설계보드 자동 생성용)
+    private readonly DIAGRAM_KEYWORDS: Record<DiagramType, string[]> = {
+        flowchart: [
+            // 순서/흐름
+            '먼저', '그 다음', '그리고', '마지막으로', '최종적으로',
+            '첫 번째', '두 번째', '세 번째',
+            // 조건/분기
+            '만약', '~하면', '~할 경우', '아니면', '그렇지 않으면',
+            // 반복
+            '반복', '계속', '~할 때까지',
+            // 프로세스
+            '단계', '과정', '절차', '순서', '흐름', '워크플로우',
+            // 동작
+            '시작', '종료', '처리', '검증', '확인', '저장', '전송',
+        ],
+        sequence: [
+            // 통신
+            'API', '호출', '요청', '응답', 'request', 'response',
+            // 시스템 간
+            '프론트엔드', '백엔드', '서버', '클라이언트', '데이터베이스',
+            // 상호작용
+            '전송', '수신', '반환', '리턴', '콜백', 'callback',
+            // 순서
+            '다음', '그 후', '이후', '완료되면', '성공하면', '실패하면',
+            // HTTP
+            'GET', 'POST', 'PUT', 'DELETE', 'PATCH',
+        ],
+        erd: [
+            // 엔티티
+            '테이블', '엔티티', 'entity', 'table',
+            // 관계
+            '관계', '참조', '외래키', 'foreign key', '일대다', '다대다', '일대일',
+            // 필드
+            '필드', '컬럼', 'column', '속성', 'attribute',
+            // 데이터
+            '데이터', '모델', 'model', '스키마', 'schema',
+            // CRUD
+            '저장', '조회', '수정', '삭제', '생성',
+        ],
+        architecture: [
+            // 구조
+            '아키텍처', '구조', '설계', '시스템',
+            // 컴포넌트
+            '컴포넌트', '모듈', '서비스', '레이어', 'layer',
+            // 패턴
+            '마이크로서비스', '모놀리식', 'MVC', 'MVP', 'MVVM',
+            // 인프라
+            '서버', '클라우드', 'AWS', 'GCP', 'Azure', '컨테이너', '도커',
+            // 통합
+            '연동', '통합', '인터페이스', '게이트웨이',
+        ],
+    };
 
     constructor(
         private configService: ConfigService,
@@ -956,6 +1030,8 @@ export class VoiceBotService {
                 },
                 // ★ 대기 모드 초기화
                 standbyMode: false,
+                // ★ 다이어그램 컨텍스트 초기화 (설계보드 자동 생성용)
+                diagramContexts: this.createEmptyDiagramContexts(),
             };
             this.activeRooms.set(roomId, context);
 
@@ -4628,6 +4704,141 @@ ${transcripts}
             .catch(err => {
                 this.logger.warn(`[RAG 임베딩 실패] ${err.message}`);
             });
+
+        // ★ 다이어그램 컨텍스트 업데이트 (설계보드 자동 생성용)
+        this.updateDiagramContexts(roomId, text, speaker);
+    }
+
+    // ============================================================
+    // 다이어그램 컨텍스트 관련 메서드 (설계보드 자동 생성)
+    // ============================================================
+
+    /**
+     * 빈 다이어그램 컨텍스트 생성
+     */
+    private createEmptyDiagramContexts(): DiagramContexts {
+        const createEmpty = (): DiagramContext => ({
+            keywords: [],
+            statements: [],
+            lastUpdated: 0,
+        });
+
+        return {
+            flowchart: createEmpty(),
+            sequence: createEmpty(),
+            erd: createEmpty(),
+            architecture: createEmpty(),
+        };
+    }
+
+    /**
+     * 발화에서 다이어그램 타입별 키워드 감지
+     */
+    private detectDiagramKeywords(text: string): Map<DiagramType, string[]> {
+        const result = new Map<DiagramType, string[]>();
+        const lowerText = text.toLowerCase();
+
+        for (const [type, keywords] of Object.entries(this.DIAGRAM_KEYWORDS)) {
+            const matchedKeywords = keywords.filter(keyword =>
+                lowerText.includes(keyword.toLowerCase()),
+            );
+            if (matchedKeywords.length > 0) {
+                result.set(type as DiagramType, matchedKeywords);
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * 다이어그램 컨텍스트 업데이트
+     */
+    private updateDiagramContexts(roomId: string, text: string, speaker: string): void {
+        const context = this.activeRooms.get(roomId);
+        if (!context) return;
+
+        const matchedTypes = this.detectDiagramKeywords(text);
+
+        // 키워드가 감지된 타입별로 컨텍스트 업데이트
+        for (const [type, keywords] of matchedTypes) {
+            const diagramContext = context.diagramContexts[type];
+
+            // 발화 추가
+            diagramContext.statements.push({
+                speaker,
+                text,
+                keywords,
+                timestamp: Date.now(),
+            });
+
+            // 키워드 목록 업데이트 (중복 제거)
+            const uniqueKeywords = new Set([...diagramContext.keywords, ...keywords]);
+            diagramContext.keywords = Array.from(uniqueKeywords);
+            diagramContext.lastUpdated = Date.now();
+
+            this.logger.debug(
+                `[다이어그램 컨텍스트] ${type} 업데이트 - 키워드: ${keywords.join(', ')}, 발화 수: ${diagramContext.statements.length}`,
+            );
+        }
+    }
+
+    /**
+     * 다이어그램 컨텍스트 조회 (MCP Controller에서 호출)
+     */
+    getDiagramContexts(roomId: string): DiagramContexts | null {
+        const context = this.activeRooms.get(roomId);
+        if (!context) {
+            this.logger.warn(`[다이어그램 컨텍스트] 방을 찾을 수 없음: ${roomId}`);
+            return null;
+        }
+        return context.diagramContexts;
+    }
+
+    /**
+     * 다이어그램 컨텍스트 요약 조회 (API 응답용)
+     */
+    getDiagramContextsSummary(roomId: string): Record<DiagramType, {
+        hasContent: boolean;
+        keywords: string[];
+        statementCount: number;
+        lastUpdated: number;
+    }> | null {
+        const contexts = this.getDiagramContexts(roomId);
+        if (!contexts) return null;
+
+        const summary: Record<string, any> = {};
+        for (const [type, ctx] of Object.entries(contexts)) {
+            summary[type] = {
+                hasContent: ctx.statements.length > 0,
+                keywords: ctx.keywords.slice(0, 10), // 상위 10개 키워드만
+                statementCount: ctx.statements.length,
+                lastUpdated: ctx.lastUpdated,
+            };
+        }
+        return summary as Record<DiagramType, any>;
+    }
+
+    /**
+     * 특정 다이어그램 타입의 포커스된 트랜스크립트 생성
+     */
+    buildFocusedTranscript(roomId: string, type: DiagramType): string | null {
+        const contexts = this.getDiagramContexts(roomId);
+        if (!contexts) return null;
+
+        const ctx = contexts[type];
+        if (ctx.statements.length === 0) return null;
+
+        // 시간순 정렬
+        const sortedStatements = [...ctx.statements].sort(
+            (a, b) => a.timestamp - b.timestamp,
+        );
+
+        // 포맷팅
+        const lines = sortedStatements.map(
+            s => `[${s.speaker}] ${s.text} (키워드: ${s.keywords.join(', ')})`,
+        );
+
+        return lines.join('\n');
     }
 
     // ============================================================
@@ -5095,7 +5306,7 @@ ${transcripts}
      * Silent Participant 주기적 체크 시작
      */
     private startSilentParticipantChecker(roomId: string): void {
-        const SILENT_THRESHOLD_MS = 30 * 1000; // 30초
+        const SILENT_THRESHOLD_MS = 60 * 1000; // 1분
         const CHECK_INTERVAL_MS = 15 * 1000; // 15초마다 체크
         const alreadyAlerted = new Set<string>(); // 이미 알린 참여자
 

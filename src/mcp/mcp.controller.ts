@@ -4,11 +4,12 @@
  * 설계 보드 상태 관리
  */
 
-import { Controller, Post, Body, Get, Param, Logger, Inject } from '@nestjs/common';
+import { Controller, Post, Body, Get, Param, Logger, Inject, forwardRef } from '@nestjs/common';
 import { McpService } from './mcp.service';
 import { ToolInput } from './types/tool.types';
 import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
 import { LlmService } from '../llm/llm.service';
+import { VoiceBotService } from '../livekit/voice-bot.service';
 
 // 요청 DTO
 interface GenerateDiagramDto {
@@ -64,6 +65,8 @@ export class McpController {
     private readonly mcpService: McpService,
     @Inject(RAG_CLIENT) private readonly ragClient: IRagClient,
     private readonly llmService: LlmService,
+    @Inject(forwardRef(() => VoiceBotService))
+    private readonly voiceBotService: VoiceBotService,
   ) {}
 
   /**
@@ -243,6 +246,33 @@ export class McpController {
   }
 
   /**
+   * 다이어그램 컨텍스트 조회 (설계보드 자동 생성용)
+   * GET /mcp/diagram-contexts/:roomId
+   */
+  @Get('diagram-contexts/:roomId')
+  async getDiagramContexts(@Param('roomId') roomId: string) {
+    try {
+      const summary = this.voiceBotService.getDiagramContextsSummary(roomId);
+
+      if (!summary) {
+        return {
+          success: false,
+          error: '방을 찾을 수 없습니다.',
+        };
+      }
+
+      return {
+        success: true,
+        contexts: summary,
+        lastUpdated: new Date().toISOString(),
+      };
+    } catch (error) {
+      this.logger.error(`[Diagram Contexts] Error: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * LLM이 트랜스크립트 분석해서 적합한 다이어그램 타입 결정
    */
   private async analyzeDiagramTypes(transcript: string): Promise<string[]> {
@@ -280,7 +310,7 @@ ${transcript}
   }
 
   /**
-   * 컨텍스트 기반 다이어그램 생성 (LLM이 적합한 타입 자동 선택)
+   * 컨텍스트 기반 다이어그램 생성 (키워드 컨텍스트 우선, LLM 분석 fallback)
    * POST /mcp/diagram/generate-from-context
    */
   @Post('diagram/generate-from-context')
@@ -299,9 +329,40 @@ ${transcript}
         };
       }
 
-      // 2. LLM이 적합한 다이어그램 타입 분석 (dto.diagramTypes 무시하고 자동 분석)
-      const diagramTypes = await this.analyzeDiagramTypes(transcript);
-      this.logger.log(`[Generate From Context] LLM 분석 결과: ${diagramTypes.join(', ') || '없음'}`);
+      // 2. 다이어그램 컨텍스트 조회 (키워드 기반)
+      const diagramContexts = this.voiceBotService.getDiagramContexts(dto.roomId);
+      const diagramContextsSummary = this.voiceBotService.getDiagramContextsSummary(dto.roomId);
+
+      // 3. 키워드 컨텍스트가 있는 타입 확인
+      const typesWithContext: string[] = [];
+      const typesWithoutContext: string[] = [];
+
+      const allTypes = ['flowchart', 'sequence', 'erd', 'architecture'] as const;
+
+      if (diagramContextsSummary) {
+        for (const type of allTypes) {
+          if (diagramContextsSummary[type].hasContent) {
+            typesWithContext.push(type);
+          }
+        }
+      }
+
+      this.logger.log(
+        `[Generate From Context] 키워드 컨텍스트 있는 타입: ${typesWithContext.join(', ') || '없음'}`,
+      );
+
+      // 4. 키워드 컨텍스트 없으면 LLM 분석으로 fallback
+      let diagramTypes: string[] = [];
+
+      if (typesWithContext.length > 0) {
+        diagramTypes = typesWithContext;
+      } else {
+        // LLM 분석
+        diagramTypes = await this.analyzeDiagramTypes(transcript);
+        this.logger.log(
+          `[Generate From Context] LLM 분석 결과: ${diagramTypes.join(', ') || '없음'}`,
+        );
+      }
 
       if (diagramTypes.length === 0) {
         return {
@@ -319,11 +380,32 @@ ${transcript}
 
       const diagrams: Record<string, string> = {};
 
-      // 3. 순차적으로 다이어그램 생성 (throttling 방지)
+      // 5. 순차적으로 다이어그램 생성
       for (const type of diagramTypes) {
+        // 키워드 컨텍스트가 있으면 포커스된 트랜스크립트 사용
+        let targetTranscript = transcript;
+
+        if (diagramContexts && typesWithContext.includes(type)) {
+          const focusedTranscript = this.voiceBotService.buildFocusedTranscript(
+            dto.roomId,
+            type as 'flowchart' | 'sequence' | 'erd' | 'architecture',
+          );
+          if (focusedTranscript) {
+            targetTranscript = focusedTranscript;
+            this.logger.log(
+              `[Generate From Context] ${type}: 포커스된 트랜스크립트 사용 (${focusedTranscript.length}자)`,
+            );
+          }
+        }
+
         const input: ToolInput = {
-          transcript,
-          context: { roomId: dto.roomId },
+          transcript: targetTranscript,
+          context: {
+            roomId: dto.roomId,
+            // 키워드 정보 전달 (프롬프트 최적화용)
+            keywords: diagramContextsSummary?.[type]?.keywords || [],
+            useFocusedContext: typesWithContext.includes(type),
+          },
         };
 
         const result = await this.mcpService.generateDiagram(type, input);
@@ -334,7 +416,9 @@ ${transcript}
       }
 
       const elapsed = Date.now() - startTime;
-      this.logger.log(`[Generate From Context] 완료 - ${elapsed}ms, 생성된 다이어그램: ${Object.keys(diagrams).join(', ') || '없음'}`);
+      this.logger.log(
+        `[Generate From Context] 완료 - ${elapsed}ms, 생성된 다이어그램: ${Object.keys(diagrams).join(', ') || '없음'}`,
+      );
 
       return {
         success: true,
@@ -343,6 +427,7 @@ ${transcript}
         context: {
           roomId: dto.roomId,
           transcript,
+          keywords: diagramContextsSummary,
           lastUpdated: new Date().toISOString(),
         },
         elapsed,

@@ -14,6 +14,9 @@ export interface ToolContext {
   channelId?: string;
   participants?: string[];
   topic?: string;
+  // 다이어그램 컨텍스트 기반 생성용
+  keywords?: string[];
+  useFocusedContext?: boolean;
 }
 
 // 도구 출력

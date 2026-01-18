@@ -11,6 +11,7 @@ import {
   ArchitectureData,
 } from '../types/tool.types';
 
+// 기본 프롬프트
 const ARCHITECTURE_PROMPT = `당신은 회의 내용을 분석하여 시스템 아키텍처 다이어그램 데이터를 생성하는 전문가입니다.
 
 주어진 회의 내용에서 시스템 구성요소와 연결관계를 추출하여 JSON 형식의 아키텍처 데이터로 변환하세요.
@@ -59,6 +60,67 @@ const ARCHITECTURE_PROMPT = `당신은 회의 내용을 분석하여 시스템 �
 회의 내용:
 `;
 
+// 포커스된 컨텍스트용 프롬프트 (키워드 기반)
+function buildFocusedPrompt(keywords: string[]): string {
+  return `당신은 회의 내용을 분석하여 시스템 아키텍처 다이어그램 데이터를 생성하는 전문가입니다.
+
+다음은 회의에서 시스템 아키텍처와 관련된 발화들입니다.
+감지된 키워드를 중심으로 아키텍처 다이어그램을 생성해주세요.
+
+## 감지된 키워드
+${keywords.join(', ')}
+
+## 요구사항
+1. 주요 컴포넌트/서비스 식별
+2. 레이어 구분 (프레젠테이션, 비즈니스, 데이터)
+3. 컴포넌트 간 연결/의존성 표현
+4. 외부 시스템 연동 포함
+
+## 규칙
+1. 노드 타입:
+   - client: 클라이언트 (웹, 모바일, 데스크톱)
+   - server: 서버/API
+   - database: 데이터베이스
+   - cache: 캐시 (Redis, Memcached)
+   - queue: 메시지 큐 (Kafka, RabbitMQ)
+   - external: 외부 서비스 (AWS, GCP, 3rd party)
+   - loadbalancer: 로드밸런서/게이트웨이
+
+2. 그룹(group):
+   - 논리적 그룹핑 (예: "Frontend", "Backend", "Data Layer")
+   - 선택적 속성
+
+3. 연결(Connection):
+   - protocol: 통신 프로토콜 (HTTP, gRPC, WebSocket, TCP 등)
+   - label: 연결 설명
+
+4. 출력 형식 (반드시 JSON만 출력):
+{
+  "nodes": [
+    { "id": "web", "name": "Web App", "type": "client", "group": "Frontend" },
+    { "id": "mobile", "name": "Mobile App", "type": "client", "group": "Frontend" },
+    { "id": "lb", "name": "Load Balancer", "type": "loadbalancer" },
+    { "id": "api1", "name": "API Server 1", "type": "server", "group": "Backend" },
+    { "id": "api2", "name": "API Server 2", "type": "server", "group": "Backend" },
+    { "id": "redis", "name": "Redis", "type": "cache", "group": "Data" },
+    { "id": "postgres", "name": "PostgreSQL", "type": "database", "group": "Data" },
+    { "id": "s3", "name": "AWS S3", "type": "external" }
+  ],
+  "connections": [
+    { "from": "web", "to": "lb", "protocol": "HTTPS" },
+    { "from": "mobile", "to": "lb", "protocol": "HTTPS" },
+    { "from": "lb", "to": "api1", "protocol": "HTTP" },
+    { "from": "lb", "to": "api2", "protocol": "HTTP" },
+    { "from": "api1", "to": "redis", "protocol": "TCP", "label": "Session" },
+    { "from": "api1", "to": "postgres", "protocol": "TCP" },
+    { "from": "api1", "to": "s3", "protocol": "HTTPS", "label": "File Upload" }
+  ]
+}
+
+관련 발화:
+`;
+}
+
 export const architectureTool: McpTool = {
   name: 'architecture',
   description: '시스템 구성요소와 연결을 아키텍처 다이어그램으로 시각화',
@@ -66,7 +128,11 @@ export const architectureTool: McpTool = {
   keywords: ['아키텍처', 'architecture', '시스템', '구성', '인프라', '서버', '구조'],
 
   async execute(input: ToolInput, llmCall: LlmCallFn): Promise<ToolOutput> {
-    const prompt = ARCHITECTURE_PROMPT + input.transcript;
+    // 포커스된 컨텍스트 여부에 따라 프롬프트 선택
+    const useFocused = input.context?.useFocusedContext && input.context?.keywords?.length > 0;
+    const prompt = useFocused
+      ? buildFocusedPrompt(input.context!.keywords!) + input.transcript
+      : ARCHITECTURE_PROMPT + input.transcript;
 
     const response = await llmCall(prompt, 3000);
 

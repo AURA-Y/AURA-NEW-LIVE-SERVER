@@ -11,6 +11,7 @@ import {
   ERDData,
 } from '../types/tool.types';
 
+// 기본 프롬프트
 const ERD_PROMPT = `당신은 회의 내용을 분석하여 ERD(Entity Relationship Diagram) 데이터를 생성하는 전문가입니다.
 
 주어진 회의 내용에서 데이터 모델, 엔티티, 관계를 추출하여 JSON 형식의 ERD 데이터로 변환하세요.
@@ -65,6 +66,73 @@ const ERD_PROMPT = `당신은 회의 내용을 분석하여 ERD(Entity Relations
 회의 내용:
 `;
 
+// 포커스된 컨텍스트용 프롬프트 (키워드 기반)
+function buildFocusedPrompt(keywords: string[]): string {
+  return `당신은 회의 내용을 분석하여 ERD(Entity Relationship Diagram) 데이터를 생성하는 전문가입니다.
+
+다음은 회의에서 데이터 모델과 관련된 발화들입니다.
+감지된 키워드를 중심으로 ERD를 생성해주세요.
+
+## 감지된 키워드
+${keywords.join(', ')}
+
+## 요구사항
+1. 엔티티(테이블) 식별
+2. 각 엔티티의 주요 속성 정의
+3. 엔티티 간 관계 (1:1, 1:N, N:M) 표현
+4. PK/FK 관계 명시
+
+## 규칙
+1. 테이블 명명:
+   - PascalCase 사용 (예: User, OrderItem)
+   - 복수형 피하기 (Users X → User O)
+
+2. 컬럼 속성:
+   - pk: Primary Key 여부
+   - fk: Foreign Key 참조 테이블 (예: "User")
+   - nullable: NULL 허용 여부
+
+3. 관계 타입:
+   - 1:1 (일대일)
+   - 1:N (일대다)
+   - N:M (다대다)
+
+4. 필수 컬럼:
+   - id (PK)
+   - createdAt, updatedAt (타임스탬프)
+
+5. 출력 형식 (반드시 JSON만 출력):
+{
+  "tables": [
+    {
+      "name": "User",
+      "columns": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "email", "type": "varchar(255)", "nullable": false },
+        { "name": "name", "type": "varchar(100)", "nullable": false },
+        { "name": "createdAt", "type": "timestamp", "nullable": false },
+        { "name": "updatedAt", "type": "timestamp", "nullable": false }
+      ]
+    },
+    {
+      "name": "Order",
+      "columns": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "userId", "type": "uuid", "fk": "User", "nullable": false },
+        { "name": "status", "type": "varchar(20)", "nullable": false },
+        { "name": "totalAmount", "type": "decimal(10,2)", "nullable": false }
+      ]
+    }
+  ],
+  "relations": [
+    { "from": "User", "to": "Order", "type": "1:N", "label": "has" }
+  ]
+}
+
+관련 발화:
+`;
+}
+
 export const erdTool: McpTool = {
   name: 'erd',
   description: '데이터 모델/엔티티 관계를 ERD로 시각화',
@@ -72,7 +140,11 @@ export const erdTool: McpTool = {
   keywords: ['ERD', 'erd', '데이터베이스', 'DB', '테이블', '엔티티', '관계', '스키마', '모델'],
 
   async execute(input: ToolInput, llmCall: LlmCallFn): Promise<ToolOutput> {
-    const prompt = ERD_PROMPT + input.transcript;
+    // 포커스된 컨텍스트 여부에 따라 프롬프트 선택
+    const useFocused = input.context?.useFocusedContext && input.context?.keywords?.length > 0;
+    const prompt = useFocused
+      ? buildFocusedPrompt(input.context!.keywords!) + input.transcript
+      : ERD_PROMPT + input.transcript;
 
     const response = await llmCall(prompt, 3000);
 

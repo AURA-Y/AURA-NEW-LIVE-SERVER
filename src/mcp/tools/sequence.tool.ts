@@ -11,6 +11,7 @@ import {
   SequenceData,
 } from '../types/tool.types';
 
+// 기본 프롬프트
 const SEQUENCE_PROMPT = `당신은 회의 내용을 분석하여 시퀀스 다이어그램 데이터를 생성하는 전문가입니다.
 
 주어진 회의 내용에서 시스템/컴포넌트 간의 상호작용을 추출하여 JSON 형식의 시퀀스 다이어그램 데이터로 변환하세요.
@@ -52,6 +53,60 @@ const SEQUENCE_PROMPT = `당신은 회의 내용을 분석하여 시퀀스 다�
 회의 내용:
 `;
 
+// 포커스된 컨텍스트용 프롬프트 (키워드 기반)
+function buildFocusedPrompt(keywords: string[]): string {
+  return `당신은 회의 내용을 분석하여 시퀀스 다이어그램 데이터를 생성하는 전문가입니다.
+
+다음은 회의에서 시스템 간 상호작용과 관련된 발화들입니다.
+감지된 키워드를 중심으로 시퀀스 다이어그램을 생성해주세요.
+
+## 감지된 키워드
+${keywords.join(', ')}
+
+## 요구사항
+1. 참여 시스템/컴포넌트 식별 (프론트엔드, 백엔드, DB 등)
+2. API 호출 순서대로 메시지 정의
+3. 요청-응답 패턴 표현
+4. 조건부 분기가 있으면 alt/opt 블록 고려
+
+## 규칙
+1. Actor 타입:
+   - user: 사용자/클라이언트
+   - frontend: 프론트엔드 (웹, 앱)
+   - backend: 백엔드 서버/API
+   - database: 데이터베이스
+   - external: 외부 서비스 (결제, 알림 등)
+
+2. Message 타입:
+   - sync: 동기 호출 (실선 화살표 →)
+   - async: 비동기 호출 (점선 화살표 -→)
+   - response: 응답 (점선 화살표 ←--)
+
+3. 메시지 순서:
+   - 시간순으로 배열
+   - 요청-응답 쌍을 명확히
+
+4. 출력 형식 (반드시 JSON만 출력):
+{
+  "actors": [
+    { "id": "user", "name": "사용자", "type": "user" },
+    { "id": "fe", "name": "Frontend", "type": "frontend" },
+    { "id": "api", "name": "API Server", "type": "backend" },
+    { "id": "db", "name": "Database", "type": "database" }
+  ],
+  "messages": [
+    { "id": "m1", "from": "user", "to": "fe", "label": "로그인 버튼 클릭", "type": "sync" },
+    { "id": "m2", "from": "fe", "to": "api", "label": "POST /auth/login", "type": "sync" },
+    { "id": "m3", "from": "api", "to": "db", "label": "SELECT user", "type": "sync" },
+    { "id": "m4", "from": "db", "to": "api", "label": "user data", "type": "response" },
+    { "id": "m5", "from": "api", "to": "fe", "label": "JWT token", "type": "response" }
+  ]
+}
+
+관련 발화:
+`;
+}
+
 export const sequenceTool: McpTool = {
   name: 'sequence',
   description: '시스템/컴포넌트 간 상호작용을 시퀀스 다이어그램으로 시각화',
@@ -59,7 +114,11 @@ export const sequenceTool: McpTool = {
   keywords: ['시퀀스', 'sequence', '상호작용', 'API', '호출', '요청', '응답', '흐름'],
 
   async execute(input: ToolInput, llmCall: LlmCallFn): Promise<ToolOutput> {
-    const prompt = SEQUENCE_PROMPT + input.transcript;
+    // 포커스된 컨텍스트 여부에 따라 프롬프트 선택
+    const useFocused = input.context?.useFocusedContext && input.context?.keywords?.length > 0;
+    const prompt = useFocused
+      ? buildFocusedPrompt(input.context!.keywords!) + input.transcript
+      : SEQUENCE_PROMPT + input.transcript;
 
     const response = await llmCall(prompt, 2000);
 
