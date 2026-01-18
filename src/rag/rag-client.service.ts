@@ -297,6 +297,9 @@ export class RagClientService implements OnModuleDestroy {
         try {
             context.ws.send(JSON.stringify(message));
             this.logger.log(`[RAG 발언 전송] ${roomId} - 화자: ${speaker}, "${text.substring(0, 30)}..."`);
+
+            // ★ 전송 성공 시에도 로컬 버퍼에 저장 (플로우차트 생성용)
+            this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
         } catch (error: any) {
             this.logger.error(`[RAG 발언 전송 실패] ${roomId}: ${error.message}`);
 
