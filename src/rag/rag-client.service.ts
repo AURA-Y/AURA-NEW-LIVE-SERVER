@@ -296,7 +296,12 @@ export class RagClientService implements OnModuleDestroy {
 
         try {
             context.ws.send(JSON.stringify(message));
+            // WebSocket 전송 성공 시에도 로컬 버퍼에 저장 (Single Source of Truth 유지)
+            this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
             this.logger.log(`[RAG 발언 전송] ${roomId} - 화자: ${speaker}, "${text.substring(0, 30)}..."`);
+
+            // ★ 전송 성공 시에도 로컬 버퍼에 저장 (플로우차트 생성용)
+            this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
         } catch (error: any) {
             this.logger.error(`[RAG 발언 전송 실패] ${roomId}: ${error.message}`);
 
@@ -828,7 +833,8 @@ export class RagClientService implements OnModuleDestroy {
     }
 
     /**
-     * 버퍼 내용을 포맷된 트랜스크립트로 반환 (플로우차트 생성용)
+     * 로컬 버퍼에서 트랜스크립트를 가져와 포맷된 형태로 반환 (플로우차트 생성용)
+     * WebSocket 전송 시에도 로컬 버퍼에 저장하므로 항상 최신 데이터 보장
      */
     getFormattedTranscript(roomId: string): string {
         const buffer = this.statementBuffers.get(roomId);

@@ -14,6 +14,26 @@ export class UploadService {
   private readonly s3SecretKey: string;
   private readonly s3Prefix: string = 'rooms/';
 
+  /**
+   * 파일명 디코딩 (multer가 Latin-1로 해석한 UTF-8 복구)
+   */
+  private decodeFileName(name: string): string {
+    if (!name) return name;
+
+    try {
+      const bytes = Buffer.from(name, 'latin1');
+      const decoded = bytes.toString('utf8');
+      // 유효한 한글이 포함되어 있으면 복구된 것
+      if (/[가-힣]/.test(decoded)) {
+        return decoded;
+      }
+    } catch {
+      // 복구 실패 시 원본 반환
+    }
+
+    return name;
+  }
+
   constructor(private configService: ConfigService) {
     this.s3Bucket = this.configService.get<string>('AURA_S3_BUCKET') || 'aura-raw-data-bucket';
     this.s3Region = this.configService.get<string>('AWS_REGION') || 'ap-northeast-2';
@@ -54,12 +74,15 @@ export class UploadService {
       throw new Error('S3 not configured');
     }
 
+    // 파일명 디코딩 (multer Latin-1 → UTF-8)
+    const decodedFileName = this.decodeFileName(file.originalname);
+
     const timestamp = Date.now();
     // 원본 파일명 유지하면서 충돌 방지
-    const safeFileName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const safeFileName = decodedFileName.replace(/[^a-zA-Z0-9._-]/g, '_');
     const s3Key = `${this.s3Prefix}${roomId}/attachments/${timestamp}-${safeFileName}`;
 
-    this.logger.log(`[Upload] Uploading chat file: ${file.originalname} (${file.size} bytes)`);
+    this.logger.log(`[Upload] Uploading chat file: ${decodedFileName} (${file.size} bytes)`);
 
     try {
       await this.s3Client.send(
@@ -69,7 +92,7 @@ export class UploadService {
           Body: file.buffer,
           ContentType: file.mimetype || 'application/octet-stream',
           Metadata: {
-            originalName: encodeURIComponent(file.originalname),
+            originalName: encodeURIComponent(decodedFileName),
             uploaderName: uploaderName ? encodeURIComponent(uploaderName) : 'unknown',
             roomId: roomId,
           },
@@ -84,7 +107,7 @@ export class UploadService {
         new GetObjectCommand({
           Bucket: this.s3Bucket,
           Key: s3Key,
-          ResponseContentDisposition: `attachment; filename="${encodeURIComponent(file.originalname)}"`,
+          ResponseContentDisposition: `attachment; filename="${encodeURIComponent(decodedFileName)}"`,
         }),
         { expiresIn: 3600 },
       );
@@ -94,7 +117,7 @@ export class UploadService {
       return {
         fileUrl,
         downloadUrl,
-        fileName: file.originalname,
+        fileName: decodedFileName,
         fileSize: file.size,
         contentType: file.mimetype || 'application/octet-stream',
       };
