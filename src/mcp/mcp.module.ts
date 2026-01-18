@@ -14,9 +14,10 @@ import { McpClientService } from './client/mcp-client.service';
 import { McpConfigService } from './client/mcp-config.service';
 import { LlmModule } from '../llm/llm.module';
 import { RagModule } from '../rag/rag.module';
+import { LivekitModule } from '../livekit/livekit.module';
 
 @Module({
-  imports: [LlmModule, RagModule],
+  imports: [LlmModule, RagModule, LivekitModule],
   controllers: [McpController],
   providers: [
     McpService,

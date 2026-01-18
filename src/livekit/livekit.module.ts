@@ -17,8 +17,7 @@ import { CalendarModule } from '../calendar/calendar.module';
 
   controllers: [LivekitController, ApiController],
   providers: [LivekitService, VoiceBotService],
-  exports: [LivekitService],
+  exports: [LivekitService, VoiceBotService],
 })
 export class LivekitModule { }
-
 
