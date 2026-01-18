@@ -319,7 +319,7 @@ ${transcript}
     this.logger.log(`[Generate From Context] room: ${dto.roomId}`);
 
     try {
-      // 1. RAG 버퍼에서 트랜스크립트 가져오기
+      // 1. 로컬 버퍼에서 트랜스크립트 가져오기
       const transcript = this.ragClient.getFormattedTranscript(dto.roomId);
 
       if (!transcript || transcript.trim().length === 0) {
