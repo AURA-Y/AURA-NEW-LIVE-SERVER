@@ -402,9 +402,15 @@ export class VoiceBotService {
         room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
             this.logger.log(`[참여자 퇴장] ${participant.identity}`);
 
+            // 참여자 발화 통계에서 제거
+            const context = this.activeRooms.get(roomId);
+            if (context) {
+                context.participantSpeakingStats.delete(participant.identity);
+                this.logger.log(`[참여자 퇴장] ${participant.identity} 발화 통계 삭제 완료`);
+            }
+
             // RAG 서버에 참여자 퇴장 전송 (AI 봇 제외)
             if (!participant.identity.startsWith('ai-bot')) {
-                const context = this.activeRooms.get(roomId);
                 if (context?.hostOnlyMode) {
                     this.ragClient.participantLeft(roomId, participant.identity).catch(err => {
                         this.logger.warn(`[RAG 참여자 퇴장] 전송 실패: ${err.message}`);
