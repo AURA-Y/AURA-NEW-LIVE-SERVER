@@ -261,10 +261,10 @@ export class LivekitController {
 
   @Post('embed-files')
   async embedFiles(@Body() embedFilesDto: EmbedFilesDto) {
-    const { roomId, files, topic, expectedAttendees } = embedFilesDto;
+    const { roomId, files, topic, expectedAttendees, channelId, referencedRoomIds } = embedFilesDto;
 
     try {
-      const result = await this.livekitService.embedFiles(roomId, files, topic, expectedAttendees);
+      const result = await this.livekitService.embedFiles(roomId, files, topic, expectedAttendees, channelId, referencedRoomIds);
       return {
         success: result.success,
         roomId,

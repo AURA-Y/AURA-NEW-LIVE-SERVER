@@ -407,13 +407,17 @@ export class LivekitService {
     files: { bucket: string; key: string }[],
     topic: string,
     expectedAttendees?: { userId: string; nickName: string }[],
+    channelId?: string,
+    referencedRoomIds?: string[],
   ): Promise<{ success: boolean; message?: string }> {
-    this.logger.log(`[파일 임베딩] roomId: ${roomId}, topic: ${topic}, files: ${files.length}개, expectedAttendees: ${expectedAttendees?.length || 0}명`);
+    this.logger.log(`[파일 임베딩] roomId: ${roomId}, topic: ${topic}, files: ${files.length}개, expectedAttendees: ${expectedAttendees?.length || 0}명, channelId: ${channelId || 'N/A'}, referencedRoomIds: ${referencedRoomIds?.length || 0}개`);
 
     const result = await this.ragClient.startMeeting(roomId, {
       roomTopic: topic,
       files,
       expectedAttendees: expectedAttendees || [],  // 예정 참여자 (불참자 확인용)
+      channelId,  // 채널 ID (이전 회의록 검색용)
+      referencedRoomIds: referencedRoomIds || [],  // Step 1에서 선택한 이전 회의록 ID 목록
     });
 
     return result;
