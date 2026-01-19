@@ -40,4 +40,8 @@ export class EmbedFilesDto {
   @Type(() => ExpectedAttendee)
   @IsOptional()
   expectedAttendees?: ExpectedAttendee[];  // 예정 참여자 (불참자 확인용)
+
+  @IsString()
+  @IsOptional()
+  channelId?: string;  // 채널 ID (이전 회의록 검색용)
 }
