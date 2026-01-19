@@ -406,12 +406,14 @@ export class LivekitService {
     roomId: string,
     files: { bucket: string; key: string }[],
     topic: string,
+    expectedAttendees?: { userId: string; nickName: string }[],
   ): Promise<{ success: boolean; message?: string }> {
-    this.logger.log(`[파일 임베딩] roomId: ${roomId}, topic: ${topic}, files: ${files.length}개`);
+    this.logger.log(`[파일 임베딩] roomId: ${roomId}, topic: ${topic}, files: ${files.length}개, expectedAttendees: ${expectedAttendees?.length || 0}명`);
 
     const result = await this.ragClient.startMeeting(roomId, {
       roomTopic: topic,
       files,
+      expectedAttendees: expectedAttendees || [],  // 예정 참여자 (불참자 확인용)
     });
 
     return result;
