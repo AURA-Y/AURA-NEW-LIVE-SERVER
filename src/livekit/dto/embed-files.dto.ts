@@ -26,6 +26,10 @@ export class EmbedFilesDto {
   @IsNotEmpty()
   roomId: string;
 
+  @IsString()
+  @IsOptional()
+  channelId?: string;  // GitHub Project 등록 등에 사용
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => FileReference)
