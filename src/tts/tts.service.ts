@@ -7,7 +7,6 @@ export class TtsService {
     private readonly azureKey: string;
     private readonly azureRegion: string;
     private readonly voiceName = 'ko-KR-SunHiNeural';
-    private styleMode: string | null = null;
 
     constructor(private configService: ConfigService) {
         this.azureKey = this.configService.get<string>('AZURE_SPEECH_KEY') || '';
@@ -67,57 +66,28 @@ export class TtsService {
             'User-Agent': 'aura-voice-bot',
         };
 
-        const style = this.pickStyle();
-        const primary = style ? this.buildSsmlWithStyle(text, style) : this.buildSsml(text);
-
-        const primaryResponse = await fetch(url, {
-            method: 'POST',
-            headers,
-            body: primary,
-        });
-
-        if (primaryResponse.ok) {
-            if (style) {
-                this.styleMode = style;
-            }
-            const arrayBuffer = await primaryResponse.arrayBuffer();
-            return Buffer.from(arrayBuffer);
-        }
-
-        // 스타일 미지원 등 실패 시 기본 SSML로 재시도
-        if (style) {
-            this.styleMode = 'none';
-        }
-
-        const fallbackResponse = await fetch(url, {
+        const response = await fetch(url, {
             method: 'POST',
             headers,
             body: this.buildSsml(text),
         });
 
-        if (!fallbackResponse.ok) {
-            const errorText = await fallbackResponse.text();
-            throw new Error(`Azure TTS failed: ${fallbackResponse.status} ${errorText}`);
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Azure TTS failed: ${response.status} ${errorText}`);
         }
 
-        const fallbackBuffer = await fallbackResponse.arrayBuffer();
-        return Buffer.from(fallbackBuffer);
+        const arrayBuffer = await response.arrayBuffer();
+        return Buffer.from(arrayBuffer);
     }
 
-  // 1. buildSsml - prosody 제거
-  private buildSsml(text: string): string {
-      const normalized = this.normalizeSpeech(text);
-      const escaped = this.escapeSsml(normalized);
-      return `<speak version="1.0" xml:lang="ko-KR"><voice name="${this.voiceName}">${escaped}</voice></speak>`;
-  }
-
-  // 2. pickStyle - 항상 null 반환 (style 비활성화)
-  private pickStyle(): string | null {
-      return null;
-  }
+    private buildSsml(text: string): string {
+        const normalized = this.normalizeSpeech(text);
+        const escaped = this.escapeSsml(normalized);
+        return `<speak version="1.0" xml:lang="ko-KR"><voice name="${this.voiceName}">${escaped}</voice></speak>`;
+    }
 
     private normalizeSpeech(text: string): string {
-        // 마크다운 포맷 및 이모티콘 제거 (TTS가 읽지 않도록)
         return this.stripMarkdown(text);
     }
 
@@ -131,8 +101,8 @@ export class TtsService {
             .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
             // Strikethrough: ~~text~~
             .replace(/~~([^~]+)~~/g, '$1')
-            // Inline code: `code`
-            .replace(/`([^`]+)`/g, '$1')
+            // Inline code: \`code\`
+            .replace(/\`([^\`]+)\`/g, '$1')
             // Headers: # text, ## text, etc.
             .replace(/^#{1,6}\s+/gm, '')
             // Unordered list: - item, * item
@@ -148,12 +118,12 @@ export class TtsService {
             // Horizontal rule: ---, ***
             .replace(/^[\-\*]{3,}$/gm, '')
             // 이모티콘/이모지 제거 (Unicode emoji ranges)
-            .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')  // Miscellaneous Symbols, Emoticons, etc.
-            .replace(/[\u{2600}-\u{26FF}]/gu, '')    // Misc symbols
-            .replace(/[\u{2700}-\u{27BF}]/gu, '')    // Dingbats
-            .replace(/[\u{FE00}-\u{FE0F}]/gu, '')    // Variation Selectors
-            .replace(/[\u{1F000}-\u{1F02F}]/gu, '')  // Mahjong, Domino
-            .replace(/[\u{1F0A0}-\u{1F0FF}]/gu, '')  // Playing cards
+            .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')
+            .replace(/[\u{2600}-\u{26FF}]/gu, '')
+            .replace(/[\u{2700}-\u{27BF}]/gu, '')
+            .replace(/[\u{FE00}-\u{FE0F}]/gu, '')
+            .replace(/[\u{1F000}-\u{1F02F}]/gu, '')
+            .replace(/[\u{1F0A0}-\u{1F0FF}]/gu, '')
             // 텍스트 이모티콘 (❌, ✅, ✓, ✗ 등)
             .replace(/[❌✅✓✗⭕️⚠️❗️❓]/g, '')
             // Clean up multiple spaces
