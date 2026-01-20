@@ -15,6 +15,7 @@ export class LlmService implements OnModuleInit {
     private bedrockClient: BedrockRuntimeClient;
     private readonly modelId = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
     private readonly restApiUrl: string;
+    private readonly serviceApiKey: string;
     private readonly topicCache = new Map<string, string>();
 
     private lastRequestTime = 0;
@@ -60,6 +61,8 @@ export class LlmService implements OnModuleInit {
             (this.configService.get<string>('REST_API_URL') ||
                 this.configService.get<string>('BACKEND_API_URL') ||
                 'http://localhost:3002').replace(/\/+$/, '');
+
+        this.serviceApiKey = this.configService.get<string>('SERVICE_API_KEY') || '';
 
         this.bedrockClient = new BedrockRuntimeClient({
             region: this.configService.get<string>('AWS_REGION') || 'ap-northeast-2',
@@ -355,9 +358,14 @@ ${contextStr}
         if (!this.restApiUrl) return topicOrId;
 
         try {
+            const headers: Record<string, string> = {};
+            if (this.serviceApiKey) {
+                headers['X-Service-Key'] = this.serviceApiKey;
+            }
+
             const resp = await fetch(
                 `${this.restApiUrl}/restapi/rooms/topic/${encodeURIComponent(topicOrId)}`,
-                { method: 'GET' }
+                { method: 'GET', headers }
             );
             if (!resp.ok) {
                 this.logger.warn(`[RAG] topic→roomId 조회 실패: ${topicOrId} (${resp.status})`);

@@ -1080,9 +1080,7 @@ export class VoiceBotService {
 
         // 인사 멘트 (캘리브레이션 3초 동안 TTS)
         const greetings = [
-            '안녕하세요! 아우라예요. 회의 시작하면 불러주세요~',
-            '안녕하세요~ 아우라 들어왔어요! 필요하면 불러주세요.',
-            '안녕하세요! 아우라예요, 뭐든 물어봐 주세요~',
+            '안녕하세요! 아우라예요. 이번 회의는 저번에 이어서 화면 개선 및 STT 인식률 개선을 얘기해보세요.',
         ];
         const greeting = greetings[Math.floor(Math.random() * greetings.length)];
 
