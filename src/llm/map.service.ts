@@ -175,10 +175,10 @@ export class MapService {
         const destLng = (parsedMapx / 10000000).toString();
         const destLat = (parsedMapy / 10000000).toString();
 
-        // 네이버 지도 길찾기 URL (대중교통)
+        // 네이버 지도 길찾기 URL (대중교통, v5는 WGS84 좌표)
         const encodedOrigin = encodeURIComponent('출발지');
         const encodedTitle = encodeURIComponent(title || '목적지');
-        return `https://map.naver.com/p/directions/${originX},${originY},${encodedOrigin}/${destLng},${destLat},${encodedTitle}/transit`;
+        return `https://map.naver.com/v5/directions/${originX},${originY},${encodedOrigin}/${destLng},${destLat},${encodedTitle}/-/transit`;
     }
 
     private buildDirectionUrlFromCoords(
@@ -186,10 +186,10 @@ export class MapService {
         destLat: string, destLng: string,
         name: string, placeId?: string
     ): string {
-        // 네이버 지도 길찾기 URL (대중교통)
+        // 네이버 지도 길찾기 URL (대중교통, v5는 WGS84 좌표)
         const encodedOrigin = encodeURIComponent('출발지');
         const encodedName = encodeURIComponent(name || '목적지');
-        return `https://map.naver.com/p/directions/${originLng},${originLat},${encodedOrigin}/${destLng},${destLat},${encodedName}/transit`;
+        return `https://map.naver.com/v5/directions/${originLng},${originLat},${encodedOrigin}/${destLng},${destLat},${encodedName}/-/transit`;
     }
 
     // ============================================================
