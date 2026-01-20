@@ -104,32 +104,17 @@ export class TtsService {
         return Buffer.from(fallbackBuffer);
     }
 
-    private buildSsml(text: string): string {
-        const normalized = this.normalizeSpeech(text);
-        const escaped = this.escapeSsml(normalized);
-        return `<speak version="1.0" xml:lang="ko-KR"><voice name="${this.voiceName}"><prosody pitch="-5%" rate="10%">${escaped}</prosody></voice></speak>`;
-    }
+  // 1. buildSsml - prosody 제거
+  private buildSsml(text: string): string {
+      const normalized = this.normalizeSpeech(text);
+      const escaped = this.escapeSsml(normalized);
+      return `<speak version="1.0" xml:lang="ko-KR"><voice name="${this.voiceName}">${escaped}</voice></speak>`;
+  }
 
-    private buildSsmlWithStyle(text: string, style: string): string {
-        const normalized = this.normalizeSpeech(text);
-        const escaped = this.escapeSsml(normalized);
-        return `<speak version="1.0" xml:lang="ko-KR">` +
-            `<voice xmlns:mstts="https://www.w3.org/2001/mstts" name="${this.voiceName}">` +
-            `<mstts:express-as style="${style}">` +
-            `<prosody pitch="-3%" rate="10%">${escaped}</prosody>` +
-            `</mstts:express-as></voice></speak>`;
-    }
-
-    private pickStyle(): string | null {
-        if (this.styleMode === 'none') {
-            return null;
-        }
-        if (this.styleMode) {
-            return this.styleMode;
-        }
-        const styles = ['conversational', 'friendly', 'cheerful'];
-        return styles[Math.floor(Math.random() * styles.length)];
-    }
+  // 2. pickStyle - 항상 null 반환 (style 비활성화)
+  private pickStyle(): string | null {
+      return null;
+  }
 
     private normalizeSpeech(text: string): string {
         // 마크다운 포맷 및 이모티콘 제거 (TTS가 읽지 않도록)
