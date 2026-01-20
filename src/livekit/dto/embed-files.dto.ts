@@ -21,6 +21,31 @@ class ExpectedAttendee {
   nickName: string;
 }
 
+class ReferencedFile {
+  @IsString()
+  @IsNotEmpty()
+  fileId: string;
+
+  @IsString()
+  @IsNotEmpty()
+  fileName: string;
+
+  @IsString()
+  @IsNotEmpty()
+  fileUrl: string;  // S3 presigned URL
+
+  @IsOptional()
+  fileSize?: number;
+
+  @IsString()
+  @IsOptional()
+  createdAt?: string;
+
+  @IsString()
+  @IsOptional()
+  sourceRoomId?: string;  // 원본 회의 ID
+}
+
 export class EmbedFilesDto {
   @IsString()
   @IsNotEmpty()
@@ -44,4 +69,10 @@ export class EmbedFilesDto {
   @Type(() => ExpectedAttendee)
   @IsOptional()
   expectedAttendees?: ExpectedAttendee[];  // 예정 참여자 (불참자 확인용)
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReferencedFile)
+  @IsOptional()
+  referencedFiles?: ReferencedFile[];  // 이전 회의에서 참조한 파일들
 }
