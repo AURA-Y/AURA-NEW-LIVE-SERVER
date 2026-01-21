@@ -408,12 +408,14 @@ export class LivekitService {
     topic: string,
     expectedAttendees?: { userId: string; nickName: string }[],
     channelId?: string,
+    referencedFiles?: { fileId: string; fileName: string; fileUrl: string; fileSize?: number; createdAt?: string; sourceRoomId?: string }[],
   ): Promise<{ success: boolean; message?: string }> {
-    this.logger.log(`[파일 임베딩] roomId: ${roomId}, channelId: ${channelId}, topic: ${topic}, files: ${files.length}개, expectedAttendees: ${expectedAttendees?.length || 0}명`);
+    this.logger.log(`[파일 임베딩] roomId: ${roomId}, channelId: ${channelId}, topic: ${topic}, files: ${files.length}개, referencedFiles: ${referencedFiles?.length || 0}개, expectedAttendees: ${expectedAttendees?.length || 0}명`);
 
     const result = await this.ragClient.startMeeting(roomId, {
       roomTopic: topic,
       files,
+      referencedFiles: referencedFiles || [],  // 이전 회의에서 참조한 파일들
       expectedAttendees: expectedAttendees || [],  // 예정 참여자 (불참자 확인용)
       channelId: channelId || '',  // GitHub Project 등록 등에 사용
     });

@@ -146,6 +146,8 @@ interface RoomContext {
 
     // 클라이언트 준비 대기 (인삿말 타이밍 제어)
     greetingDone: boolean;
+    // 이전 회의 이어가기 여부
+    isContinuedMeeting: boolean;
 
     // AI 음소거 (사용자가 AI 음성을 음소거)
     aiMuted: boolean;
@@ -569,6 +571,11 @@ export class VoiceBotService {
                 // 클라이언트 준비 완료 → 인삿말 시작
                 if (message.type === 'CLIENT_READY') {
                     if (!context.greetingDone) {
+                        // 이전 회의 이어가기 여부 저장
+                        if (message.isContinuedMeeting) {
+                            context.isContinuedMeeting = true;
+                            this.logger.log(`[CLIENT_READY] 이전 회의 이어가기 감지`);
+                        }
                         this.logger.log(`[CLIENT_READY] 클라이언트 준비 완료 - 인삿말 시작`);
                         context.greetingDone = true;
                         this.greetOnJoin(roomId);
@@ -998,6 +1005,8 @@ export class VoiceBotService {
                 designModeOpenTime: 0,
                 // 인삿말 대기 (클라이언트 준비 완료 후 시작)
                 greetingDone: false,
+                // 이전 회의 이어가기 여부
+                isContinuedMeeting: false,
                 // AI 음소거 초기값
                 aiMuted: false,
                 // Perplexity 모드 초기화
@@ -1078,11 +1087,10 @@ export class VoiceBotService {
             return;
         }
 
-        // 인사 멘트 (캘리브레이션 3초 동안 TTS)
-        const greetings = [
-            '안녕하세요! 아우라예요. 이번 회의는 저번에 이어서 화면 개선 및 STT 인식률 개선을 얘기해보세요.',
-        ];
-        const greeting = greetings[Math.floor(Math.random() * greetings.length)];
+        // 인사 멘트 (이전 회의 이어가기 여부에 따라 분기)
+        const greeting = context.isContinuedMeeting
+            ? '안녕하세요! 아우라예요. 이전 회의 액션 아이템을 확인해주세요.'
+            : '안녕하세요. 아우라에요. 회의 시작할게요.';
 
         try {
             this.logger.log(`[입장 인사] "${greeting}"`);
@@ -1364,21 +1372,13 @@ ${processedContent}
         this.logger.log(`[PDF 질문] 처리 시작 from ${requesterId}: "${question.substring(0, 50)}..."`);
 
         try {
-            // PDF 질문은 RAG 스킵 (속도 개선: 3~5초 단축)
-            // PDF 선택 텍스트에 대한 질문은 회의 내용 검색이 불필요
-            const fullContext = `
-=== PDF 선택 텍스트 ===
-${question}
+            // 빠른 LLM 직접 호출 (rate limiting 스킵)
+            const prompt = `다음 텍스트에 대해 간단히 설명해주세요. 2-3문장으로 핵심만 답변하세요.
 
-=== PDF 정보 ===
-${pdfContext}
-`.trim();
+텍스트: "${question}"
+출처: ${pdfContext}`;
 
-            const response = await this.llmService.answerWithContext(
-                `다음 PDF에서 선택한 텍스트에 대해 설명해주세요:\n\n"${question}"`,
-                fullContext,
-                'PDF 문서',
-            );
+            const response = await this.llmService.sendMessagePure(prompt, 200);
 
             // DataChannel로 응답 전송 (search_answer 형식 사용)
             const searchMessage = {
