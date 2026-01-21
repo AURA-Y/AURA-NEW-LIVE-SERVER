@@ -9,6 +9,7 @@ import {
   DirectFileOutput,
 } from 'livekit-server-sdk';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import axios from 'axios';
 import {
   RecordingResult,
   RecordingInfo,
@@ -34,6 +35,9 @@ export class RecordingService {
   private readonly s3AccessKey: string;
   private readonly s3SecretKey: string;
   private readonly s3Prefix: string = 'rooms/'; // AURA_NEW_RESTAPI와 동일
+
+  // RAG API 설정
+  private readonly ragApiUrl: string;
 
   constructor(private configService: ConfigService) {
     const livekitUrl = this.configService.get<string>('LIVEKIT_URL');
@@ -63,6 +67,10 @@ export class RecordingService {
     } else {
       this.logger.warn('[S3] S3 credentials not configured. Will use local storage.');
     }
+
+    // RAG API URL 설정
+    this.ragApiUrl = this.configService.get<string>('RAG_API_URL') || 'http://localhost:8000';
+    this.logger.log(`[RAG] API URL: ${this.ragApiUrl}`);
   }
 
   /**
@@ -533,5 +541,82 @@ export class RecordingService {
 
     await this.saveRecordingMetadata(roomId, metadata);
     return metadata;
+  }
+
+  /**
+   * RAG API에서 비디오 챕터 가져와서 S3에 저장
+   * @param roomId 회의실 ID
+   * @param fileName 녹화 파일명
+   * @param recordingStartTime 녹화 시작 시간 (밀리초)
+   */
+  async fetchAndSaveChaptersFromRAG(
+    roomId: string,
+    fileName: string,
+    recordingStartTime?: number,
+  ): Promise<{ success: boolean; chapters: VideoChapter[]; message?: string }> {
+    this.logger.log(`[RAG 챕터] roomId: ${roomId}, fileName: ${fileName}, recordingStartTime: ${recordingStartTime}`);
+
+    try {
+      // RAG API 호출
+      const params: Record<string, string> = {
+        sections: 'discussion,decision,action',
+      };
+      if (recordingStartTime) {
+        params.recordingStartTime = String(recordingStartTime);
+      }
+
+      const response = await axios.get(
+        `${this.ragApiUrl}/meetings/${roomId}/video-chapters`,
+        { params, timeout: 30000 },
+      );
+
+      const data = response.data;
+
+      if (data.status !== 'success' || !data.chapters || data.chapters.length === 0) {
+        this.logger.warn(`[RAG 챕터] 추출된 챕터 없음: ${data.message || 'No chapters'}`);
+        return {
+          success: true,
+          chapters: [],
+          message: data.message || '추출된 챕터가 없습니다.',
+        };
+      }
+
+      // RAG 응답을 VideoChapter 형식으로 변환
+      const chapters: VideoChapter[] = data.chapters.map((ch: any, index: number, arr: any[]) => ({
+        title: `[${this.getSectionLabel(ch.section)}] ${ch.title}`,
+        startTime: ch.startTime,
+        endTime: index < arr.length - 1 ? arr[index + 1].startTime : undefined,
+      }));
+
+      this.logger.log(`[RAG 챕터] ${chapters.length}개 챕터 추출 완료`);
+
+      // S3 메타데이터에 저장
+      const result = await this.updateRecordingChapters(roomId, fileName, chapters);
+
+      return {
+        success: result.success,
+        chapters,
+        message: result.message,
+      };
+    } catch (error) {
+      this.logger.error(`[RAG 챕터 실패] ${error.message}`);
+      return {
+        success: false,
+        chapters: [],
+        message: `RAG API 호출 실패: ${error.message}`,
+      };
+    }
+  }
+
+  /**
+   * 섹션 라벨 변환
+   */
+  private getSectionLabel(section: string): string {
+    switch (section) {
+      case 'discussion': return '논의';
+      case 'decision': return '결정';
+      case 'action': return '액션';
+      default: return '';
+    }
   }
 }
