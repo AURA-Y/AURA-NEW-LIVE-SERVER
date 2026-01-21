@@ -384,4 +384,46 @@ export class RecordingController {
       );
     }
   }
+
+  /**
+   * RAG API에서 챕터 가져와서 저장
+   * POST /room/:roomId/recording/fetch-chapters
+   */
+  @Post('fetch-chapters')
+  async fetchChaptersFromRAG(
+    @Param('roomId') roomId: string,
+    @Body() body: { fileName: string; recordingStartTime?: number },
+  ) {
+    const normalizedRoomId = roomId?.trim();
+
+    if (!normalizedRoomId) {
+      throw new HttpException('roomId is required', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!body.fileName) {
+      throw new HttpException('fileName is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const result = await this.recordingService.fetchAndSaveChaptersFromRAG(
+        normalizedRoomId,
+        body.fileName,
+        body.recordingStartTime,
+      );
+
+      return {
+        success: result.success,
+        roomId: normalizedRoomId,
+        fileName: body.fileName,
+        chapters: result.chapters,
+        chaptersCount: result.chapters.length,
+        message: result.message,
+      };
+    } catch (error) {
+      throw new HttpException(
+        `챕터 가져오기 실패: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
 }
