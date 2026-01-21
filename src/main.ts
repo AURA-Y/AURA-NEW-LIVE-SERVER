@@ -15,7 +15,7 @@ async function bootstrap() {
   // CORS 설정
   app.enableCors({
     origin: ['http://localhost:3000', 'https://aura.ai.kr'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
   });
