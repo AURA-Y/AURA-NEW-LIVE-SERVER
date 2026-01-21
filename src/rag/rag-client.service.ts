@@ -277,9 +277,13 @@ export class RagClientService implements OnModuleDestroy {
      * @param endTime 발언 종료 시간 (밀리초 timestamp, 타임라인용)
      */
     async sendStatement(roomId: string, text: string, speaker: string, startTime?: number | null, endTime?: number | null, retryCount: number = 0): Promise<void> {
-        // 연결 안 됐으면 버퍼에 저장
-        if (!this.isConnected(roomId)) {
+        // ★ 최초 호출 시에만 버퍼에 저장 (설계보드용, 재시도 시에는 저장하지 않음)
+        if (retryCount === 0) {
             this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
+        }
+
+        // 연결 안 됐으면 버퍼 저장만 하고 종료
+        if (!this.isConnected(roomId)) {
             return;
         }
 
@@ -290,33 +294,25 @@ export class RagClientService implements OnModuleDestroy {
             text,
             speaker,
             confidence: 1.0,
-            startTime: startTime ?? now,  // ★ 발언 시작 시간 (없으면 현재 시간)
-            endTime: endTime ?? null,     // ★ 발언 종료 시간 (타임라인용)
+            startTime: startTime ?? now,
+            endTime: endTime ?? null,
         };
 
         try {
             context.ws.send(JSON.stringify(message));
-            // WebSocket 전송 성공 시에도 로컬 버퍼에 저장 (Single Source of Truth 유지)
-            this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
             this.logger.log(`[RAG 발언 전송] ${roomId} - 화자: ${speaker}, "${text.substring(0, 30)}..."`);
-
-            // ★ 전송 성공 시에도 로컬 버퍼에 저장 (플로우차트 생성용)
-            this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
         } catch (error: any) {
             this.logger.error(`[RAG 발언 전송 실패] ${roomId}: ${error.message}`);
 
-            // 재시도 로직
+            // 재시도 로직 (버퍼는 이미 저장됨, WebSocket 전송만 재시도)
             if (retryCount < this.MAX_STATEMENT_RETRY) {
                 this.logger.log(`[RAG 발언 재시도] ${roomId} - ${retryCount + 1}/${this.MAX_STATEMENT_RETRY}`);
-                // 잠시 대기 후 재시도 (exponential backoff)
                 const delay = Math.min(1000 * Math.pow(2, retryCount), 5000);
                 setTimeout(() => {
                     this.sendStatement(roomId, text, speaker, startTime, endTime, retryCount + 1);
                 }, delay);
             } else {
-                // 최대 재시도 초과 시 버퍼에 저장
-                this.logger.warn(`[RAG 발언 재시도 초과] ${roomId} - 버퍼에 저장`);
-                this.addToStatementBuffer(roomId, text, speaker, startTime, endTime);
+                this.logger.warn(`[RAG 발언 재시도 초과] ${roomId}`);
             }
         }
     }
