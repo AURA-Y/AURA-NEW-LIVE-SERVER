@@ -8,11 +8,13 @@ import {
   S3Upload,
   DirectFileOutput,
 } from 'livekit-server-sdk';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import {
   RecordingResult,
   RecordingInfo,
   RecordingStatus,
+  RecordingMetadata,
+  VideoChapter,
 } from './dto/recording.dto';
 
 @Injectable()
@@ -277,7 +279,8 @@ export class RecordingService {
   async uploadClientRecording(
     roomId: string,
     file: Express.Multer.File,
-  ): Promise<{ fileUrl: string; fileName: string; fileSize: number }> {
+    recordingStartTime?: number,
+  ): Promise<{ fileUrl: string; fileName: string; fileSize: number; recordingStartTime?: number }> {
     this.logger.log(`\n========== [S3 업로드 서비스] ==========`);
     this.logger.log(`[1] 입력 데이터:`);
     this.logger.log(`  - roomId: ${roomId}`);
@@ -336,12 +339,18 @@ export class RecordingService {
 
       this.logger.log(`[5] S3 업로드 완료!`);
       this.logger.log(`  - fileUrl: ${fileUrl}`);
+      this.logger.log(`  - recordingStartTime: ${recordingStartTime}`);
+
+      // 메타데이터 자동 생성 (recordingStartTime 포함)
+      await this.createRecordingMetadata(roomId, fileName, fileUrl, file.size, recordingStartTime);
+
       this.logger.log(`========== [S3 업로드 성공] ==========\n`);
 
       return {
         fileUrl,
         fileName,
         fileSize: file.size,
+        recordingStartTime,
       };
     } catch (error) {
       this.logger.error(`\n[ERROR] S3 업로드 실패`);
@@ -355,5 +364,174 @@ export class RecordingService {
       this.logger.error(`========== [S3 업로드 실패] ==========\n`);
       throw new Error(`S3 upload failed: ${error.message}`);
     }
+  }
+
+  /**
+   * 녹화 메타데이터 S3 키 생성
+   * 형식: rooms/{roomId}/recordings/{fileName}.meta.json
+   */
+  private getMetadataS3Key(roomId: string, fileName: string): string {
+    return `${this.s3Prefix}${roomId}/recordings/${fileName}.meta.json`;
+  }
+
+  /**
+   * S3 클라이언트 생성 (재사용)
+   */
+  private getS3Client(): S3Client {
+    return new S3Client({
+      region: this.s3Region,
+      credentials: {
+        accessKeyId: this.s3AccessKey,
+        secretAccessKey: this.s3SecretKey,
+      },
+    });
+  }
+
+  /**
+   * 녹화 메타데이터 조회
+   */
+  async getRecordingMetadata(
+    roomId: string,
+    fileName: string,
+  ): Promise<RecordingMetadata | null> {
+    if (!this.s3Bucket || !this.s3AccessKey || !this.s3SecretKey) {
+      this.logger.warn('[메타데이터 조회] S3 credentials not configured');
+      return null;
+    }
+
+    const s3Key = this.getMetadataS3Key(roomId, fileName);
+
+    try {
+      const s3Client = this.getS3Client();
+      const response = await s3Client.send(
+        new GetObjectCommand({
+          Bucket: this.s3Bucket,
+          Key: s3Key,
+        }),
+      );
+
+      const bodyString = await response.Body?.transformToString();
+      if (!bodyString) return null;
+
+      return JSON.parse(bodyString) as RecordingMetadata;
+    } catch (error) {
+      if (error.name === 'NoSuchKey') {
+        this.logger.debug(`[메타데이터 조회] 파일 없음: ${s3Key}`);
+        return null;
+      }
+      this.logger.warn(`[메타데이터 조회 실패] ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * 녹화 메타데이터 저장
+   */
+  async saveRecordingMetadata(
+    roomId: string,
+    metadata: RecordingMetadata,
+  ): Promise<boolean> {
+    if (!this.s3Bucket || !this.s3AccessKey || !this.s3SecretKey) {
+      this.logger.warn('[메타데이터 저장] S3 credentials not configured');
+      return false;
+    }
+
+    const s3Key = this.getMetadataS3Key(roomId, metadata.fileName);
+
+    try {
+      const s3Client = this.getS3Client();
+      await s3Client.send(
+        new PutObjectCommand({
+          Bucket: this.s3Bucket,
+          Key: s3Key,
+          Body: JSON.stringify(metadata, null, 2),
+          ContentType: 'application/json',
+        }),
+      );
+
+      this.logger.log(`[메타데이터 저장 완료] ${s3Key}`);
+      return true;
+    } catch (error) {
+      this.logger.error(`[메타데이터 저장 실패] ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * 녹화에 챕터 업데이트
+   */
+  async updateRecordingChapters(
+    roomId: string,
+    fileName: string,
+    chapters: VideoChapter[],
+  ): Promise<{ success: boolean; message?: string }> {
+    this.logger.log(`[챕터 업데이트] roomId: ${roomId}, fileName: ${fileName}, chapters: ${chapters.length}개`);
+
+    // 기존 메타데이터 조회
+    let metadata = await this.getRecordingMetadata(roomId, fileName);
+
+    if (!metadata) {
+      // 메타데이터가 없으면 새로 생성
+      const fileUrl = `https://${this.s3Bucket}.s3.${this.s3Region}.amazonaws.com/${this.s3Prefix}${roomId}/recordings/${fileName}`;
+      metadata = {
+        roomId,
+        fileName,
+        fileUrl,
+        fileSize: 0,
+        chapters: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    // 챕터 업데이트
+    metadata.chapters = chapters;
+    metadata.updatedAt = new Date().toISOString();
+
+    // 저장
+    const success = await this.saveRecordingMetadata(roomId, metadata);
+
+    return {
+      success,
+      message: success
+        ? `${chapters.length}개 챕터가 저장되었습니다.`
+        : '챕터 저장에 실패했습니다.',
+    };
+  }
+
+  /**
+   * 녹화 챕터 조회
+   */
+  async getRecordingChapters(
+    roomId: string,
+    fileName: string,
+  ): Promise<VideoChapter[]> {
+    const metadata = await this.getRecordingMetadata(roomId, fileName);
+    return metadata?.chapters || [];
+  }
+
+  /**
+   * 클라이언트 녹화 업로드 후 메타데이터 자동 생성
+   */
+  async createRecordingMetadata(
+    roomId: string,
+    fileName: string,
+    fileUrl: string,
+    fileSize: number,
+    recordingStartTime?: number,
+  ): Promise<RecordingMetadata> {
+    const metadata: RecordingMetadata = {
+      roomId,
+      fileName,
+      fileUrl,
+      fileSize,
+      recordingStartTime,
+      chapters: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await this.saveRecordingMetadata(roomId, metadata);
+    return metadata;
   }
 }

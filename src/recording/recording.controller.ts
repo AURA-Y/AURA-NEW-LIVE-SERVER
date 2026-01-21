@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Patch,
   Param,
   Body,
   HttpException,
@@ -12,7 +13,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { RecordingService } from './recording.service';
-import { StopRecordingDto, RecordingStatus } from './dto/recording.dto';
+import { StopRecordingDto, RecordingStatus, UpdateChaptersDto } from './dto/recording.dto';
 
 @Controller('room/:roomId/recording')
 export class RecordingController {
@@ -174,9 +175,13 @@ export class RecordingController {
   async uploadRecording(
     @Param('roomId') roomId: string,
     @UploadedFile() file: Express.Multer.File,
+    @Body('recordingStartTime') recordingStartTimeStr?: string,
   ) {
+    // recordingStartTime을 숫자로 변환 (밀리초 타임스탬프)
+    const recordingStartTime = recordingStartTimeStr ? parseInt(recordingStartTimeStr, 10) : undefined;
+
     console.log(`\n========== [녹화 업로드 API] ==========`);
-    console.log(`[1] 요청 수신 - roomId: ${roomId}`);
+    console.log(`[1] 요청 수신 - roomId: ${roomId}, recordingStartTime: ${recordingStartTime}`);
     console.log(`[2] 파일 정보:`, file ? {
       originalname: file.originalname,
       mimetype: file.mimetype,
@@ -216,12 +221,14 @@ export class RecordingController {
       const result = await this.recordingService.uploadClientRecording(
         normalizedRoomId,
         file,
+        recordingStartTime,
       );
 
       console.log(`[4] S3 업로드 성공`);
       console.log(`  - fileUrl: ${result.fileUrl}`);
       console.log(`  - fileName: ${result.fileName}`);
       console.log(`  - fileSize: ${result.fileSize}`);
+      console.log(`  - recordingStartTime: ${result.recordingStartTime}`);
       console.log(`========== [녹화 업로드 완료] ==========\n`);
 
       return {
@@ -230,6 +237,7 @@ export class RecordingController {
         fileUrl: result.fileUrl,
         fileName: result.fileName,
         fileSize: result.fileSize,
+        recordingStartTime: result.recordingStartTime,
         message: '녹화 파일이 업로드되었습니다.',
       };
     } catch (error) {
@@ -240,6 +248,138 @@ export class RecordingController {
       console.error(`========== [녹화 업로드 실패] ==========\n`);
       throw new HttpException(
         `녹화 업로드 실패: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * 녹화 챕터 업데이트
+   * PATCH /room/:roomId/recording/chapters
+   */
+  @Patch('chapters')
+  async updateChapters(
+    @Param('roomId') roomId: string,
+    @Body() body: UpdateChaptersDto,
+  ) {
+    const normalizedRoomId = roomId?.trim();
+
+    if (!normalizedRoomId) {
+      throw new HttpException('roomId is required', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!body.fileName) {
+      throw new HttpException('fileName is required', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!body.chapters || !Array.isArray(body.chapters)) {
+      throw new HttpException('chapters array is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const result = await this.recordingService.updateRecordingChapters(
+        normalizedRoomId,
+        body.fileName,
+        body.chapters,
+      );
+
+      return {
+        success: result.success,
+        roomId: normalizedRoomId,
+        fileName: body.fileName,
+        chaptersCount: body.chapters.length,
+        message: result.message,
+      };
+    } catch (error) {
+      throw new HttpException(
+        `챕터 업데이트 실패: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * 녹화 챕터 조회
+   * GET /room/:roomId/recording/chapters/:fileName
+   */
+  @Get('chapters/:fileName')
+  async getChapters(
+    @Param('roomId') roomId: string,
+    @Param('fileName') fileName: string,
+  ) {
+    const normalizedRoomId = roomId?.trim();
+
+    if (!normalizedRoomId) {
+      throw new HttpException('roomId is required', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!fileName) {
+      throw new HttpException('fileName is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const chapters = await this.recordingService.getRecordingChapters(
+        normalizedRoomId,
+        fileName,
+      );
+
+      return {
+        success: true,
+        roomId: normalizedRoomId,
+        fileName,
+        chapters,
+        total: chapters.length,
+      };
+    } catch (error) {
+      throw new HttpException(
+        `챕터 조회 실패: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * 녹화 메타데이터 조회
+   * GET /room/:roomId/recording/metadata/:fileName
+   */
+  @Get('metadata/:fileName')
+  async getMetadata(
+    @Param('roomId') roomId: string,
+    @Param('fileName') fileName: string,
+  ) {
+    const normalizedRoomId = roomId?.trim();
+
+    if (!normalizedRoomId) {
+      throw new HttpException('roomId is required', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!fileName) {
+      throw new HttpException('fileName is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const metadata = await this.recordingService.getRecordingMetadata(
+        normalizedRoomId,
+        fileName,
+      );
+
+      if (!metadata) {
+        return {
+          success: false,
+          roomId: normalizedRoomId,
+          fileName,
+          message: '메타데이터를 찾을 수 없습니다.',
+        };
+      }
+
+      return {
+        success: true,
+        roomId: normalizedRoomId,
+        metadata,
+      };
+    } catch (error) {
+      throw new HttpException(
+        `메타데이터 조회 실패: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
