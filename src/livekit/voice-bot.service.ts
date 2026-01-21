@@ -146,6 +146,8 @@ interface RoomContext {
 
     // 클라이언트 준비 대기 (인삿말 타이밍 제어)
     greetingDone: boolean;
+    // 이전 회의 이어가기 여부
+    isContinuedMeeting: boolean;
 
     // AI 음소거 (사용자가 AI 음성을 음소거)
     aiMuted: boolean;
@@ -569,6 +571,11 @@ export class VoiceBotService {
                 // 클라이언트 준비 완료 → 인삿말 시작
                 if (message.type === 'CLIENT_READY') {
                     if (!context.greetingDone) {
+                        // 이전 회의 이어가기 여부 저장
+                        if (message.isContinuedMeeting) {
+                            context.isContinuedMeeting = true;
+                            this.logger.log(`[CLIENT_READY] 이전 회의 이어가기 감지`);
+                        }
                         this.logger.log(`[CLIENT_READY] 클라이언트 준비 완료 - 인삿말 시작`);
                         context.greetingDone = true;
                         this.greetOnJoin(roomId);
@@ -998,6 +1005,8 @@ export class VoiceBotService {
                 designModeOpenTime: 0,
                 // 인삿말 대기 (클라이언트 준비 완료 후 시작)
                 greetingDone: false,
+                // 이전 회의 이어가기 여부
+                isContinuedMeeting: false,
                 // AI 음소거 초기값
                 aiMuted: false,
                 // Perplexity 모드 초기화
@@ -1078,11 +1087,10 @@ export class VoiceBotService {
             return;
         }
 
-        // 인사 멘트 (캘리브레이션 3초 동안 TTS)
-        const greetings = [
-            '안녕하세요! 아우라예요. 이번 회의는 저번에 이어서 화면 개선 및 STT 인식률 개선을 얘기해보세요.',
-        ];
-        const greeting = greetings[Math.floor(Math.random() * greetings.length)];
+        // 인사 멘트 (이전 회의 이어가기 여부에 따라 분기)
+        const greeting = context.isContinuedMeeting
+            ? '안녕하세요! 아우라예요. 이전 회의 액션 아이템을 확인해주세요.'
+            : '안녕하세요. 아우라에요. 회의 시작할게요.';
 
         try {
             this.logger.log(`[입장 인사] "${greeting}"`);
