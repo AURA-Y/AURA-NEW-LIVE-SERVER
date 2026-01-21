@@ -1364,21 +1364,13 @@ ${processedContent}
         this.logger.log(`[PDF 질문] 처리 시작 from ${requesterId}: "${question.substring(0, 50)}..."`);
 
         try {
-            // PDF 질문은 RAG 스킵 (속도 개선: 3~5초 단축)
-            // PDF 선택 텍스트에 대한 질문은 회의 내용 검색이 불필요
-            const fullContext = `
-=== PDF 선택 텍스트 ===
-${question}
+            // 빠른 LLM 직접 호출 (rate limiting 스킵)
+            const prompt = `다음 텍스트에 대해 간단히 설명해주세요. 2-3문장으로 핵심만 답변하세요.
 
-=== PDF 정보 ===
-${pdfContext}
-`.trim();
+텍스트: "${question}"
+출처: ${pdfContext}`;
 
-            const response = await this.llmService.answerWithContext(
-                `다음 PDF에서 선택한 텍스트에 대해 설명해주세요:\n\n"${question}"`,
-                fullContext,
-                'PDF 문서',
-            );
+            const response = await this.llmService.sendMessagePure(prompt, 200);
 
             // DataChannel로 응답 전송 (search_answer 형식 사용)
             const searchMessage = {
