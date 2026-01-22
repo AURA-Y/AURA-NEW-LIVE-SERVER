@@ -27,7 +27,7 @@ LiveKit 기반 화상회의 관리 및 AI 음성 봇을 담당하는 NestJS 서�
 |---------|-------------|
 | **Room 관리** | 생성, 참여, 삭제, 토큰 발급 |
 | **AI Voice Bot** | 웨이크워드 감지, 음성 Q&A |
-| **STT** | Azure / Deepgram / Clova / Daglo 지원 |
+| **STT** | Azure / Deepgram / Clova |
 | **TTS** | Azure Speech 기반 음성 합성 |
 | **RAG 연동** | WebSocket으로 RAG 서버와 통신 |
 | **Vision** | 화면 캡처 분석, 이미지 Q&A |
@@ -115,7 +115,7 @@ LIVEKIT_AGENT_NAME=aura-bot
 RAG_WEBSOCKET_URL=ws://localhost:8000
 RAG_API_URL=http://localhost:8000
 
-# STT Provider: azure | deepgram | clova | daglo
+# STT Provider: azure | deepgram | clova
 STT_PROVIDER=azure
 
 # Azure Speech (if STT_PROVIDER=azure)
@@ -179,7 +179,6 @@ src/
 │   ├── stt.module.ts
 │   ├── stt.service.ts          # 메인 서비스
 │   ├── clova-stt.adapter.ts
-│   └── daglo-stt.adapter.ts
 │
 ├── tts/                        # Text-to-Speech
 │   ├── tts.module.ts
@@ -321,7 +320,6 @@ src/
 | **Azure** | 한국어 우수, 안정적 | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` |
 | **Deepgram** | 빠른 응답, 영어 우수 | `DEEPGRAM_API_KEY` |
 | **Clova** | 네이버, 한국어 특화 | `CLOVA_CLIENT_SECRET` |
-| **Daglo** | gRPC 기반 | `DAGLO_API_KEY` |
 
 `STT_PROVIDER` 환경변수로 선택.
 
