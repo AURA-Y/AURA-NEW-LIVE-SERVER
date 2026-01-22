@@ -178,7 +178,7 @@ export class LivekitService {
   }
 
   async joinRoom(joinRoomDto: JoinRoomDto, isBot: boolean = false) {
-    const { roomId, userName } = joinRoomDto;
+    const { roomId, userName, roomTopic } = joinRoomDto;
     this.logger.log(`Join request: roomId=${roomId}, user=${userName}`);
 
     try {
@@ -188,10 +188,24 @@ export class LivekitService {
 
       // 방 존재 여부 확인
       const allRooms = await this.roomService.listRooms();
-      const room = allRooms.find(r => r.name === roomId);
+      let room = allRooms.find(r => r.name === roomId);
+
+      // 방이 없으면 자동 생성 (예약된 회의 지원)
       if (!room) {
-        this.logger.error(`Room not found: ${roomId}`);
-        throw new NotFoundException('Room not found');
+        this.logger.log(`Room not found, creating: ${roomId}`);
+        const metadata = JSON.stringify({
+          topic: roomTopic || roomId,
+          createdBy: userName,
+        });
+
+        room = await this.roomService.createRoom({
+          name: roomId,
+          metadata: metadata,
+          emptyTimeout: 300,
+          maxParticipants: 20,
+          agents: this.buildRoomAgentDispatch(),
+        });
+        this.logger.log(`Room auto-created for scheduled meeting: ${roomId}`);
       }
 
       this.logger.log(`Joining room via LiveKit: ${this.livekitUrl}`);
