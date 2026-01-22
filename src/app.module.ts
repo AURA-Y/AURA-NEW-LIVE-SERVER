@@ -6,6 +6,7 @@ import { StudyModule } from './study/study.module';
 import { PerplexityModule } from './perplexity/perplexity.module';
 import { RecordingModule } from './recording/recording.module';
 import { UploadModule } from './upload/upload.module';
+import { TranslateModule } from './translate/translate.module';
 
 /**
  * AURA Live Server App Module
@@ -25,6 +26,7 @@ import { UploadModule } from './upload/upload.module';
     // More specific route modules FIRST (before LivekitModule's wildcards)
     RecordingModule,
     UploadModule,
+    TranslateModule,
     // LivekitModule has @Get(':roomId') wildcard - must be after specific routes
     LivekitModule,
     McpModule,
