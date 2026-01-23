@@ -158,6 +158,8 @@ interface RoomContext {
     hostIdentities: Set<string>; // 다중 호스트 지원
     // Wake word 활성화 여부 (호스트가 토글 가능)
     wakeWordEnabled: boolean;
+    // 답변 TTS 활성화 여부 (호스트가 토글 가능, greeting은 영향 안 받음)
+    speakingEnabled: boolean;
     // isPublishing 시작 시간 (타임아웃 감지용)
     publishingStartTime: number;
     // 회의 주제
@@ -694,6 +696,16 @@ export class VoiceBotService {
                     return;
                 }
 
+                // 답변 TTS 토글 (호스트 전용, greeting은 영향 안 받음)
+                if (message.type === 'SPEAKING_TOGGLE') {
+                    // 호스트만 토글 가능
+                    if (participant?.identity && context.hostIdentities.has(participant.identity)) {
+                        context.speakingEnabled = message.enabled === true;
+                        this.logger.log(`[Speaking] ${context.speakingEnabled ? 'ON' : 'OFF'} by host`);
+                    }
+                    return;
+                }
+
                 // 호스트 전용 AI 쿼리 (Wake word 대체)
                 if (message.type === 'HOST_AI_QUERY') {
                     if (
@@ -1015,6 +1027,7 @@ export class VoiceBotService {
                 hostOnlyMode: true,
                 hostIdentities: new Set(), // 다중 호스트 지원
                 wakeWordEnabled: false,
+                speakingEnabled: false, // 답변 TTS 기본 비활성화 (greeting은 영향 안 받음)
                 // isPublishing 타임아웃 감지용
                 publishingStartTime: 0,
                 // 회의 주제
@@ -3408,6 +3421,24 @@ ${edgesDesc}
         // AI 음소거 상태면 TTS 스킵
         if (context.aiMuted) {
             this.logger.log(`[TTS 스킵] AI 음소거 상태 - 메시지: "${message.substring(0, 50)}..."`);
+            return;
+        }
+
+        // 말하기 OFF 상태면 TTS 대신 텍스트 카드 전송 (greeting은 별도 처리)
+        if (!context.speakingEnabled) {
+            this.logger.log(`[TTS 스킵] 말하기 OFF 상태 - 텍스트 카드 전송: "${message.substring(0, 50)}..."`);
+
+            // Siri 스타일: speaking 상태 브로드캐스트
+            await this.broadcastAiState(roomId, 'speaking', { response: message });
+
+            // 호스트에게 텍스트 카드 전송
+            await this.sendTextCardToHost(context, message);
+
+            // 일정 시간 후 idle 상태로 복귀 (텍스트 읽는 시간 고려)
+            const readingTime = Math.min(message.length * 50, 5000);
+            setTimeout(() => {
+                this.broadcastAiState(roomId, 'idle');
+            }, readingTime);
             return;
         }
 
