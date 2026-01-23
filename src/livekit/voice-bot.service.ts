@@ -3442,8 +3442,8 @@ ${edgesDesc}
             return;
         }
 
-        // 호스트 전용 모드면 TTS 대신 텍스트 카드 전송
-        if (context.hostOnlyMode && context.hostIdentities.size > 0) {
+        // 호스트 전용 모드면 TTS 대신 텍스트 카드 전송 (단, 말하기 ON이면 TTS 진행)
+        if (context.hostOnlyMode && context.hostIdentities.size > 0 && !context.speakingEnabled) {
             // 검색 결과와 함께 이미 전송된 경우 텍스트 카드 스킵
             if (options?.skipTextCard) {
                 this.logger.log(`[텍스트 카드 스킵] 검색 결과에 이미 포함됨`);
