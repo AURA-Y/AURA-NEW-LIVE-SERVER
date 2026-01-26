@@ -19,6 +19,29 @@ export interface SttResult {
     corrected: string;  // 교정 후 결과
 }
 
+/**
+ * STT(Speech-to-Text) 서비스
+ *
+ * 음성 인식 및 후처리 교정을 담당하는 핵심 서비스.
+ *
+ * ## 지원 프로바이더
+ * - Deepgram (기본값): nova-3 모델, 키워드 부스팅 지원
+ * - Azure Speech Services: PhraseListGrammar 힌트 지원
+ * - Clova STT: 네이버 클로바 음성인식
+ * - Daglo STT: 커스텀 STT 어댑터
+ *
+ * ## 후처리 파이프라인
+ * 1. 발음 유사 단어 교정 (Rule-based)
+ * 2. LLM 문맥 교정 (AWS Bedrock Claude Haiku)
+ *
+ * ## 키워드 힌트 시스템
+ * - 웨이크워드: 아우라, 헤이 아우라 등 (20+개 변형)
+ * - 지역명: 서울 주요 지역 (70+개)
+ * - 카테고리: 카페, 맛집, 날씨 등 (60+개)
+ *
+ * @author AURA Team
+ * @contributor 조명기 - 키워드 힌트 확장, 발음 교정 매핑 추가, 문서화
+ */
 @Injectable()
 export class SttService implements OnModuleDestroy {
     private readonly logger = new Logger(SttService.name);
@@ -50,12 +73,23 @@ export class SttService implements OnModuleDestroy {
 
     // 지역명 힌트
     private readonly LOCATION_HINTS = [
+        // 광역시/특별시
         '서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종',
+        // 서울 주요 지역
         '강남', '홍대', '신촌', '잠실', '여의도', '판교', '성수', '이태원',
         '명동', '종로', '압구정', '청담', '삼성', '역삼', '선릉', '건대',
         '합정', '망원', '연남', '을지로', '성북', '혜화', '대학로',
+        // 수도권
         '분당', '일산', '수원', '용인', '화성', '평택', '안양', '부천',
         '강서', '마포', '서초', '송파', '영등포', '용산', '동대문', '중구',
+        // 추가 인기 지역 (조명기)
+        '한남', '한남동', '이촌', '서래마을', '방배', '사당', '교대',
+        '노량진', '신림', '봉천', '낙성대', '서울대입구', '신대방',
+        '가로수길', '경리단길', '망리단길', '송리단길', '연트럴파크',
+        '북촌', '서촌', '익선동', '광장시장', '남대문', '동묘',
+        '뚝섬', '서울숲', '왕십리', '답십리', '장안동', '청량리',
+        '회기', '경희대', '외대', '고려대', '안암', '제기동',
+        '목동', '당산', '문래', '신도림', '구로', '가산', '금천',
     ];
 
     // 카테고리 키워드 힌트
@@ -76,6 +110,18 @@ export class SttService implements OnModuleDestroy {
         '날씨', '기온', '온도', '미세먼지', '우산',
         // 기타
         '추천', '알려줘', '찾아줘', '검색',
+        // 추가 카테고리 (조명기)
+        // 특수 카페
+        '애견카페', '고양이카페', '보드게임카페', '방탈출카페', '스터디카페',
+        '북카페', '루프탑', '테라스', '오션뷰', '한강뷰',
+        // 음식 종류
+        '한식', '중식', '일식', '양식', '이탈리안', '프렌치', '멕시칸',
+        '태국음식', '베트남음식', '인도음식', '퓨전', '오마카세',
+        '고기', '삼겹살', '소고기', '곱창', '막창', '회', '초밥', '횟집',
+        '국밥', '설렁탕', '감자탕', '순대국', '해장국', '칼국수', '냉면',
+        // 상황/목적
+        '데이트', '소개팅', '기념일', '생일', '모임', '단체', '혼밥', '혼술',
+        '비즈니스', '미팅', '조용한', '분위기좋은', '인스타', '사진',
     ];
 
     // 모든 힌트 합치기
@@ -159,6 +205,40 @@ export class SttService implements OnModuleDestroy {
         '헤이 어라': '헤이 아우라',
         '해 아우라': '헤이 아우라',
         '해 오라': '헤이 아우라',
+
+        // 추가 지역명 오인식 (조명기)
+        '이태원': '이태원',
+        '잇태원': '이태원',
+        '이테원': '이태원',
+        '한남동': '한남동',
+        '한남': '한남',
+        '압구정': '압구정',
+        '압꾸정': '압구정',
+        '청담동': '청담',
+        '가로수길': '가로수길',
+        '가로수 길': '가로수길',
+        '경리단길': '경리단길',
+        '경리단 길': '경리단길',
+        '망리단길': '망리단길',
+        '망리단 길': '망리단길',
+        '송리단길': '송리단길',
+        '송리단 길': '송리단길',
+
+        // 추가 카테고리 오인식 (조명기)
+        '브런치': '브런치',
+        '브런 치': '브런치',
+        '부런치': '브런치',
+        '애견카페': '애견카페',
+        '애견 카페': '애견카페',
+        '고양이카페': '고양이카페',
+        '고양이 카페': '고양이카페',
+        '스터디카페': '스터디카페',
+        '스터디 카페': '스터디카페',
+        '북카페': '북카페',
+        '북 카페': '북카페',
+        '루프탑': '루프탑',
+        '루프 탑': '루프탑',
+        '룹탑': '루프탑',
     };
 
     constructor(private configService: ConfigService) {
@@ -245,7 +325,18 @@ export class SttService implements OnModuleDestroy {
     // =====================================================
 
     /**
-     * 버퍼에서 음성 인식 + 후처리 교정
+     * 오디오 버퍼에서 음성 인식 수행 (교정 포함)
+     *
+     * @param audioBuffer - PCM 16bit, 16kHz, mono 포맷의 오디오 버퍼
+     * @param fileName - 로깅용 파일명
+     * @returns 후처리 교정이 적용된 텍스트
+     *
+     * @example
+     * ```typescript
+     * const audioBuffer = fs.readFileSync('audio.wav');
+     * const transcript = await sttService.transcribeFromBuffer(audioBuffer, 'audio.wav');
+     * console.log(transcript); // "아우라야 강남 카페 추천해줘"
+     * ```
      */
     async transcribeFromBuffer(audioBuffer: Buffer, fileName: string): Promise<string> {
         const rawTranscript = await this.rawTranscribeFromBuffer(audioBuffer, fileName);
@@ -300,9 +391,21 @@ export class SttService implements OnModuleDestroy {
     // =====================================================
 
     /**
-     * STT 결과 후처리
-     * 1. 발음 유사 단어 교정 (빠름)
-     * 2. LLM 문맥 교정 (정확)
+     * STT 결과 후처리 파이프라인
+     *
+     * 2단계 교정 시스템:
+     * 1단계: 발음 유사 단어 교정 (Rule-based, 빠름)
+     *   - PHONETIC_CORRECTIONS 맵 기반 문자열 치환
+     *   - 띄어쓰기 정규화
+     *
+     * 2단계: LLM 문맥 교정 (AI-based, 정확)
+     *   - 웨이크워드 오인식 감지 시 활성화
+     *   - AWS Bedrock Claude Haiku로 문맥 기반 교정
+     *   - 고유명사 보호 (학교명, 회사명 등)
+     *
+     * @param rawTranscript - STT 엔진에서 반환된 원본 텍스트
+     * @returns 교정된 텍스트
+     * @author 조명기
      */
     private async postProcess(rawTranscript: string): Promise<string> {
         if (!rawTranscript || rawTranscript.trim().length === 0) {
@@ -335,7 +438,20 @@ export class SttService implements OnModuleDestroy {
     }
 
     /**
-     * 발음 유사 단어 교정 (빠른 룰 기반)
+     * 발음 유사 단어 교정 (Rule-based)
+     *
+     * PHONETIC_CORRECTIONS 맵을 기반으로 STT 오인식 패턴을 교정합니다.
+     * O(n*m) 복잡도 (n: 텍스트 길이, m: 교정 규칙 수)
+     *
+     * 교정 대상:
+     * - 웨이크워드 오인식: 아울라 → 아우라, 오라 → 아우라
+     * - 지역명 오인식: 성숙 → 성수, 잇태원 → 이태원
+     * - 카테고리 오인식: 캬페 → 카페, 떡복이 → 떡볶이
+     * - 띄어쓰기 오류: 루프 탑 → 루프탑
+     *
+     * @param text - 교정할 원본 텍스트
+     * @returns 발음 교정이 적용된 텍스트
+     * @author 조명기
      */
     private applyPhoneticCorrections(text: string): string {
         let result = text;
