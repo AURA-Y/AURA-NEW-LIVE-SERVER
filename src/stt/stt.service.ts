@@ -40,7 +40,6 @@ export interface SttResult {
  * - 카테고리: 카페, 맛집, 날씨 등 (60+개)
  *
  * @author AURA Team
- * @contributor 조명기 - 키워드 힌트 확장, 발음 교정 매핑 추가, 문서화
  */
 @Injectable()
 export class SttService implements OnModuleDestroy {
@@ -82,7 +81,7 @@ export class SttService implements OnModuleDestroy {
         // 수도권
         '분당', '일산', '수원', '용인', '화성', '평택', '안양', '부천',
         '강서', '마포', '서초', '송파', '영등포', '용산', '동대문', '중구',
-        // 추가 인기 지역 (조명기)
+        // 추가 인기 지역
         '한남', '한남동', '이촌', '서래마을', '방배', '사당', '교대',
         '노량진', '신림', '봉천', '낙성대', '서울대입구', '신대방',
         '가로수길', '경리단길', '망리단길', '송리단길', '연트럴파크',
@@ -110,7 +109,7 @@ export class SttService implements OnModuleDestroy {
         '날씨', '기온', '온도', '미세먼지', '우산',
         // 기타
         '추천', '알려줘', '찾아줘', '검색',
-        // 추가 카테고리 (조명기)
+        // 추가 카테고리
         // 특수 카페
         '애견카페', '고양이카페', '보드게임카페', '방탈출카페', '스터디카페',
         '북카페', '루프탑', '테라스', '오션뷰', '한강뷰',
@@ -206,7 +205,7 @@ export class SttService implements OnModuleDestroy {
         '해 아우라': '헤이 아우라',
         '해 오라': '헤이 아우라',
 
-        // 추가 지역명 오인식 (조명기)
+        // 추가 지역명 오인식
         '이태원': '이태원',
         '잇태원': '이태원',
         '이테원': '이태원',
@@ -224,7 +223,7 @@ export class SttService implements OnModuleDestroy {
         '송리단길': '송리단길',
         '송리단 길': '송리단길',
 
-        // 추가 카테고리 오인식 (조명기)
+        // 추가 카테고리 오인식
         '브런치': '브런치',
         '브런 치': '브런치',
         '부런치': '브런치',
@@ -405,7 +404,6 @@ export class SttService implements OnModuleDestroy {
      *
      * @param rawTranscript - STT 엔진에서 반환된 원본 텍스트
      * @returns 교정된 텍스트
-     * @author 조명기
      */
     private async postProcess(rawTranscript: string): Promise<string> {
         if (!rawTranscript || rawTranscript.trim().length === 0) {
@@ -451,7 +449,6 @@ export class SttService implements OnModuleDestroy {
      *
      * @param text - 교정할 원본 텍스트
      * @returns 발음 교정이 적용된 텍스트
-     * @author 조명기
      */
     private applyPhoneticCorrections(text: string): string {
         let result = text;
