@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AuthModule } from './auth/auth.module';
 import { LivekitModule } from './livekit/livekit.module';
 import { McpModule } from './mcp/mcp.module';
 import { StudyModule } from './study/study.module';
@@ -23,6 +24,8 @@ import { TranslateModule } from './translate/translate.module';
     ConfigModule.forRoot({
       isGlobal: true,
     }),
+    // Auth module (global) - JWT validation, Room access check
+    AuthModule,
     // More specific route modules FIRST (before LivekitModule's wildcards)
     RecordingModule,
     UploadModule,

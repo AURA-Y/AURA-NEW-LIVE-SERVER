@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query, Inject } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, UseInterceptors, UploadedFile, HttpException, HttpStatus, Res, Delete, Query, Inject, UseGuards } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 import { LivekitService } from './livekit.service';
@@ -11,6 +11,7 @@ import { CreateRoomDto } from './dto/create-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { EmbedFilesDto } from './dto/embed-files.dto';
 import { RAG_CLIENT, IRagClient } from '../rag/rag-client.interface';
+import { RoomAccessGuard } from '../auth/guards/room-access.guard';
 
 @Controller('room')
 export class LivekitController {
@@ -254,7 +255,13 @@ export class LivekitController {
     return result;
   }
 
+  /**
+   * 방 참가 (토큰 발급)
+   * @security RoomAccessGuard - JWT 인증 + Room 접근 권한 확인
+   * 직접 링크로 POST 요청 시 권한 없으면 403 Forbidden
+   */
   @Post('join')
+  @UseGuards(RoomAccessGuard)
   async joinRoom(@Body() joinRoomDto: JoinRoomDto) {
     return this.livekitService.joinRoom(joinRoomDto);
   }
@@ -682,7 +689,13 @@ export class ApiController {
     return this.livekitService.listRooms();
   }
 
+  /**
+   * 토큰 발급 엔드포인트
+   * @security RoomAccessGuard - JWT 인증 + Room 접근 권한 확인
+   * 권한 없는 사용자의 직접 토큰 요청 차단
+   */
   @Post('token')
+  @UseGuards(RoomAccessGuard)
   async generateToken(@Body() joinRoomDto: JoinRoomDto) {
     return this.livekitService.joinRoom(joinRoomDto);
   } 
